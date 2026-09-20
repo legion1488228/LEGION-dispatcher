@@ -34,11 +34,33 @@ def validate_init_data(init_data: str, bot_token: str, max_age_seconds: int = 86
     if not auth_date or abs(int(time.time()) - auth_date) > max_age_seconds:
         raise HTTPException(status_code=401, detail="Telegram session expired")
 
-    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
+    # Telegram initData may contain the newer `signature` field.
+    # Support both formats: legacy HMAC input and the current format where
+    # `signature` is not part of the HMAC data-check-string.
     secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
-    calculated_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
 
-    if not hmac.compare_digest(calculated_hash, received_hash):
+    variants = []
+    variants.append(data)
+    if "signature" in data:
+        without_signature = dict(data)
+        without_signature.pop("signature", None)
+        variants.append(without_signature)
+
+    valid = False
+    for variant in variants:
+        data_check_string = "\n".join(
+            f"{k}={v}" for k, v in sorted(variant.items())
+        )
+        calculated_hash = hmac.new(
+            secret_key,
+            data_check_string.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        if hmac.compare_digest(calculated_hash, received_hash):
+            valid = True
+            break
+
+    if not valid:
         raise HTTPException(status_code=401, detail="Invalid Telegram signature")
 
     try:
