@@ -53,16 +53,32 @@ def _seed_gbu_agents():
     try:
         items = json.loads(seed_path.read_text(encoding="utf-8"))
         with Session(engine) as db:
-            existing = int(db.execute(select(func.count(GbuAgentContact.id))).scalar_one())
-            if existing:
-                return
+            # Upsert instead of "seed only when empty". This lets corrected
+            # GBU names/phones reach an already running Railway database after
+            # an application update, while preserving any manually added rows.
+            existing_rows = db.execute(select(GbuAgentContact)).scalars().all()
+            by_name = {str(row.full_name).strip(): row for row in existing_rows}
             for item in items:
-                db.add(GbuAgentContact(
-                    full_name=str(item.get("full_name") or "").strip(),
-                    phone=str(item.get("phone") or "").strip(),
-                    source_page=item.get("source_page"),
-                    active=True,
-                ))
+                full_name = str(item.get("full_name") or "").strip()
+                phone = str(item.get("phone") or "").strip()
+                if not full_name:
+                    continue
+                row = by_name.get(full_name)
+                if row:
+                    if phone:
+                        row.phone = phone
+                    if item.get("source_page") is not None:
+                        row.source_page = item.get("source_page")
+                    row.active = True
+                else:
+                    row = GbuAgentContact(
+                        full_name=full_name,
+                        phone=phone,
+                        source_page=item.get("source_page"),
+                        active=True,
+                    )
+                    db.add(row)
+                    by_name[full_name] = row
             db.commit()
     except Exception:
         import logging
@@ -1353,7 +1369,7 @@ async def gbu_ocr(
     return {
         "raw_text": raw,
         "drafts": drafts,
-        "warning": "Проверьте строки перед сохранением. Время в таблице считается подачей; выдача рассчитана +30 минут.",
+        "warning": "Таблица прочитана по отдельным ячейкам: первые 2 столбца и правый служебный код игнорируются; время = быть, выдача = +30 минут; белый состав = 4, зелёный = 6. Проверьте черновики перед сохранением.",
     }
 
 
