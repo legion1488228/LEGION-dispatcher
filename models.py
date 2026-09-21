@@ -30,6 +30,8 @@ class Employee(Base):
     group_code: Mapped[str] = mapped_column(String(30), index=True)  # brigadier/main/cashless/reserve
     height_cm: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     has_car: Mapped[bool] = mapped_column(Boolean, default=False)
+    metro: Mapped[str] = mapped_column(String(100), default="")
+    is_cashier: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -147,4 +149,21 @@ class GbuAgentContact(Base):
     phone: Mapped[str] = mapped_column(String(40), default="")
     source_page: Mapped[int | None] = mapped_column(Integer, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CashEntry(Base):
+    __tablename__ = "cash_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    work_date: Mapped[date] = mapped_column(Date, index=True)
+    brigadier_tg_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    brigadier_name: Mapped[str] = mapped_column(String(160), default="")
+    category: Mapped[str] = mapped_column(String(20), default="standard", index=True)
+    team_size: Mapped[int] = mapped_column(Integer, default=4)
+    commission_rub: Mapped[int] = mapped_column(Integer, default=0)
+    kickback_rub: Mapped[int] = mapped_column(Integer, default=0)
+    reserve_count: Mapped[int] = mapped_column(Integer, default=0)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
