@@ -22,8 +22,24 @@ async def send_telegram_message(chat_id: int, text: str, reply_markup: dict | No
     return True
 
 
+def _contact_suffix(employee) -> str:
+    parts = []
+    if getattr(employee, "phone", ""):
+        parts.append(escape(employee.phone))
+    username = (getattr(employee, "telegram_username", "") or "").lstrip("@")
+    tg_id = getattr(employee, "tg_id", None)
+    if username:
+        parts.append(f'<a href="https://t.me/{escape(username)}">Telegram</a>')
+    elif tg_id:
+        parts.append(f'<a href="tg://user?id={int(tg_id)}">Telegram</a>')
+    return " · " + " · ".join(parts) if parts else ""
+
+
 def brigadier_order_text(order, brigadier, members) -> str:
-    member_text = "\n".join(f"• {escape(x.full_name)} — {x.height_cm or '—'} см" for x in members)
+    member_text = "\n".join(
+        f"• {escape(x.full_name)} — {x.height_cm or '—'} см{_contact_suffix(x)}"
+        for x in members
+    )
     extra = f"\n<b>Дополнительно:</b> откат {order.kickback_rub} ₽" if order.kickback_rub else ""
     return (
         "<b>📋 НАЗНАЧЕН ЗАКАЗ</b>\n\n"

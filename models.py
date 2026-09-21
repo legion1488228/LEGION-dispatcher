@@ -26,6 +26,7 @@ class Employee(Base):
     tg_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, nullable=True, index=True)
     full_name: Mapped[str] = mapped_column(String(160), index=True)
     phone: Mapped[str] = mapped_column(String(40), default="")
+    telegram_username: Mapped[str] = mapped_column(String(80), default="")
     group_code: Mapped[str] = mapped_column(String(30), index=True)  # brigadier/main/cashless/reserve
     height_cm: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     has_car: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -136,3 +137,14 @@ class ImportLog(Base):
     raw_text: Mapped[str] = mapped_column(Text, default="")
     result_json: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class GbuAgentContact(Base):
+    __tablename__ = "gbu_agent_contacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    full_name: Mapped[str] = mapped_column(String(180), unique=True, index=True)
+    phone: Mapped[str] = mapped_column(String(40), default="")
+    source_page: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
