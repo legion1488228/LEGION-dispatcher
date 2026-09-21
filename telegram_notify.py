@@ -35,6 +35,28 @@ def _contact_suffix(employee) -> str:
     return " · " + " · ".join(parts) if parts else ""
 
 
+def _agent_contact_block(order) -> str:
+    name = escape(getattr(order, "agent_name", "") or "—")
+    phone = escape(getattr(order, "agent_phone", "") or "—")
+    source = str(getattr(order, "source", "") or "").lower()
+
+    lines = [
+        f"<b>Агент:</b> {name}",
+        f"<b>Телефон агента:</b> {phone}",
+    ]
+
+    # Telegram contact is shown to brigadier ONLY for private orders.
+    if source == "private":
+        tg_id = getattr(order, "agent_tg_id", None)
+        telegram = (
+            f'<a href="tg://user?id={int(tg_id)}">Открыть Telegram агента</a>'
+            if tg_id else "—"
+        )
+        lines.append(f"<b>Telegram агента:</b> {telegram}")
+
+    return "\n".join(lines)
+
+
 def brigadier_order_text(order, brigadier, members) -> str:
     member_text = "\n".join(
         f"• {escape(x.full_name)} — {x.height_cm or '—'} см{_contact_suffix(x)}"
@@ -49,6 +71,7 @@ def brigadier_order_text(order, brigadier, members) -> str:
         f"<b>Подача:</b> {order.arrival_time.strftime('%H:%M') if order.arrival_time else '—'}\n"
         f"<b>Категория:</b> {escape(order.category.title())}\n"
         f"<b>Маршрут:</b> {escape(order.route or '—')}\n\n"
+        f"{_agent_contact_block(order)}\n\n"
         f"<b>Бригадир:</b> {escape(brigadier.full_name)}\n"
         f"<b>Состав:</b>\n{member_text or '—'}"
         f"{extra}\n\n"
@@ -57,10 +80,21 @@ def brigadier_order_text(order, brigadier, members) -> str:
 
 
 def agent_brigadier_text(order, brigadier, contact_time: str) -> str:
-    return (
-        "<b>✅ БРИГАДА НАЗНАЧЕНА</b>\n\n"
-        f"<b>Умерший:</b> {escape(order.deceased_name)}\n"
-        f"<b>Бригадир:</b> {escape(brigadier.full_name)}\n"
-        f"<b>Телефон:</b> {escape(brigadier.phone)}\n"
+    source = str(getattr(order, "source", "") or "").lower()
+
+    lines = [
+        "<b>✅ БРИГАДА НАЗНАЧЕНА</b>",
+        "",
+        f"<b>Умерший:</b> {escape(order.deceased_name)}",
+        f"<b>Бригадир:</b> {escape(brigadier.full_name)}",
+    ]
+
+    # Brigadier phone is sent to the agent ONLY for private orders.
+    if source == "private":
+        lines.append(f"<b>Телефон:</b> {escape(brigadier.phone)}")
+
+    lines.append(
         f"<b>Связь утром:</b> {escape(contact_time or 'по договорённости')}"
     )
+    return "\n".join(lines)
+

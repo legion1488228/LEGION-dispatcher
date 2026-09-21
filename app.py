@@ -594,6 +594,22 @@ def create_order(data: OrderCreate, db: Session = Depends(get_db), user: Telegra
     return _order_dict(order, db)
 
 
+def _phone_key(value: str) -> str:
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    return digits[-10:] if len(digits) >= 10 else digits
+
+
+def _registered_agent_tg_id_by_phone(db: Session, phone: str):
+    wanted = _phone_key(phone)
+    if not wanted:
+        return None
+    rows = db.execute(select(Agent).where(Agent.active.is_(True))).scalars().all()
+    for row in rows:
+        if _phone_key(row.phone) == wanted:
+            return row.tg_id
+    return None
+
+
 def _create_order(db: Session, data: OrderCreate) -> Order:
     kickback = data.kickback_rub
     if not kickback and "марин" in data.organization.lower():
@@ -611,7 +627,13 @@ def _create_order(db: Session, data: OrderCreate) -> Order:
         organization=data.organization.strip(),
         notes=data.notes.strip(),
         kickback_rub=kickback,
-        agent_tg_id=data.agent_tg_id,
+        agent_tg_id=(
+            _registered_agent_tg_id_by_phone(
+                db,
+                data.other_agent_phone.strip() or data.agent_phone.strip(),
+            )
+            or data.agent_tg_id
+        ),
         agent_name=data.agent_name.strip(),
         agent_phone=data.agent_phone.strip(),
         other_agent_phone=data.other_agent_phone.strip(),
