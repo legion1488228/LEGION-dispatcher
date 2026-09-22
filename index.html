@@ -548,7 +548,8 @@ function personRowCandidate(x){return `<div class="person-row ${x.selected?'sele
   <div class="check">✓</div><div class="person-main"><b>${esc(x.display_name||x.full_name)} ${x.is_brigadier?'(бригадир)':''}</b><small>${esc(x.group_label)} · ${x.workload}/2 заказа</small>${contactButtons(x)}</div><div class="person-meta">${x.height_cm||'—'} см ${x.has_car?'🚗':''}</div></div>`}
 
 function showModal(title, body) {qs('#modal').innerHTML=`<div class="modal-head"><h3>${esc(title)}</h3><button id="closeModal" class="close-btn">×</button></div>${body}`;qs('#modal').classList.remove('hidden');qs('#modalBackdrop').classList.remove('hidden');qs('#closeModal').onclick=closeModal}
-function closeModal(){qs('#modal').classList.add('hidden');qs('#modalBackdrop').classList.add('hidden')}
+let cashRefreshTimer=null;
+function closeModal(){if(cashRefreshTimer){clearInterval(cashRefreshTimer);cashRefreshTimer=null}qs('#modal').classList.add('hidden');qs('#modalBackdrop').classList.add('hidden')}
 
 async function loadReadiness(){
   const r=await api(`/api/readiness/summary?work_date=${state.selectedDate}`);
@@ -736,14 +737,112 @@ async function openGbuAgents(){
 
 async function openCashTable(){
   if(!state.bootstrap?.is_owner){toast('Касса доступна только владельцу');return}
-  showModal('💰 Касса', `<p class="muted">Таблица доступна только владельцу. Дата берётся из выбранного дня Диспетчерской.</p><div id="cashTableBody"><div class="empty">Загрузка…</div></div>`);
-  try{
-    const d=await api(`/api/cash?work_date=${state.selectedDate}`);
-    const rub=n=>new Intl.NumberFormat('ru-RU').format(Number(n||0))+' ₽';
-    const rows=(d.rows||[]).map(x=>`<div class="employee-row"><div class="name"><b>${esc(x.brigadier_name)}</b><small>${esc(x.category_label)} · ${x.team_size} чел${x.reserve_count?` · резерв ${x.reserve_count}`:''}</small><div class="muted">Касса ${rub(x.commission_rub)} · откат отдельно ${rub(x.kickback_rub)}</div></div><div class="height">${rub(x.commission_rub)}</div><button class="contact-btn danger" data-cash-del="${x.id}">Удалить</button></div>`).join('');
-    qs('#cashTableBody').innerHTML=`<div class="summary-grid compact"><div class="metric good"><b>${rub(d.day.commission_rub)}</b><span>Касса за день</span></div><div class="metric"><b>${rub(d.day.kickback_rub)}</b><span>Откат отдельно</span></div></div><div class="attention"><h4>Период ${fmtDate(d.period.start)} — ${fmtDate(d.period.end)}</h4><p>Касса: <b>${rub(d.period.commission_rub)}</b> · Откат отдельно: <b>${rub(d.period.kickback_rub)}</b></p></div><div class="list">${rows||'<div class="empty">На выбранную дату записей нет</div>'}</div>`;
-    qsa('[data-cash-del]').forEach(btn=>btn.onclick=async()=>{if(!confirm('Удалить запись кассы?'))return;await api(`/api/cash/${btn.dataset.cashDel}`,{method:'DELETE'});toast('Удалено');openCashTable()});
-  }catch(e){qs('#cashTableBody').innerHTML=`<div class="empty">${esc(e.message)}</div>`}
+
+  showModal('💰 Касса', `
+    <p class="muted">По каждому бригадиру показана касса за каждый день. Откат всегда считается отдельно. После изменения кассы бригадиром таблица обновляется автоматически.</p>
+    <div id="cashTableBody"><div class="empty">Загрузка…</div></div>
+  `);
+
+  const rub=n=>new Intl.NumberFormat('ru-RU').format(Number(n||0))+' ₽';
+
+  async function drawCash(){
+    const body=qs('#cashTableBody');
+    if(!body) return;
+    try{
+      const [ledger, selectedDay]=await Promise.all([
+        api(`/api/cash/ledger?on_date=${state.selectedDate}`),
+        api(`/api/cash?work_date=${state.selectedDate}`)
+      ]);
+      if(!qs('#cashTableBody')) return;
+
+      const brigadiers=ledger.brigadiers||[];
+      const days=ledger.days||[];
+      const totalsByBrig=new Map((ledger.brigadier_totals||[]).map(x=>[String(x.brigadier_tg_id),x]));
+
+      const matrix=brigadiers.length ? `
+        <div style="overflow:auto;border:1px solid var(--line);border-radius:16px;margin:10px 0 12px">
+          <table style="border-collapse:separate;border-spacing:0;min-width:max-content;width:100%;font-size:11px">
+            <thead>
+              <tr>
+                <th style="position:sticky;left:0;z-index:3;background:#18181c;padding:10px;border-bottom:1px solid var(--line);text-align:left">Дата</th>
+                ${brigadiers.map(b=>`<th style="background:#18181c;padding:10px;border-bottom:1px solid var(--line);min-width:120px">${esc(b.name)}</th>`).join('')}
+                <th style="position:sticky;right:0;z-index:3;background:#211d15;color:var(--gold);padding:10px;border-bottom:1px solid var(--line);min-width:130px">Итого за день</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${days.map(day=>`
+                <tr>
+                  <td style="position:sticky;left:0;z-index:2;background:#121215;padding:9px 10px;border-bottom:1px solid var(--line);font-weight:800">${fmtDate(day.work_date)}</td>
+                  ${(day.cells||[]).map(cell=>`
+                    <td style="padding:8px 10px;border-bottom:1px solid var(--line);text-align:center">
+                      <b>${cell.commission_rub?rub(cell.commission_rub):'—'}</b>
+                      ${cell.kickback_rub?`<small style="display:block;color:var(--muted);margin-top:3px">откат ${rub(cell.kickback_rub)}</small>`:''}
+                    </td>
+                  `).join('')}
+                  <td style="position:sticky;right:0;z-index:2;background:#19170f;padding:8px 10px;border-bottom:1px solid var(--line);text-align:center">
+                    <b style="color:var(--gold)">${rub(day.day?.commission_rub||0)}</b>
+                    <small style="display:block;color:var(--muted);margin-top:3px">откат ${rub(day.day?.kickback_rub||0)}</small>
+                  </td>
+                </tr>
+              `).join('')}
+              <tr>
+                <td style="position:sticky;left:0;z-index:2;background:#1b1b1f;padding:10px;font-weight:900">Итого</td>
+                ${brigadiers.map(b=>{
+                  const t=totalsByBrig.get(String(b.tg_id))||{};
+                  return `<td style="background:#1b1b1f;padding:10px;text-align:center"><b>${rub(t.commission_rub||0)}</b><small style="display:block;color:var(--muted);margin-top:3px">откат ${rub(t.kickback_rub||0)}</small></td>`
+                }).join('')}
+                <td style="position:sticky;right:0;z-index:3;background:#2a251b;padding:10px;text-align:center"><b style="color:var(--gold)">${rub(ledger.period?.commission_rub||0)}</b><small style="display:block;color:var(--muted);margin-top:3px">откат ${rub(ledger.period?.kickback_rub||0)}</small></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      ` : '<div class="empty">Кассовые бригадиры пока не добавлены</div>';
+
+      const dayRows=(selectedDay.rows||[]).map(x=>`
+        <div class="employee-row">
+          <div class="name">
+            <b>${esc(x.brigadier_name)}</b>
+            <small>${esc(x.category_label)} · ${x.team_size} чел${x.reserve_count?` · резерв ${x.reserve_count}`:''}</small>
+            <div class="muted">Касса ${rub(x.commission_rub)} · откат отдельно ${rub(x.kickback_rub)}</div>
+          </div>
+          <button class="contact-btn danger" data-cash-del="${x.id}">Удалить</button>
+        </div>
+      `).join('');
+
+      body.innerHTML=`
+        <div class="summary-grid compact">
+          <div class="metric good"><b>${rub(ledger.period?.commission_rub||0)}</b><span>Касса периода</span></div>
+          <div class="metric"><b>${rub(ledger.period?.kickback_rub||0)}</b><span>Откат отдельно</span></div>
+        </div>
+        <div class="attention">
+          <h4>${fmtDate(ledger.start)} — ${fmtDate(ledger.end)}</h4>
+          <p>Каждая строка — один день. Каждый столбец — отдельный бригадир. Справа всегда общий итог за день.</p>
+        </div>
+        ${matrix}
+        <div class="section-head" style="margin-top:16px">
+          <div><h2 style="font-size:16px">Записи за ${fmtDate(state.selectedDate)}</h2><p class="muted">Детализация выбранного дня</p></div>
+          <button class="secondary" id="cashRefreshNow">↻</button>
+        </div>
+        <div class="list">${dayRows||'<div class="empty">На выбранную дату записей нет</div>'}</div>
+      `;
+
+      qsa('[data-cash-del]',body).forEach(btn=>btn.onclick=async()=>{
+        if(!confirm('Удалить запись кассы?')) return;
+        await api(`/api/cash/${btn.dataset.cashDel}`,{method:'DELETE'});
+        toast('Удалено');
+        await drawCash();
+      });
+      const refresh=qs('#cashRefreshNow');
+      if(refresh) refresh.onclick=drawCash;
+    }catch(e){
+      if(qs('#cashTableBody')) qs('#cashTableBody').innerHTML=`<div class="empty">${esc(e.message)}</div>`;
+    }
+  }
+
+  await drawCash();
+  cashRefreshTimer=setInterval(()=>{
+    if(qs('#cashTableBody')) drawCash();
+  },10000);
 }
 
 // Events
