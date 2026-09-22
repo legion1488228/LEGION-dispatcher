@@ -138,6 +138,11 @@ const state = {
 const qs = (s, root=document) => root.querySelector(s);
 const qsa = (s, root=document) => [...root.querySelectorAll(s)];
 const fmtDate = (iso) => new Date(`${iso}T12:00:00`).toLocaleDateString('ru-RU',{day:'2-digit',month:'long',weekday:'short'});
+const fmtMonthYear = (iso) => {
+  const s = new Date(`${iso}T12:00:00`).toLocaleDateString('ru-RU',{month:'long',year:'numeric'});
+  return s.charAt(0).toUpperCase()+s.slice(1);
+};
+const dayNumber = (iso) => String(new Date(`${iso}T12:00:00`).getDate());
 const esc = (s='') => String(s).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 
 async function copyText(value, showToast=true){
@@ -576,8 +581,39 @@ async function loadReadiness(){
 }
 
 async function loadEmployees(){
-  const params=state.employeeGroup==='all'?'':`?group=${state.employeeGroup}`; const list=await api(`/api/employees${params}`); const v=state.employeeSearch.toLowerCase(); const filtered=list.filter(x=>x.full_name.toLowerCase().includes(v));
-  qs('#employeesList').innerHTML=filtered.length?filtered.map(x=>`<div class="employee-row"><div class="name"><b>${esc(x.display_name||x.full_name)}</b><small>${esc(x.group_label)}${x.telegram_username?` · @${esc(x.telegram_username)}`:''}</small>${contactButtons(x)}</div><div class="height">${x.height_cm||'—'} см</div><div class="car">${x.has_car?'🚗':''}</div></div>`).join(''):`<div class="empty">Ничего не найдено</div>`; wireContactButtons(qs('#employeesList'));
+  const params=state.employeeGroup==='all'?'':`?group=${state.employeeGroup}`;
+  const list=await api(`/api/employees${params}`);
+  const v=state.employeeSearch.toLowerCase();
+  const ownerTgId=Number(state.bootstrap?.user?.id||0);
+
+  const filtered=list
+    .filter(x=>x.full_name.toLowerCase().includes(v))
+    .sort((a,b)=>{
+      const aOwner=ownerTgId && Number(a.tg_id||0)===ownerTgId;
+      const bOwner=ownerTgId && Number(b.tg_id||0)===ownerTgId;
+      if(aOwner!==bOwner) return aOwner ? -1 : 1;
+      return String(a.display_name||a.full_name||'').localeCompare(
+        String(b.display_name||b.full_name||''),
+        'ru',
+        {sensitivity:'base'}
+      );
+    });
+
+  qs('#employeesList').innerHTML=filtered.length
+    ? filtered.map((x,i)=>`
+      <div class="employee-row">
+        <div class="name">
+          <b>${i+1}. ${esc(x.display_name||x.full_name)}</b>
+          <small>${esc(x.group_label)}${x.telegram_username?` · @${esc(x.telegram_username)}`:''}</small>
+          ${contactButtons(x)}
+        </div>
+        <div class="height">${x.height_cm||'—'} см</div>
+        <div class="car">${x.has_car?'🚗':''}</div>
+      </div>
+    `).join('')
+    : `<div class="empty">Ничего не найдено</div>`;
+
+  wireContactButtons(qs('#employeesList'));
 }
 
 async function loadControl(){
@@ -764,7 +800,7 @@ async function openCashTable(){
           <table style="border-collapse:separate;border-spacing:0;min-width:max-content;width:100%;font-size:11px">
             <thead>
               <tr>
-                <th style="position:sticky;left:0;z-index:3;background:#18181c;padding:10px;border-bottom:1px solid var(--line);text-align:left">Дата</th>
+                <th style="position:sticky;left:0;z-index:3;background:#18181c;padding:10px 6px;border-bottom:1px solid var(--line);text-align:center;min-width:42px">День</th>
                 ${brigadiers.map(b=>`<th style="background:#18181c;padding:10px;border-bottom:1px solid var(--line);min-width:120px">${esc(b.name)}</th>`).join('')}
                 <th style="position:sticky;right:0;z-index:3;background:#211d15;color:var(--gold);padding:10px;border-bottom:1px solid var(--line);min-width:130px">Итого за день</th>
               </tr>
@@ -772,7 +808,7 @@ async function openCashTable(){
             <tbody>
               ${days.map(day=>`
                 <tr>
-                  <td style="position:sticky;left:0;z-index:2;background:#121215;padding:9px 10px;border-bottom:1px solid var(--line);font-weight:800">${fmtDate(day.work_date)}</td>
+                  <td style="position:sticky;left:0;z-index:2;background:#121215;padding:9px 6px;border-bottom:1px solid var(--line);font-weight:900;text-align:center;min-width:42px">${dayNumber(day.work_date)}</td>
                   ${(day.cells||[]).map(cell=>`
                     <td style="padding:8px 10px;border-bottom:1px solid var(--line);text-align:center">
                       <b>${cell.commission_rub?rub(cell.commission_rub):'—'}</b>
@@ -815,8 +851,8 @@ async function openCashTable(){
           <div class="metric"><b>${rub(ledger.period?.kickback_rub||0)}</b><span>Откат отдельно</span></div>
         </div>
         <div class="attention">
-          <h4>${fmtDate(ledger.start)} — ${fmtDate(ledger.end)}</h4>
-          <p>Каждая строка — один день. Каждый столбец — отдельный бригадир. Справа всегда общий итог за день.</p>
+          <h4>${fmtMonthYear(ledger.start)}</h4>
+          <p>Период: ${dayNumber(ledger.start)}–${dayNumber(ledger.end)}. Каждый столбец — отдельный бригадир.</p>
         </div>
         ${matrix}
         <div class="section-head" style="margin-top:16px">
