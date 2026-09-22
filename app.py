@@ -237,6 +237,11 @@ class BrigadierCashPatch(BaseModel):
     reserve_count: int | None = Field(default=None, ge=0, le=10)
 
 
+class BrigadierCashDayDelete(BaseModel):
+    tg_id: int
+    work_date: date
+
+
 class ParseAgentText(BaseModel):
     text: str
     organization_profile: str = ""
@@ -1223,6 +1228,41 @@ def bot_create_cash_entry(data: CashEntryCreate, db: Session = Depends(get_db)):
     start, end = _period_bounds(data.work_date)
     period_rows = db.execute(select(CashEntry).where(CashEntry.brigadier_tg_id == data.tg_id, CashEntry.work_date >= start, CashEntry.work_date <= end)).scalars().all()
     return {"ok": True, "entry": _cash_row_dict(row), "period": {"start": start.isoformat(), "end": end.isoformat(), "commission_rub": sum(x.commission_rub or 0 for x in period_rows), "kickback_rub": sum(x.kickback_rub or 0 for x in period_rows), "cash_rub": sum(x.commission_rub or 0 for x in period_rows), "total_rub": sum(x.commission_rub or 0 for x in period_rows), "entries": len(period_rows)}}
+
+
+@app.post("/api/bot/cash/day/delete", dependencies=[Depends(_bot_key)])
+def bot_delete_own_cash_day(data: BrigadierCashDayDelete, db: Session = Depends(get_db)):
+    emp = db.execute(
+        select(Employee).where(
+            Employee.tg_id == data.tg_id,
+            Employee.group_code == "brigadier",
+        )
+    ).scalar_one_or_none()
+    if not emp or not emp.active or not emp.is_cashier:
+        raise HTTPException(403, "Удаление кассы недоступно")
+
+    rows = db.execute(
+        select(CashEntry).where(
+            CashEntry.brigadier_tg_id == data.tg_id,
+            CashEntry.work_date == data.work_date,
+        )
+    ).scalars().all()
+
+    deleted = len(rows)
+    commission_rub = sum(int(row.commission_rub or 0) for row in rows)
+    kickback_rub = sum(int(row.kickback_rub or 0) for row in rows)
+
+    for row in rows:
+        db.delete(row)
+    db.commit()
+
+    return {
+        "ok": True,
+        "work_date": data.work_date.isoformat(),
+        "deleted": deleted,
+        "commission_rub": commission_rub,
+        "kickback_rub": kickback_rub,
+    }
 
 
 @app.get("/api/bot/cash/period", dependencies=[Depends(_bot_key)])
