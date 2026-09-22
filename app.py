@@ -242,6 +242,15 @@ class BrigadierCashDayDelete(BaseModel):
     work_date: date
 
 
+class BrigadierCashEntryDelete(BaseModel):
+    tg_id: int
+
+
+class BrigadierCashDeleteRequest(BaseModel):
+    tg_id: int
+    entry_id: int
+
+
 class ParseAgentText(BaseModel):
     text: str
     organization_profile: str = ""
@@ -1263,6 +1272,51 @@ def bot_delete_own_cash_day(data: BrigadierCashDayDelete, db: Session = Depends(
         "commission_rub": commission_rub,
         "kickback_rub": kickback_rub,
     }
+
+
+@app.post("/api/bot/cash/delete-entry", dependencies=[Depends(_bot_key)])
+def bot_delete_cash_entry_simple(data: BrigadierCashDeleteRequest, db: Session = Depends(get_db)):
+    row = db.get(CashEntry, int(data.entry_id))
+    if not row:
+        raise HTTPException(404, "Запись кассы не найдена")
+    if int(row.brigadier_tg_id) != int(data.tg_id):
+        raise HTTPException(403, "Нельзя удалить чужую запись кассы")
+
+    payload = {
+        "id": int(row.id),
+        "work_date": row.work_date.isoformat(),
+        "commission_rub": int(row.commission_rub or 0),
+        "kickback_rub": int(row.kickback_rub or 0),
+    }
+    db.delete(row)
+    db.commit()
+    return {"ok": True, "deleted": payload}
+
+
+@app.post("/api/bot/cash/{entry_id}/delete", dependencies=[Depends(_bot_key)])
+def bot_delete_own_cash_entry(entry_id: int, data: BrigadierCashEntryDelete, db: Session = Depends(get_db)):
+    row = db.get(CashEntry, entry_id)
+    if not row or int(row.brigadier_tg_id) != int(data.tg_id):
+        raise HTTPException(404, "Запись кассы не найдена")
+
+    emp = db.execute(
+        select(Employee).where(
+            Employee.tg_id == data.tg_id,
+            Employee.group_code == "brigadier",
+        )
+    ).scalar_one_or_none()
+    if not emp or not emp.active or not emp.is_cashier:
+        raise HTTPException(403, "Удаление кассы недоступно")
+
+    payload = {
+        "id": row.id,
+        "work_date": row.work_date.isoformat(),
+        "commission_rub": int(row.commission_rub or 0),
+        "kickback_rub": int(row.kickback_rub or 0),
+    }
+    db.delete(row)
+    db.commit()
+    return {"ok": True, "deleted": payload}
 
 
 @app.get("/api/bot/cash/period", dependencies=[Depends(_bot_key)])
