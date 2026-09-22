@@ -174,10 +174,14 @@ async function copyText(value, showToast=true){
   }
 }
 
+function visibleOrderNumber(o){
+  return o?.display_number || o?.daily_number || o?.id || '—';
+}
+
 function telegramOrderText(o){
   const dateText=o.work_date ? o.work_date.split('-').reverse().join('.') : '—';
   const lines=[
-    `Заказ №${o.id}`,
+    `Заказ №${visibleOrderNumber(o)}`,
     `Дата: ${dateText}`,
     `Категория заказа: ${o.category_label||'—'}`,
     `Агент: ${o.agent_name||'—'}`,
@@ -300,8 +304,8 @@ async function loadOrders() {
   el.innerHTML = orders.map(o => `
     <article class="order-card ${statusColorClass(o)}" data-order-id="${o.id}">
       <div class="order-top">
-        <div><div class="order-number">Заказ №${o.id}</div><div class="badges"><span class="badge ${o.source}">${esc(o.source_label)}</span></div></div>
-        <div class="order-actions-top"><div class="status-badge">${esc(o.status_label)}</div><button class="delete-card-btn" data-delete-order="${o.id}" aria-label="Удалить заказ">🗑</button></div>
+        <div><div class="order-number">Заказ №${visibleOrderNumber(o)}</div><div class="badges"><span class="badge ${o.source}">${esc(o.source_label)}</span></div></div>
+        <div class="order-actions-top"><div class="status-badge">${esc(o.status_label)}</div><button class="delete-card-btn" data-delete-order="${o.id}" data-display-number="${visibleOrderNumber(o)}" aria-label="Удалить заказ">🗑</button></div>
       </div>
       <div class="data-grid" style="margin-top:10px">
         <div class="data-item"><small>Дата</small><b>${fmtDate(o.work_date)}</b></div>
@@ -321,17 +325,18 @@ async function loadOrders() {
     </article>`).join('');
   qsa('[data-delete-order]', el).forEach(btn => btn.onclick = async (e) => {
     e.stopPropagation();
-    await deleteOrderCompletely(Number(btn.dataset.deleteOrder));
+    await deleteOrderCompletely(Number(btn.dataset.deleteOrder), btn.dataset.displayNumber);
   });
   qsa('.order-card', el).forEach(card => card.onclick = () => openOrder(Number(card.dataset.orderId)));
 }
 
-async function deleteOrderCompletely(id) {
-  if (!confirm(`Удалить заказ №${id} полностью?\n\nЗаказ и назначенный состав будут удалены без возможности восстановления.`)) return false;
+async function deleteOrderCompletely(id, displayNumber=null) {
+  const shown=displayNumber || id;
+  if (!confirm(`Удалить заказ №${shown} полностью?\n\nЗаказ и назначенный состав будут удалены без возможности восстановления.`)) return false;
   try {
     await api(`/api/orders/${id}`, {method:'DELETE'});
     if (state.currentOrder && Number(state.currentOrder.id) === Number(id)) closeDrawer();
-    toast(`Заказ №${id} удалён`);
+    toast(`Заказ №${shown} удалён`);
     await loadBootstrap(state.selectedDate);
     return true;
   } catch(e) {
@@ -351,7 +356,7 @@ function orderDrawerHtml(o) {
   const members = o.members.length ? o.members.map(x=>`<div class="person-row"><div class="person-main"><b>${esc(x.display_name||x.full_name)}</b><small>${esc(x.group_label)}</small>${contactButtons(x)}</div><div class="person-meta">${x.height_cm||'—'} см ${x.has_car?'🚗':''}</div></div>`).join('') : `<div class="empty">Состав пока не выбран</div>`;
   return `
     <div class="handle"></div>
-    <div class="order-top"><div><h3>Заказ №${o.id}</h3><p class="muted">${esc(o.source_label)} · ${esc(o.status_label)}</p></div><button class="close-btn" id="closeDrawer">×</button></div>
+    <div class="order-top"><div><h3>Заказ №${visibleOrderNumber(o)}</h3><p class="muted">${esc(o.source_label)} · ${esc(o.status_label)}</p></div><button class="close-btn" id="closeDrawer">×</button></div>
     <div class="drawer-section data-grid">
       <div class="data-item"><small>Дата</small><b>${fmtDate(o.work_date)}</b></div>
       <div class="data-item"><small>Категория заказа</small><b>${esc(o.category_label)}</b></div>
@@ -589,16 +594,31 @@ function openReadinessPeople(groupLabel,statusLabel,people){
 
 async function loadReadiness(){
   const r=await api(`/api/readiness/summary?work_date=${state.selectedDate}`);
+
+  const groupEntries=Object.entries(r.groups||{});
+  const currentNoResponse=groupEntries.reduce((sum,[,g])=>sum+Number(g?.counts?.no_response||0),0);
+  const respondedNow=groupEntries.reduce((sum,[,g])=>
+    sum
+    + Number(g?.counts?.ready||0)
+    + Number(g?.counts?.not_ready||0)
+    + Number(g?.counts?.day_off||0)
+    + Number(g?.counts?.responded||0)
+  ,0);
+
   qs('#readinessSummary').innerHTML=`
     <div class="metric"><b>${r.totals.employees}</b><span>Сотрудников</span></div>
     <div class="metric good"><b>${r.totals.ready_cutoff}</b><span>Готовы 15:30</span></div>
     <div class="metric"><b>${r.totals.ready_now}</b><span>Готовы сейчас</span></div>
-    <div class="metric ${r.totals.no_response_cutoff?'warn':''}"><b>${r.totals.no_response_cutoff}</b><span>Не отписались</span></div>`;
+    <div class="metric ${currentNoResponse?'warn':''}"><b>${currentNoResponse}</b><span>Не отписались</span></div>`;
 
-  const groupEntries=Object.entries(r.groups);
   qs('#readinessGroups').innerHTML=groupEntries.map(([code,g])=>{
-    const responded=(g.counts.responded||0);
-    const total=g.counts.ready+g.counts.not_ready+g.counts.day_off+responded+g.counts.no_response;
+    const ready=Number(g.counts.ready||0);
+    const mainJob=Number(g.counts.not_ready||0);
+    const dayOff=Number(g.counts.day_off||0);
+    const free=Number(g.counts.responded||0);
+    const noResponse=Number(g.counts.no_response||0);
+    const answered=ready+mainJob+dayOff+free;
+    const total=answered+noResponse;
 
     if(code==='reserve'){
       const wrotePeople=[
@@ -608,23 +628,23 @@ async function loadReadiness(){
         ...(g.day_off||[])
       ];
       return `<div class="group-block">
-        <div class="group-title"><span>${esc(g.label)}</span><span>${wrotePeople.length}/${total}</span></div>
+        <div class="group-title"><span>${esc(g.label)}</span><span>${answered}/${total}</span></div>
         <div class="group-stats">
           <button class="${wrotePeople.length?'has-people':''}" data-rgroup="${code}" data-rstatus="wrote"><b>${wrotePeople.length}</b>Отписались</button>
-          <button class="${g.counts.ready?'has-people':''}" data-rgroup="${code}" data-rstatus="ready"><b>${g.counts.ready}</b>Готовы</button>
-          <button class="${responded?'has-people':''}" data-rgroup="${code}" data-rstatus="responded"><b>${responded}</b>Свободная</button>
-          <button class="${g.no_response_cutoff.length?'has-people':''}" data-rgroup="${code}" data-rstatus="no_response_cutoff"><b>${g.no_response_cutoff.length}</b>Не отпис.</button>
+          <button class="${ready?'has-people':''}" data-rgroup="${code}" data-rstatus="ready"><b>${ready}</b>Готовы</button>
+          <button class="${free?'has-people':''}" data-rgroup="${code}" data-rstatus="responded"><b>${free}</b>Свободная</button>
+          <button class="${noResponse?'has-people':''}" data-rgroup="${code}" data-rstatus="no_response"><b>${noResponse}</b>Не отпис.</button>
         </div>
       </div>`;
     }
 
     return `<div class="group-block">
-      <div class="group-title"><span>${esc(g.label)}</span><span>${g.counts.ready}/${total}</span></div>
+      <div class="group-title"><span>${esc(g.label)}</span><span>${answered}/${total}</span></div>
       <div class="group-stats">
-        <button class="${g.counts.ready?'has-people':''}" data-rgroup="${code}" data-rstatus="ready"><b>${g.counts.ready}</b>Готов</button>
-        <button class="${g.counts.not_ready?'has-people':''}" data-rgroup="${code}" data-rstatus="not_ready"><b>${g.counts.not_ready}</b>Не готов</button>
-        <button class="${g.counts.day_off?'has-people':''}" data-rgroup="${code}" data-rstatus="day_off"><b>${g.counts.day_off}</b>Выходной</button>
-        <button class="${g.no_response_cutoff.length?'has-people':''}" data-rgroup="${code}" data-rstatus="no_response_cutoff"><b>${g.no_response_cutoff.length}</b>Не отпис.</button>
+        <button class="${ready?'has-people':''}" data-rgroup="${code}" data-rstatus="ready"><b>${ready}</b>Готов</button>
+        <button class="${mainJob?'has-people':''}" data-rgroup="${code}" data-rstatus="not_ready"><b>${mainJob}</b>На основной</button>
+        <button class="${dayOff?'has-people':''}" data-rgroup="${code}" data-rstatus="day_off"><b>${dayOff}</b>Выходной</button>
+        <button class="${noResponse?'has-people':''}" data-rgroup="${code}" data-rstatus="no_response"><b>${noResponse}</b>Не отпис.</button>
       </div>
     </div>`;
   }).join('');
@@ -638,10 +658,10 @@ async function loadReadiness(){
       let label='';
 
       if(status==='ready'){people=g.ready||[];label='Готов';}
-      else if(status==='not_ready'){people=g.not_ready||[];label='Не готов';}
+      else if(status==='not_ready'){people=g.not_ready||[];label='На основной';}
       else if(status==='day_off'){people=g.day_off||[];label='Выходной';}
       else if(status==='responded'){people=g.responded||[];label='Свободная';}
-      else if(status==='no_response_cutoff'){people=g.no_response_cutoff||[];label='Не отписались';}
+      else if(status==='no_response'){people=g.no_response||[];label='Не отписались';}
       else if(status==='wrote'){
         people=[
           ...(g.ready||[]),
