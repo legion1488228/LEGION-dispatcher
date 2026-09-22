@@ -84,6 +84,9 @@ class Order(Base):
     sent_to_brigadier_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     brigadier_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     contact_time: Mapped[str] = mapped_column(String(20), default="")
+    brigade_on_contact_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    tea_count: Mapped[int] = mapped_column(Integer, default=0)
+    tea_reported_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     assignments: Mapped[list[Assignment]] = relationship(
         back_populates="order", cascade="all, delete-orphan", order_by="Assignment.id"

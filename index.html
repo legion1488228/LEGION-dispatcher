@@ -357,6 +357,9 @@ function orderDrawerHtml(o) {
       ${o.other_agent_phone?`<div class="data-item full"><small>Номер другого агента</small><b>${esc(o.other_agent_phone)}</b></div>`:''}
       ${o.notes?`<div class="data-item full"><small>Примечание</small><b>${esc(o.notes)}</b></div>`:''}
       ${o.kickback_rub?`<div class="data-item full"><small>Дополнительно для бригадира</small><b>Откат ${o.kickback_rub} ₽</b></div>`:''}
+      ${o.brigade_on_contact_at?`<div class="data-item"><small>Бригада на связи</small><b>✅ Отмечено</b></div>`:''}
+      ${o.contact_time?`<div class="data-item"><small>Время связи</small><b>${esc(o.contact_time)}</b></div>`:''}
+      ${o.tea_reported_at?`<div class="data-item full"><small>Отчёт по заказу · количество чая</small><b>${Number(o.tea_count||0)}</b></div>`:''}
     </div>
 
     <div class="drawer-section"><h4>Бригадир</h4>
