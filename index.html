@@ -21,12 +21,16 @@ button,input,select,textarea{font:inherit}.hidden{display:none!important}
 main{padding:0 14px}.summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:4px 0 18px}.summary-grid.compact{grid-template-columns:repeat(3,1fr)}.metric{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:12px 10px;min-width:0}.metric b{font-size:20px;display:block}.metric span{font-size:10px;color:var(--muted);display:block;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.metric.warn b{color:var(--amber)}.metric.good b{color:var(--green)}
 .view{display:none}.view.active{display:block}.section-head{display:flex;align-items:center;justify-content:space-between;margin:6px 2px 12px}.section-head h2{font-size:21px;margin:0}.muted{color:var(--muted);margin:4px 0 0;font-size:12px}
 .primary{background:var(--gold);border:0;color:#171208;font-weight:800;border-radius:14px;padding:12px 16px}.primary.small{padding:9px 13px;font-size:13px}.primary:disabled{opacity:.35}.secondary{background:var(--panel2);border:1px solid var(--line);color:var(--text);font-weight:650;border-radius:14px;padding:11px 14px}.danger{border-color:#5a2d2d;color:#ffaaaa}
-.segmented{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;background:var(--panel);padding:4px;border:1px solid var(--line);border-radius:14px;margin-bottom:10px}.segmented.scroll{display:flex;overflow:auto}.segmented button{border:0;background:transparent;color:var(--muted);padding:8px 10px;border-radius:10px;font-weight:700;font-size:12px;white-space:nowrap}.segmented button.active{background:#2a251b;color:#f6dfac}.status-row{display:flex;gap:6px;overflow:auto;margin-bottom:12px;scrollbar-width:none}.chip{border:1px solid var(--line);background:var(--panel);color:var(--muted);border-radius:999px;padding:7px 10px;font-size:11px;white-space:nowrap}.chip.active{color:#1b160c;background:var(--gold);border-color:var(--gold)}
+.segmented{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;background:var(--panel);padding:4px;border:1px solid var(--line);border-radius:14px;margin-bottom:10px}.segmented.scroll{display:flex;overflow:auto}.segmented button{border:0;background:transparent;color:var(--muted);padding:8px 10px;border-radius:10px;font-weight:700;font-size:12px;white-space:nowrap}.segmented button.active{background:#2a251b;color:#f6dfac}
+#employeeFilters button{display:inline-flex;align-items:center;gap:7px}
+.employee-ready-count{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;padding:0 6px;border-radius:999px;background:#1b3325;color:var(--green);font-size:11px;font-weight:850}
+#employeeFilters button.active .employee-ready-count{background:#284330;color:#7ee0a2}
+.status-row{display:flex;gap:6px;overflow:auto;margin-bottom:12px;scrollbar-width:none}.chip{border:1px solid var(--line);background:var(--panel);color:var(--muted);border-radius:999px;padding:7px 10px;font-size:11px;white-space:nowrap}.chip.active{color:#1b160c;background:var(--gold);border-color:var(--gold)}
 .cards{display:flex;flex-direction:column;gap:10px}.order-card{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:14px;position:relative;overflow:hidden}.order-card.complete{border-color:#305c40}.order-card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--gold2)}.order-card.complete::before{background:var(--green)}.order-top{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.order-time{font-size:20px;font-weight:850}.order-name{font-size:17px;font-weight:800;margin:3px 0 8px}.badges{display:flex;gap:5px;flex-wrap:wrap}.badge{font-size:10px;padding:4px 7px;border-radius:999px;background:#24242a;color:#ccc;border:1px solid #303038}.badge.gbu{background:#201d27;color:#d7c7f1}.badge.private{background:#17221c;color:#a9dfbd}.badge.vip{background:#2b2315;color:#f0d397}.badge.elite{background:#241c22;color:#edc7df}.order-number{font-size:12px;font-weight:850;color:var(--gold);margin-bottom:7px}.order-actions-top{display:flex;align-items:flex-start;gap:8px}.status-badge{font-size:10px;color:var(--muted);text-align:right;padding-top:4px}.delete-card-btn{width:34px;height:34px;border-radius:10px;border:1px solid #5a2d2d;background:#241616;color:#ffaaaa;font-size:15px;display:grid;place-items:center;padding:0}.order-foot{display:flex;justify-content:space-between;align-items:center;margin-top:12px;padding-top:10px;border-top:1px solid var(--line);font-size:12px}.order-foot .brig{max-width:65%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.progress{color:var(--muted)}.progress.done{color:var(--green)}
 .bottom-nav{position:fixed;z-index:30;left:0;right:0;bottom:0;height:calc(68px + var(--safe-bottom));padding-bottom:var(--safe-bottom);display:grid;grid-template-columns:repeat(4,1fr);background:rgba(13,13,15,.95);backdrop-filter:blur(16px);border-top:1px solid var(--line)}.bottom-nav button{border:0;background:transparent;color:#777;padding:7px 2px}.bottom-nav button.active{color:var(--gold)}.bottom-nav span{display:block;font-size:18px;height:23px}.bottom-nav small{font-size:9px;font-weight:700}
 .backdrop{position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:50}.drawer{position:fixed;z-index:60;left:0;right:0;bottom:0;max-height:92vh;overflow:auto;background:#101013;border:1px solid var(--line);border-radius:24px 24px 0 0;padding:18px 16px calc(22px + var(--safe-bottom));box-shadow:0 -20px 80px rgba(0,0,0,.6)}.handle{width:42px;height:4px;background:#3a3a40;border-radius:5px;margin:0 auto 15px}.drawer h3{margin:0 0 2px;font-size:22px}.drawer-section{margin-top:18px}.drawer-section h4{font-size:12px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;margin:0 0 9px}.data-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.data-item{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:10px}.data-item small{display:block;color:var(--muted);font-size:9px;margin-bottom:4px}.data-item b{font-size:13px}.full{grid-column:1/-1}.action-row{display:flex;gap:8px}.action-row>*{flex:1}.person-row{display:flex;align-items:center;gap:10px;padding:11px 3px;border-bottom:1px solid #24242a}.person-row:last-child{border:0}.person-main{min-width:0;flex:1}.person-main b{display:block;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.person-main small{color:var(--muted);font-size:10px}.person-meta{font-size:11px;color:#cfcfd4;white-space:nowrap}.check{width:25px;height:25px;border:1px solid #4a4a52;border-radius:8px;display:grid;place-items:center;color:transparent}.person-row.selected .check{background:var(--green);border-color:var(--green);color:#07120b}.person-row.blocked{opacity:.4}.person-row.match{background:linear-gradient(90deg,rgba(216,180,106,.08),transparent)}
 .modal{position:fixed;z-index:70;left:12px;right:12px;top:7vh;max-height:86vh;overflow:auto;background:#111114;border:1px solid var(--line);border-radius:22px;padding:16px;box-shadow:0 20px 90px #000}.modal h3{margin:2px 0 14px}.modal-head{display:flex;justify-content:space-between;align-items:center}.close-btn{border:0;background:var(--panel2);color:var(--text);border-radius:10px;width:34px;height:34px}.candidate-list{max-height:60vh;overflow:auto}.search{width:100%;background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:14px;padding:12px;margin:0 0 10px;outline:none}.search:focus{border-color:var(--gold2)}
-.group-block{background:var(--panel);border:1px solid var(--line);border-radius:17px;margin:0 0 10px;overflow:hidden}.group-title{display:flex;justify-content:space-between;padding:13px;font-weight:800}.group-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;padding:0 10px 10px}.group-stats button{border:0;border-radius:10px;background:#1b1b1f;color:var(--muted);padding:8px 3px;font-size:10px}.group-stats b{display:block;font-size:15px;color:var(--text)}.group-details{padding:0 12px 10px}.status-section{margin-top:10px}.status-section h5{margin:0 0 6px;font-size:11px;color:var(--muted)}
+.group-block{background:var(--panel);border:1px solid var(--line);border-radius:17px;margin:0 0 10px;overflow:hidden}.group-title{display:flex;justify-content:space-between;padding:13px;font-weight:800}.group-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;padding:0 10px 10px}.group-stats button{border:0;border-radius:10px;background:#1b1b1f;color:var(--muted);padding:8px 3px;font-size:10px;cursor:pointer}.group-stats button:active{transform:scale(.98);background:#26262c}.group-stats button.has-people{box-shadow:inset 0 0 0 1px #34343b}.group-stats b{display:block;font-size:15px;color:var(--text)}.group-details{padding:0 12px 10px}.status-section{margin-top:10px}.status-section h5{margin:0 0 6px;font-size:11px;color:var(--muted)}
 .list{background:var(--panel);border:1px solid var(--line);border-radius:17px;overflow:hidden}.employee-row{display:flex;align-items:center;padding:11px 12px;border-bottom:1px solid var(--line);gap:10px}.employee-row:last-child{border:0}.employee-row .name{flex:1;min-width:0}.employee-row .name b{font-size:13px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.employee-row .name small{font-size:10px;color:var(--muted)}.car{font-size:14px}.height{font-size:12px;font-weight:800;color:#ddd}.contact-btns{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}.contact-btn{border:1px solid var(--line);background:#202026;color:#ddd;border-radius:9px;padding:5px 8px;font-size:10px}.contact-btn.telegram{color:#9fc8ff}.section-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.attention{background:#211a14;border:1px solid #4c3a28;border-radius:16px;padding:13px;margin-bottom:10px}.attention.red{background:#221616;border-color:#512c2c}.attention h4{margin:0 0 7px}.attention p{margin:5px 0;color:var(--muted);font-size:11px}.attention-list{display:flex;flex-direction:column;gap:5px;font-size:12px}
 .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.field{margin-bottom:9px}.field label{display:block;color:var(--muted);font-size:10px;margin:0 0 5px}.field input,.field select,.field textarea{width:100%;background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:11px;padding:10px}.field textarea{min-height:74px;resize:vertical}.gbu-draft{padding:12px;border:1px solid var(--line);border-radius:15px;margin-bottom:10px;background:var(--panel)}
 .toast{position:fixed;z-index:100;left:20px;right:20px;bottom:calc(82px + var(--safe-bottom));padding:12px 14px;border-radius:14px;background:#25251f;border:1px solid #5b5036;color:#fff;text-align:center;font-size:12px}.fatal{position:fixed;z-index:200;inset:0;padding:60px 20px;background:#09090b;color:#fff}.fatal h2{color:var(--red)}
@@ -87,13 +91,13 @@ main{padding:0 14px}.summary-grid{display:grid;grid-template-columns:repeat(4,1f
 
       <section id="employeesView" class="view">
         <div class="section-head"><div><h2>Сотрудники</h2><p class="muted">Рост, группа, авто, контакты</p></div><div class="section-actions"><button class="secondary small" id="gbuAgentsBtn">⬛ Агенты ГБУ</button><button class="primary small" id="employeeImportBtn">Импорт</button></div></div>
-        <input id="employeeSearch" class="search" placeholder="Поиск по ФИО" />
+        <input id="employeeSearch" class="search" placeholder="Поиск по имени, метро и росту" />
         <div class="segmented scroll" id="employeeFilters">
-          <button data-group="all" class="active">Все</button>
-          <button data-group="brigadier">Бригадиры</button>
-          <button data-group="main">Основной</button>
-          <button data-group="cashless">Безнал</button>
-          <button data-group="reserve">Резерв</button>
+          <button data-group="all" class="active"><span>Все</span><b class="employee-ready-count" data-ready-count="all">0</b></button>
+          <button data-group="brigadier"><span>Бригадиры</span><b class="employee-ready-count" data-ready-count="brigadier">0</b></button>
+          <button data-group="main"><span>Основной</span><b class="employee-ready-count" data-ready-count="main">0</b></button>
+          <button data-group="cashless"><span>Безнал</span><b class="employee-ready-count" data-ready-count="cashless">0</b></button>
+          <button data-group="reserve"><span>Резерв</span><b class="employee-ready-count" data-ready-count="reserve">0</b></button>
         </div>
         <div id="employeesList" class="list"></div>
       </section>
@@ -556,38 +560,138 @@ function showModal(title, body) {qs('#modal').innerHTML=`<div class="modal-head"
 let cashRefreshTimer=null;
 function closeModal(){if(cashRefreshTimer){clearInterval(cashRefreshTimer);cashRefreshTimer=null}qs('#modal').classList.add('hidden');qs('#modalBackdrop').classList.add('hidden')}
 
+function readinessPersonRows(people){
+  const rows=(people||[]).slice().sort((a,b)=>
+    String(a.display_name||a.full_name||'').localeCompare(
+      String(b.display_name||b.full_name||''),'ru',{sensitivity:'base'}
+    )
+  );
+  if(!rows.length) return '<div class="empty">В этой категории сотрудников нет</div>';
+  return `<div class="list">${rows.map((x,i)=>`
+    <div class="employee-row">
+      <div class="name">
+        <b>${i+1}. ${esc(x.display_name||x.full_name)}</b>
+        <small>${x.metro?esc(x.metro):''}</small>
+      </div>
+      <div class="height">${x.height_cm||'—'} см</div>
+      <div class="car">${x.has_car?'🚗':''}</div>
+    </div>
+  `).join('')}</div>`;
+}
+
+function openReadinessPeople(groupLabel,statusLabel,people){
+  const rows=people||[];
+  showModal(
+    `${groupLabel} · ${statusLabel}`,
+    `<div class="attention"><h4>Всего: ${rows.length}</h4><p>Список сотрудников на выбранную дату.</p></div>${readinessPersonRows(rows)}`
+  );
+}
+
 async function loadReadiness(){
   const r=await api(`/api/readiness/summary?work_date=${state.selectedDate}`);
   qs('#readinessSummary').innerHTML=`
     <div class="metric"><b>${r.totals.employees}</b><span>Сотрудников</span></div>
     <div class="metric good"><b>${r.totals.ready_cutoff}</b><span>Готовы 15:30</span></div>
     <div class="metric"><b>${r.totals.ready_now}</b><span>Готовы сейчас</span></div>
-    <div class="metric ${r.totals.no_response_cutoff?'warn':''}"><b>${r.totals.no_response_cutoff}</b><span>Не отписались</span></div>`
-  qs('#readinessGroups').innerHTML=Object.entries(r.groups).map(([code,g])=>{
+    <div class="metric ${r.totals.no_response_cutoff?'warn':''}"><b>${r.totals.no_response_cutoff}</b><span>Не отписались</span></div>`;
+
+  const groupEntries=Object.entries(r.groups);
+  qs('#readinessGroups').innerHTML=groupEntries.map(([code,g])=>{
     const responded=(g.counts.responded||0);
     const total=g.counts.ready+g.counts.not_ready+g.counts.day_off+responded+g.counts.no_response;
+
     if(code==='reserve'){
-      const wrote=g.counts.ready+responded+g.counts.not_ready+g.counts.day_off;
-      return `<div class="group-block"><div class="group-title"><span>${esc(g.label)}</span><span>${wrote}/${total}</span></div>
-        <div class="group-stats"><button><b>${wrote}</b>Отписались</button><button><b>${g.counts.ready}</b>Готовы</button><button><b>${responded}</b>Свободная</button><button><b>${g.no_response_cutoff.length}</b>Не отпис.</button></div>
-        ${g.no_response_cutoff.length?`<div class="group-details status-section"><h5>⚠️ Не отписались к 15:30</h5>${g.no_response_cutoff.map(x=>`<div class="person-row"><div class="person-main"><b>${esc(x.display_name||x.full_name)}</b></div><div class="person-meta">${x.height_cm||'—'} см ${x.has_car?'🚗':''}</div></div>`).join('')}</div>`:''}
+      const wrotePeople=[
+        ...(g.ready||[]),
+        ...(g.responded||[]),
+        ...(g.not_ready||[]),
+        ...(g.day_off||[])
+      ];
+      return `<div class="group-block">
+        <div class="group-title"><span>${esc(g.label)}</span><span>${wrotePeople.length}/${total}</span></div>
+        <div class="group-stats">
+          <button class="${wrotePeople.length?'has-people':''}" data-rgroup="${code}" data-rstatus="wrote"><b>${wrotePeople.length}</b>Отписались</button>
+          <button class="${g.counts.ready?'has-people':''}" data-rgroup="${code}" data-rstatus="ready"><b>${g.counts.ready}</b>Готовы</button>
+          <button class="${responded?'has-people':''}" data-rgroup="${code}" data-rstatus="responded"><b>${responded}</b>Свободная</button>
+          <button class="${g.no_response_cutoff.length?'has-people':''}" data-rgroup="${code}" data-rstatus="no_response_cutoff"><b>${g.no_response_cutoff.length}</b>Не отпис.</button>
+        </div>
       </div>`;
     }
-    return `<div class="group-block"><div class="group-title"><span>${esc(g.label)}</span><span>${g.counts.ready}/${total}</span></div>
-      <div class="group-stats"><button><b>${g.counts.ready}</b>Готов</button><button><b>${g.counts.not_ready}</b>Не готов</button><button><b>${g.counts.day_off}</b>Выходной</button><button><b>${g.no_response_cutoff.length}</b>Не отпис.</button></div>
-      ${g.no_response_cutoff.length?`<div class="group-details status-section"><h5>⚠️ Не отписались к 15:30</h5>${g.no_response_cutoff.map(x=>`<div class="person-row"><div class="person-main"><b>${esc(x.display_name||x.full_name)}</b></div><div class="person-meta">${x.height_cm||'—'} см ${x.has_car?'🚗':''}</div></div>`).join('')}</div>`:''}
+
+    return `<div class="group-block">
+      <div class="group-title"><span>${esc(g.label)}</span><span>${g.counts.ready}/${total}</span></div>
+      <div class="group-stats">
+        <button class="${g.counts.ready?'has-people':''}" data-rgroup="${code}" data-rstatus="ready"><b>${g.counts.ready}</b>Готов</button>
+        <button class="${g.counts.not_ready?'has-people':''}" data-rgroup="${code}" data-rstatus="not_ready"><b>${g.counts.not_ready}</b>Не готов</button>
+        <button class="${g.counts.day_off?'has-people':''}" data-rgroup="${code}" data-rstatus="day_off"><b>${g.counts.day_off}</b>Выходной</button>
+        <button class="${g.no_response_cutoff.length?'has-people':''}" data-rgroup="${code}" data-rstatus="no_response_cutoff"><b>${g.no_response_cutoff.length}</b>Не отпис.</button>
+      </div>
     </div>`;
   }).join('');
+
+  qsa('[data-rgroup]',qs('#readinessGroups')).forEach(btn=>{
+    btn.onclick=()=>{
+      const code=btn.dataset.rgroup;
+      const status=btn.dataset.rstatus;
+      const g=r.groups?.[code]||{};
+      let people=[];
+      let label='';
+
+      if(status==='ready'){people=g.ready||[];label='Готов';}
+      else if(status==='not_ready'){people=g.not_ready||[];label='Не готов';}
+      else if(status==='day_off'){people=g.day_off||[];label='Выходной';}
+      else if(status==='responded'){people=g.responded||[];label='Свободная';}
+      else if(status==='no_response_cutoff'){people=g.no_response_cutoff||[];label='Не отписались';}
+      else if(status==='wrote'){
+        people=[
+          ...(g.ready||[]),
+          ...(g.responded||[]),
+          ...(g.not_ready||[]),
+          ...(g.day_off||[])
+        ];
+        label='Отписались';
+      }
+
+      openReadinessPeople(g.label||code,label,people);
+    };
+  });
 }
 
 async function loadEmployees(){
   const params=state.employeeGroup==='all'?'':`?group=${state.employeeGroup}`;
-  const list=await api(`/api/employees${params}`);
-  const v=state.employeeSearch.toLowerCase();
+
+  const [list, readiness] = await Promise.all([
+    api(`/api/employees${params}`),
+    api(`/api/readiness/summary?work_date=${state.selectedDate}`)
+  ]);
+
+  const counts = {
+    all: Number(readiness?.totals?.ready_now || 0),
+    brigadier: Number(readiness?.groups?.brigadier?.counts?.ready || 0),
+    main: Number(readiness?.groups?.main?.counts?.ready || 0),
+    cashless: Number(readiness?.groups?.cashless?.counts?.ready || 0),
+    reserve: Number(readiness?.groups?.reserve?.counts?.ready || 0),
+  };
+
+  qsa('[data-ready-count]').forEach(el=>{
+    const group=el.dataset.readyCount;
+    el.textContent=String(counts[group] ?? 0);
+  });
+
+  const v=(state.employeeSearch||'').trim().toLowerCase();
   const ownerTgId=Number(state.bootstrap?.user?.id||0);
 
   const filtered=list
-    .filter(x=>x.full_name.toLowerCase().includes(v))
+    .filter(x=>{
+      if(!v) return true;
+      const haystack=[
+        x.full_name,
+        x.display_name,
+        x.metro,
+        x.height_cm,
+      ].filter(Boolean).join(' ').toLowerCase();
+      return haystack.includes(v);
+    })
     .sort((a,b)=>{
       const aOwner=ownerTgId && Number(a.tg_id||0)===ownerTgId;
       const bOwner=ownerTgId && Number(b.tg_id||0)===ownerTgId;
