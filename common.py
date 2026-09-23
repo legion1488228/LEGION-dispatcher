@@ -26,6 +26,15 @@ def _ids(name: str) -> set[int]:
     return set(_ids_list(name))
 
 
+
+
+def _combined_ids(*names: str) -> set[int]:
+    out: set[int] = set()
+    for name in names:
+        out.update(_ids(name))
+    return out
+
+
 def _first_env(*names: str, default: str = "") -> str:
     for name in names:
         value = os.getenv(name, "").strip()
@@ -46,6 +55,17 @@ _fallback_owner_ids = set(_legacy_access_ids_ordered[:1])
 _owner_ids = _explicit_owner_ids or _fallback_owner_ids
 _explicit_helper_ids = _ids("HELPER_TELEGRAM_IDS")
 _helper_ids = _explicit_helper_ids or (set(_legacy_access_ids_ordered) - set(_owner_ids))
+_photo_report_chat_ids = _combined_ids(
+    "PHOTO_REPORT_CHAT_IDS",
+    "PHOTO_REPORT_CHAT_ID",
+    "PHOTO_REPORTS_CHAT_ID",
+    "PHOTO_REPORT_GROUP_ID",
+    "PHOTO_GROUP_ID",
+    "PHOTO_CHAT_ID",
+    "PHOTOS_CHAT_ID",
+    "REPORT_CHAT_ID",
+    "REPORT_GROUP_CHAT_ID",
+)
 
 
 @dataclass(frozen=True)
@@ -58,6 +78,7 @@ class Settings:
     timezone: str = _first_env("BOT_TIMEZONE", default="Europe/Moscow")
     owner_ids: set[int] = frozenset(_owner_ids)
     helper_ids: set[int] = frozenset(_helper_ids)
+    photo_report_chat_ids: set[int] = frozenset(_photo_report_chat_ids)
     reminder_minutes: int = int(_first_env("REMINDER_MINUTES", default="10"))
     max_orders_per_day: int = int(_first_env("MAX_ORDERS_PER_DAY", default="2"))
     order_estimate_minutes: int = int(_first_env("ORDER_ESTIMATE_MINUTES", default="120"))
