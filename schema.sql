@@ -1,4 +1,4 @@
--- LEGION V28 schema. Designed for a SEPARATE Postgres database while V27 remains live.
+-- LEGION V28 schema. Stored in the isolated legion_v28 PostgreSQL schema so the current version remains untouched.
 CREATE TABLE IF NOT EXISTS employees (
     id BIGSERIAL PRIMARY KEY,
     telegram_id BIGINT UNIQUE NOT NULL,

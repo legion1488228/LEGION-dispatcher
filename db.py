@@ -23,9 +23,21 @@ async def init_db() -> asyncpg.Pool:
     global _pool
     if not settings.database_url:
         raise RuntimeError("DATABASE_URL is required")
-    _pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=12)
+
+    # V28 keeps its tables isolated from the currently running LEGION version.
+    # This lets both versions use the same Railway Postgres without overwriting
+    # or depending on the old public-schema table structure.
+    db_schema = "legion_v28"
+    _pool = await asyncpg.create_pool(
+        settings.database_url,
+        min_size=1,
+        max_size=12,
+        server_settings={"search_path": f"{db_schema},public"},
+    )
     schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
     async with _pool.acquire() as conn:
+        await conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{db_schema}"')
+        await conn.execute(f'SET search_path TO "{db_schema}", public')
         await conn.execute(schema)
     return _pool
 
