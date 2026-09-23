@@ -118,11 +118,23 @@ CREATE TABLE IF NOT EXISTS photos (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS photo_report_messages (
+    id BIGSERIAL PRIMARY KEY,
+    photo_id BIGINT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    order_id BIGINT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    chat_id BIGINT NOT NULL,
+    message_id BIGINT NOT NULL,
+    stage TEXT NOT NULL DEFAULT 'preview' CHECK (stage IN ('preview','final')),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(photo_id, chat_id)
+);
+
 CREATE TABLE IF NOT EXISTS cash_entries (
     id BIGSERIAL PRIMARY KEY,
     order_id BIGINT UNIQUE NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
     brigadier_employee_id BIGINT REFERENCES employees(id) ON DELETE SET NULL,
     amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+    employee_count SMALLINT CHECK (employee_count BETWEEN 2 AND 8),
     rollback NUMERIC(12,2) NOT NULL DEFAULT 0,
     reserve NUMERIC(12,2) NOT NULL DEFAULT 0,
     notes TEXT NOT NULL DEFAULT '',
@@ -130,6 +142,10 @@ CREATE TABLE IF NOT EXISTS cash_entries (
     updated_by BIGINT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+
+ALTER TABLE cash_entries
+    ADD COLUMN IF NOT EXISTS employee_count SMALLINT CHECK (employee_count BETWEEN 2 AND 8);
 
 CREATE TABLE IF NOT EXISTS salary_rates (
     id BIGSERIAL PRIMARY KEY,
