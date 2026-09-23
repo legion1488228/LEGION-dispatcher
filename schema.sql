@@ -174,3 +174,13 @@ CREATE TABLE IF NOT EXISTS audit_log (
     payload JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS photo_report_deliveries (
+    id BIGSERIAL PRIMARY KEY,
+    photo_id BIGINT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    chat_id BIGINT NOT NULL,
+    message_id BIGINT NOT NULL,
+    delivery_kind TEXT NOT NULL DEFAULT 'preview' CHECK (delivery_kind IN ('preview','final')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(photo_id, chat_id, message_id)
+);
