@@ -5,6 +5,7 @@ import hmac
 import json
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 from pathlib import Path
 from urllib.parse import parse_qsl
 
@@ -137,6 +138,115 @@ async def send_order_to_brigadier(order: dict) -> None:
     kb = {"inline_keyboard": [[{"text": "✅ Заказ принял", "callback_data": f"bacc:{order['id']}"}], [{"text": "📌 Мои заказы", "callback_data": "noop"}]]}
     await tg_api("sendMessage", {"chat_id": brig["telegram_id"], "text": text, "parse_mode": "HTML", "reply_markup": kb})
     await db.pool().execute("UPDATE orders SET status='sent',brigadier_sent_at=NOW() WHERE id=$1", order["id"])
+
+
+class InternalQuery(BaseModel):
+    kind: str
+    sql: str
+    args: list[Any] = []
+
+
+class InternalCall(BaseModel):
+    operation: str
+    payload: dict[str, Any] = {}
+
+
+def _wire_pack(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return {"__legion_type__": "datetime", "value": value.isoformat()}
+    if isinstance(value, date):
+        return {"__legion_type__": "date", "value": value.isoformat()}
+    from datetime import time as dt_time
+    if isinstance(value, dt_time):
+        return {"__legion_type__": "time", "value": value.isoformat()}
+    if isinstance(value, Decimal):
+        return {"__legion_type__": "decimal", "value": str(value)}
+    if hasattr(value, "items"):
+        return {str(k): _wire_pack(v) for k, v in dict(value).items()}
+    if isinstance(value, (list, tuple)):
+        return [_wire_pack(v) for v in value]
+    return value
+
+
+def _wire_unpack(value: Any) -> Any:
+    if isinstance(value, dict):
+        marker = value.get("__legion_type__")
+        if marker == "datetime":
+            return datetime.fromisoformat(value["value"])
+        if marker == "date":
+            return date.fromisoformat(value["value"])
+        if marker == "time":
+            from datetime import time as dt_time
+            return dt_time.fromisoformat(value["value"])
+        if marker == "decimal":
+            return Decimal(value["value"])
+        return {k: _wire_unpack(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_wire_unpack(v) for v in value]
+    return value
+
+
+def _internal_auth(x_bot_api_key: str | None) -> None:
+    if not settings.bot_api_key or not x_bot_api_key or not hmac.compare_digest(x_bot_api_key, settings.bot_api_key):
+        raise HTTPException(401, "Internal API access denied")
+
+
+@app.post("/api/internal/db/query")
+async def internal_db_query(body: InternalQuery, x_bot_api_key: str | None = Header(default=None)) -> dict:
+    _internal_auth(x_bot_api_key)
+    sql = body.sql.strip()
+    if not sql or ";" in sql.rstrip(";"):
+        raise HTTPException(400, "Invalid SQL")
+    args = _wire_unpack(body.args)
+    try:
+        if body.kind == "fetchrow":
+            result = await db.pool().fetchrow(sql, *args)
+            result = dict(result) if result else None
+        elif body.kind == "fetch":
+            rows = await db.pool().fetch(sql, *args)
+            result = [dict(r) for r in rows]
+        elif body.kind == "fetchval":
+            result = await db.pool().fetchval(sql, *args)
+        elif body.kind == "execute":
+            result = await db.pool().execute(sql, *args)
+        else:
+            raise HTTPException(400, "Unknown query kind")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"DB query failed: {type(exc).__name__}: {exc}")
+    return {"result": _wire_pack(result)}
+
+
+@app.post("/api/internal/call")
+async def internal_call(body: InternalCall, x_bot_api_key: str | None = Header(default=None)) -> dict:
+    _internal_auth(x_bot_api_key)
+    p = _wire_unpack(body.payload)
+    op = body.operation
+    try:
+        if op == "ping":
+            result = {"ok": True, "version": "28.2"}
+        elif op == "get_employee_by_tg":
+            row = await db.get_employee_by_tg(int(p["telegram_id"]))
+            result = dict(row) if row else None
+        elif op == "set_readiness":
+            result = await db.set_readiness(int(p["telegram_id"]), str(p["raw_text"]), p.get("work_date"))
+        elif op == "create_order":
+            result = await db.create_order(dict(p["data"]), p.get("actor"))
+        elif op == "get_order":
+            result = await db.get_order(int(p["order_id"]))
+        elif op == "update_order":
+            row, invalidated = await db.update_order(int(p["order_id"]), dict(p["patch"]), p.get("actor"))
+            result = {"order": row, "assignments_invalidated": invalidated}
+        elif op == "cancel_order":
+            result = await db.cancel_order(int(p["order_id"]), p.get("actor"))
+        else:
+            raise HTTPException(400, "Unknown internal operation")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Internal call failed: {type(exc).__name__}: {exc}")
+    return {"result": _wire_pack(result)}
 
 
 @app.on_event("startup")
