@@ -899,15 +899,44 @@ async function openCashTable(){
   if(!state.bootstrap?.is_owner){toast('Касса доступна только владельцу');return}
 
   showModal('💰 Касса', `
-    <p class="muted">По каждому бригадиру показана касса за каждый день. Откат всегда считается отдельно. После изменения кассы бригадиром таблица обновляется автоматически.</p>
+    <p class="muted">В столбцах указаны имя и метро бригадира. Откат считается отдельно. Суммы можно исправлять вручную.</p>
     <div id="cashTableBody"><div class="empty">Загрузка…</div></div>
   `);
 
   const rub=n=>new Intl.NumberFormat('ru-RU').format(Number(n||0))+' ₽';
 
+  async function editCashEntry(entry){
+    const raw=prompt(
+      `Новая сумма кассы\n${entry.brigadier_name} · ${fmtDate(entry.work_date)}`,
+      String(Number(entry.commission_rub||0))
+    );
+    if(raw===null) return;
+
+    const value=Number(String(raw).replace(/\s/g,'').replace(/[^\d]/g,''));
+    if(!Number.isFinite(value) || value<0){
+      toast('Введите корректную сумму');
+      return;
+    }
+
+    await api(`/api/cash/${entry.id}`,{
+      method:'PATCH',
+      body:{commission_rub:Math.round(value)}
+    });
+    toast('Касса изменена');
+    await drawCash();
+  }
+
   async function drawCash(){
     const body=qs('#cashTableBody');
     if(!body) return;
+
+    // Запоминаем положение окна и горизонтальную прокрутку таблицы.
+    // Автообновление больше не возвращает владельца в начало.
+    const modal=qs('#modal');
+    const savedModalScroll=modal ? modal.scrollTop : 0;
+    const oldScroller=qs('#cashMatrixScroller');
+    const savedTableScroll=oldScroller ? oldScroller.scrollLeft : 0;
+
     try{
       const [ledger, selectedDay]=await Promise.all([
         api(`/api/cash/ledger?on_date=${state.selectedDate}`),
@@ -917,10 +946,11 @@ async function openCashTable(){
 
       const brigadiers=ledger.brigadiers||[];
       const days=ledger.days||[];
+      const selectedRows=selectedDay.rows||[];
       const totalsByBrig=new Map((ledger.brigadier_totals||[]).map(x=>[String(x.brigadier_tg_id),x]));
 
       const matrix=brigadiers.length ? `
-        <div style="overflow:auto;border:1px solid var(--line);border-radius:16px;margin:10px 0 12px">
+        <div id="cashMatrixScroller" style="overflow:auto;border:1px solid var(--line);border-radius:16px;margin:10px 0 12px">
           <table style="border-collapse:separate;border-spacing:0;min-width:max-content;width:100%;font-size:11px">
             <thead>
               <tr>
@@ -958,14 +988,17 @@ async function openCashTable(){
         </div>
       ` : '<div class="empty">Кассовые бригадиры пока не добавлены</div>';
 
-      const dayRows=(selectedDay.rows||[]).map(x=>`
+      const dayRows=selectedRows.map(x=>`
         <div class="employee-row">
           <div class="name">
             <b>${esc(x.brigadier_name)}</b>
             <small>${esc(x.category_label)} · ${x.team_size} чел${x.reserve_count?` · резерв ${x.reserve_count}`:''}</small>
             <div class="muted">Касса ${rub(x.commission_rub)} · откат отдельно ${rub(x.kickback_rub)}</div>
           </div>
-          <button class="contact-btn danger" data-cash-del="${x.id}">Удалить</button>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+            <button class="contact-btn" data-cash-edit="${x.id}">✏️ Изменить</button>
+            <button class="contact-btn danger" data-cash-del="${x.id}">Удалить</button>
+          </div>
         </div>
       `).join('');
 
@@ -976,15 +1009,20 @@ async function openCashTable(){
         </div>
         <div class="attention">
           <h4>${fmtMonthYear(ledger.start)}</h4>
-          <p>Период: ${dayNumber(ledger.start)}–${dayNumber(ledger.end)}. Каждый столбец — отдельный бригадир.</p>
+          <p>Период: ${dayNumber(ledger.start)}–${dayNumber(ledger.end)}. Каждый столбец — имя и метро бригадира.</p>
         </div>
         ${matrix}
         <div class="section-head" style="margin-top:16px">
-          <div><h2 style="font-size:16px">Записи за ${fmtDate(state.selectedDate)}</h2><p class="muted">Детализация выбранного дня</p></div>
+          <div><h2 style="font-size:16px">Записи за ${fmtDate(state.selectedDate)}</h2><p class="muted">Здесь можно вручную изменить кассу сотрудника</p></div>
           <button class="secondary" id="cashRefreshNow">↻</button>
         </div>
         <div class="list">${dayRows||'<div class="empty">На выбранную дату записей нет</div>'}</div>
       `;
+
+      qsa('[data-cash-edit]',body).forEach(btn=>btn.onclick=async()=>{
+        const entry=selectedRows.find(x=>Number(x.id)===Number(btn.dataset.cashEdit));
+        if(entry) await editCashEntry(entry);
+      });
 
       qsa('[data-cash-del]',body).forEach(btn=>btn.onclick=async()=>{
         if(!confirm('Удалить запись кассы?')) return;
@@ -992,8 +1030,17 @@ async function openCashTable(){
         toast('Удалено');
         await drawCash();
       });
+
       const refresh=qs('#cashRefreshNow');
       if(refresh) refresh.onclick=drawCash;
+
+      // Возвращаем пользователя ровно туда, где он смотрел таблицу.
+      requestAnimationFrame(()=>{
+        const currentModal=qs('#modal');
+        const currentScroller=qs('#cashMatrixScroller');
+        if(currentModal) currentModal.scrollTop=savedModalScroll;
+        if(currentScroller) currentScroller.scrollLeft=savedTableScroll;
+      });
     }catch(e){
       if(qs('#cashTableBody')) qs('#cashTableBody').innerHTML=`<div class="empty">${esc(e.message)}</div>`;
     }
