@@ -18,7 +18,7 @@ import db
 from common import settings
 
 app = FastAPI(title="LEGION Dispatcher V28", version="28.0")
-STATIC = Path(__file__).with_name("static")
+INDEX_FILE = Path(__file__).with_name("index.html")
 
 
 class OrderPatch(BaseModel):
@@ -151,7 +151,7 @@ async def shutdown() -> None:
 
 @app.get("/")
 async def index() -> FileResponse:
-    return FileResponse(STATIC / "index.html")
+    return FileResponse(INDEX_FILE)
 
 
 @app.get("/health")
