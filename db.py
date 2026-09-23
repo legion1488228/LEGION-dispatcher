@@ -19,6 +19,133 @@ def pool() -> asyncpg.Pool:
     return _pool
 
 
+def _qident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _first_value(row: dict[str, Any], names: tuple[str, ...]) -> Any:
+    lowered = {str(k).lower(): v for k, v in row.items()}
+    for name in names:
+        if name in lowered and lowered[name] not in (None, ""):
+            return lowered[name]
+    return None
+
+
+def _to_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(str(value).strip())
+    except Exception:
+        try:
+            return int(float(str(value).strip().replace(",", ".")))
+        except Exception:
+            return None
+
+
+def _to_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    s = str(value or "").strip().lower().replace("ё", "е")
+    return s in {"1", "true", "yes", "y", "да", "есть", "авто", "машина"} or "авто" in s or "маш" in s
+
+
+def _legacy_group(table_name: str, row: dict[str, Any]) -> str | None:
+    t = table_name.lower()
+    role = str(_first_value(row, ("employee_group", "group_name", "group", "role", "type", "category", "status")) or "").lower().replace("ё", "е")
+    text = f"{t} {role}"
+    if "brig" in text or "бриг" in text:
+        return "brigadier"
+    if "cashless" in text or "безнал" in text:
+        return "cashless"
+    if "main" in text or "основ" in text:
+        return "main"
+    if "reserve" in text or "резерв" in text:
+        return "reserve"
+    if any(x in t for x in ("employee", "staff", "worker", "personnel", "sotrud", "сотруд")):
+        return "reserve"
+    return None
+
+
+async def recover_legacy_people(conn: asyncpg.Connection) -> int:
+    """Non-destructive import from the legacy public schema into legion_v28.
+
+    The old bot used different table names across versions. We inspect only user tables
+    in public, detect common profile fields, and copy records with a Telegram id.
+    Nothing is deleted or changed in the old tables.
+    """
+    imported = 0
+    tables = await conn.fetch(
+        """SELECT table_name FROM information_schema.tables
+           WHERE table_schema='public' AND table_type='BASE TABLE'
+           ORDER BY table_name"""
+    )
+    skip = {
+        "schema_migrations", "alembic_version",
+    }
+    tg_names = ("telegram_id", "tg_id", "telegram_user_id", "user_id", "chat_id")
+    name_names = ("full_name", "fio", "name", "brigadier_name", "employee_name", "username")
+    for tr in tables:
+        table = str(tr["table_name"])
+        if table.lower() in skip:
+            continue
+        cols_rows = await conn.fetch(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name=$1",
+            table,
+        )
+        cols = {str(r["column_name"]).lower() for r in cols_rows}
+        if not cols.intersection(tg_names):
+            continue
+        if not (
+            any(x in table.lower() for x in ("brig", "employee", "staff", "worker", "personnel", "sotrud", "сотруд"))
+            or cols.intersection({"employee_group", "group_name", "group", "role"})
+        ):
+            continue
+        try:
+            rows = await conn.fetch(f'SELECT * FROM public.{_qident(table)} LIMIT 5000')
+        except Exception:
+            continue
+        for rr in rows:
+            row = dict(rr)
+            group = _legacy_group(table, row)
+            if not group:
+                continue
+            tg = _to_int(_first_value(row, tg_names))
+            if not tg or tg <= 0:
+                continue
+            full_name = str(_first_value(row, name_names) or f"Сотрудник {tg}").strip()
+            metro = str(_first_value(row, ("metro", "subway", "station", "metro_station")) or "").strip()
+            height = _to_int(_first_value(row, ("height_cm", "height", "rost", "рост")))
+            phone = str(_first_value(row, ("phone", "phone_number", "telephone", "tel")) or "").strip()
+            username = str(_first_value(row, ("telegram_username", "tg_username", "username")) or "").strip().lstrip("@")
+            has_car = _to_bool(_first_value(row, ("has_car", "car", "auto", "with_car")))
+            uniform = str(_first_value(row, ("uniform", "form", "uniform_size", "size")) or "").strip()
+            experienced = _to_bool(_first_value(row, ("experienced", "is_experienced", "main_staff")))
+            can_cash = _to_bool(_first_value(row, ("can_cash", "cash_allowed", "allow_cash")))
+            result = await conn.execute(
+                """INSERT INTO employees(telegram_id,full_name,metro,height_cm,phone,telegram_username,has_car,employee_group,uniform,experienced,can_cash,active,paused)
+                   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,TRUE,FALSE)
+                   ON CONFLICT(telegram_id) DO UPDATE SET
+                     full_name=CASE WHEN employees.full_name='' THEN EXCLUDED.full_name ELSE employees.full_name END,
+                     metro=CASE WHEN employees.metro='' THEN EXCLUDED.metro ELSE employees.metro END,
+                     height_cm=COALESCE(employees.height_cm,EXCLUDED.height_cm),
+                     phone=CASE WHEN employees.phone='' THEN EXCLUDED.phone ELSE employees.phone END,
+                     telegram_username=CASE WHEN employees.telegram_username='' THEN EXCLUDED.telegram_username ELSE employees.telegram_username END,
+                     has_car=employees.has_car OR EXCLUDED.has_car,
+                     employee_group=CASE WHEN EXCLUDED.employee_group='brigadier' THEN 'brigadier' ELSE employees.employee_group END,
+                     uniform=CASE WHEN employees.uniform='' THEN EXCLUDED.uniform ELSE employees.uniform END,
+                     experienced=employees.experienced OR EXCLUDED.experienced,
+                     can_cash=employees.can_cash OR EXCLUDED.can_cash,
+                     updated_at=NOW()""",
+                tg, full_name, metro, height, phone, username, has_car, group, uniform, experienced, can_cash,
+            )
+            if result.startswith("INSERT"):
+                imported += 1
+    return imported
+
+
 async def init_db() -> asyncpg.Pool:
     global _pool
     if not settings.database_url:
@@ -39,6 +166,10 @@ async def init_db() -> asyncpg.Pool:
         await conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{db_schema}"')
         await conn.execute(f'SET search_path TO "{db_schema}", public')
         await conn.execute(schema)
+        # Restore registered people from the previous LEGION tables when V28 is
+        # deployed over the existing Railway Postgres. This is intentionally
+        # non-destructive and may safely run on every startup.
+        await recover_legacy_people(conn)
     return _pool
 
 

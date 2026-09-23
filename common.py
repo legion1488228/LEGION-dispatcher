@@ -6,14 +6,24 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 
-def _ids(name: str) -> set[int]:
+def _ids_list(name: str) -> list[int]:
     raw = os.getenv(name, "")
-    out: set[int] = set()
+    out: list[int] = []
     for part in raw.replace(";", ",").split(","):
         part = part.strip()
-        if part:
-            out.add(int(part))
+        if not part:
+            continue
+        try:
+            value = int(part)
+        except ValueError:
+            continue
+        if value not in out:
+            out.append(value)
     return out
+
+
+def _ids(name: str) -> set[int]:
+    return set(_ids_list(name))
 
 
 def _first_env(*names: str, default: str = "") -> str:
@@ -24,6 +34,20 @@ def _first_env(*names: str, default: str = "") -> str:
     return default
 
 
+_allowed_ids_ordered = _ids_list("ALLOWED_TELEGRAM_IDS")
+_admin_ids_ordered = _ids_list("MINI_APP_ADMIN_IDS")
+_legacy_access_ids_ordered = _allowed_ids_ordered or _admin_ids_ordered
+_explicit_owner_ids = _ids("OWNER_TELEGRAM_IDS")
+# Backward compatibility with the old LEGION setup: the access list was
+# stored in ALLOWED_TELEGRAM_IDS (dispatcher) / MINI_APP_ADMIN_IDS (bot)
+# in owner, helper1, helper2 order. The first id is therefore the owner
+# when no separate OWNER_TELEGRAM_IDS variable exists.
+_fallback_owner_ids = set(_legacy_access_ids_ordered[:1])
+_owner_ids = _explicit_owner_ids or _fallback_owner_ids
+_explicit_helper_ids = _ids("HELPER_TELEGRAM_IDS")
+_helper_ids = _explicit_helper_ids or (set(_legacy_access_ids_ordered) - set(_owner_ids))
+
+
 @dataclass(frozen=True)
 class Settings:
     bot_token: str = _first_env("BOT_TOKEN")
@@ -32,8 +56,8 @@ class Settings:
     dispatcher_url: str = _first_env("MINI_APP_URL", "DISPATCHER_URL", "DISPATCHER_API_URL")
     bot_api_key: str = _first_env("BOT_API_KEY", "BOT_TOKEN")
     timezone: str = _first_env("BOT_TIMEZONE", default="Europe/Moscow")
-    owner_ids: set[int] = frozenset(_ids("OWNER_TELEGRAM_IDS") or _ids("MINI_APP_ADMIN_IDS"))
-    helper_ids: set[int] = frozenset(_ids("HELPER_TELEGRAM_IDS") or _ids("ALLOWED_TELEGRAM_IDS"))
+    owner_ids: set[int] = frozenset(_owner_ids)
+    helper_ids: set[int] = frozenset(_helper_ids)
     reminder_minutes: int = int(_first_env("REMINDER_MINUTES", default="10"))
     max_orders_per_day: int = int(_first_env("MAX_ORDERS_PER_DAY", default="2"))
     order_estimate_minutes: int = int(_first_env("ORDER_ESTIMATE_MINUTES", default="120"))
