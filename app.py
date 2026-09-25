@@ -155,6 +155,7 @@ def index():
 # ---------- Schemas ----------
 
 class EmployeeSync(BaseModel):
+    preserve_identity: bool = False
     tg_id: int | None = None
     full_name: str
     phone: str = ""
@@ -556,16 +557,28 @@ def _upsert_employee(db: Session, data: EmployeeSync) -> Employee:
     if data.tg_id:
         emp = db.execute(select(Employee).where(Employee.tg_id == data.tg_id)).scalar_one_or_none()
     if not emp and data.telegram_username.strip():
-        username = data.telegram_username.strip().lstrip("@")
-        emp = db.execute(select(Employee).where(func.lower(Employee.telegram_username) == username.lower())).scalar_one_or_none()
-    if not emp and data.full_name.strip():
-        emp = db.execute(select(Employee).where(func.lower(Employee.full_name) == data.full_name.strip().lower())).scalars().first()
+        username = data.telegram_username.strip().lstrip("@").lower()
+        candidates = db.execute(select(Employee).where(func.lower(Employee.telegram_username) == username)).scalars().all()
+        if len(candidates) == 1 and (not data.tg_id or not candidates[0].tg_id or candidates[0].tg_id == data.tg_id):
+            emp = candidates[0]
+    if not emp and data.phone.strip():
+        phone_key = _reference_phone(data.phone)
+        candidates = [x for x in db.execute(select(Employee)).scalars().all()
+                      if phone_key and _reference_phone(x.phone) == phone_key]
+        if len(candidates) == 1 and (not data.tg_id or not candidates[0].tg_id or candidates[0].tg_id == data.tg_id):
+            emp = candidates[0]
+    # Names alone cannot safely bind a Telegram account to another person's contact.
+    if not emp and not data.tg_id and data.full_name.strip():
+        candidates = db.execute(select(Employee).where(func.lower(Employee.full_name) == data.full_name.strip().lower())).scalars().all()
+        if len(candidates) == 1:
+            emp = candidates[0]
     if not emp:
         emp = Employee(tg_id=data.tg_id, full_name=data.full_name, group_code=data.group_code)
         db.add(emp)
     elif data.tg_id and not emp.tg_id:
         emp.tg_id = data.tg_id
-    emp.full_name = data.full_name.strip()
+    if not data.preserve_identity or not emp.full_name:
+        emp.full_name = data.full_name.strip()
     if data.phone.strip():
         emp.phone = data.phone.strip()
     if data.telegram_username.strip():
@@ -1257,6 +1270,66 @@ def bulk_employees(items: list[EmployeeSync], db: Session = Depends(get_db), use
 
 # ---------- BOT integration ----------
 
+class StaffReferenceItem(BaseModel):
+    full_name: str
+    phone: str = ""
+    telegram_username: str = ""
+    group_code: Literal["brigadier", "main", "cashless", "reserve"]
+    metro: str = ""
+
+
+def _reference_phone(value: str | None) -> str:
+    digits = "".join(c for c in str(value or "") if c.isdigit())
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    return digits
+
+
+@app.post("/api/bot/employees/reference-import", dependencies=[Depends(_bot_key)])
+def bot_import_staff_reference(items: list[StaffReferenceItem], db: Session = Depends(get_db)):
+    if len(items) > 500:
+        raise HTTPException(400, "Слишком большой справочник")
+    stats = {"created": 0, "updated": 0, "skipped": 0}
+    employees = list(db.execute(select(Employee)).scalars().all())
+    for item in items:
+        username = item.telegram_username.strip().lstrip("@").lower()
+        phone = _reference_phone(item.phone)
+        if username == "simachok_1" or phone == "79154967383":
+            stats["skipped"] += 1
+            continue
+        matches = [x for x in employees if
+            (username and str(x.telegram_username or "").lstrip("@").lower() == username)
+            or (phone and _reference_phone(x.phone) == phone)]
+        if len(matches) > 1:
+            stats["skipped"] += 1
+            continue
+        if matches:
+            emp = matches[0]
+            if emp.tg_id in HIDDEN_TG_IDS or emp.tg_id == 8038387894:
+                stats["skipped"] += 1
+                continue
+            # The PDF is an older directory: never overwrite current role or activation.
+            if not emp.phone:
+                emp.phone = item.phone
+            if not emp.telegram_username:
+                emp.telegram_username = item.telegram_username.strip().lstrip("@")
+            if not emp.metro:
+                emp.metro = item.metro
+            stats["updated"] += 1
+        else:
+            emp = Employee(
+                tg_id=None, full_name=item.full_name.strip(), phone=item.phone,
+                telegram_username=item.telegram_username.strip().lstrip("@"),
+                group_code=item.group_code, metro=item.metro, active=False,
+                is_cashier=False,
+            )
+            db.add(emp)
+            employees.append(emp)
+            stats["created"] += 1
+    db.commit()
+    return {"ok": True, **stats}
+
+
 @app.post("/api/bot/employees/sync", dependencies=[Depends(_bot_key)])
 def bot_employee_sync(data: EmployeeSync, db: Session = Depends(get_db)):
     emp = _upsert_employee(db, data)
@@ -1568,6 +1641,7 @@ def bot_employee_membership(data: EmployeeMembership, db: Session = Depends(get_
     emp = db.execute(select(Employee).where(Employee.tg_id == data.tg_id)).scalar_one_or_none()
     if data.active:
         sync = EmployeeSync(
+            preserve_identity=True,
             tg_id=data.tg_id,
             full_name=data.full_name,
             telegram_username=data.telegram_username,
@@ -1699,6 +1773,7 @@ def bot_readiness(data: ReadinessReport, db: Session = Depends(get_db)):
     if data.tg_id in HIDDEN_TG_IDS:
         raise HTTPException(403, "Участник недоступен")
     sync = EmployeeSync(
+        preserve_identity=True,
         tg_id=data.tg_id,
         full_name=data.full_name,
         phone=data.phone,
