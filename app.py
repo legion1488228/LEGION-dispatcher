@@ -1345,6 +1345,30 @@ def readiness_summary(work_date: date, db: Session = Depends(get_db), user: Tele
     return readiness_summary_data(db, work_date)
 
 
+def brigades_contact_data(db: Session, work_date: date):
+    logs = db.execute(select(ImportLog).where(ImportLog.kind == "brigade_contact")
+                      .order_by(ImportLog.created_at.desc())).scalars().all()
+    ids = set()
+    for log in logs:
+        try:
+            record = json.loads(log.result_json or "{}")
+            if record.get("work_date") == work_date.isoformat():
+                tg_id = int(record.get("tg_id") or 0)
+                if tg_id and tg_id not in HIDDEN_TG_IDS:
+                    ids.add(tg_id)
+        except (ValueError, TypeError):
+            continue
+    if not ids:
+        return []
+    employees = db.execute(select(Employee).where(
+        Employee.tg_id.in_(ids), Employee.active.is_(True), Employee.group_code == "brigadier",
+        _visible_employee(),
+    ).order_by(Employee.full_name)).scalars().all()
+    # One brigadier represents one brigade, regardless of repeated messages/orders.
+    unique = {emp.tg_id: _employee_dict(emp) for emp in employees}
+    return list(unique.values())
+
+
 def readiness_summary_data(db: Session, work_date: date):
     employees = db.execute(select(Employee).where(Employee.active.is_(True), _visible_employee()).order_by(Employee.group_code, Employee.full_name)).scalars().all()
     ready_rows = _ready_map(db, work_date)
@@ -1376,6 +1400,8 @@ def readiness_summary_data(db: Session, work_date: date):
             groups[emp.group_code]["no_response"].append(item)
 
     manual_totals = apply_manual_readiness(db, work_date, groups, cutoff)
+    on_contact = brigades_contact_data(db, work_date)
+    manual_totals["brigades_on_contact"] = len(on_contact)
 
     for g in groups.values():
         g["counts"] = {k: len(g[k]) for k in ["ready", "not_ready", "day_off", "responded", "no_response"]}
@@ -1389,6 +1415,7 @@ def readiness_summary_data(db: Session, work_date: date):
         "work_date": work_date.isoformat(),
         "cutoff_label": "15:30",
         "totals": manual_totals,
+        "brigades_on_contact": on_contact,
         "groups": groups,
     }
 
