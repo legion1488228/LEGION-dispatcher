@@ -2385,11 +2385,19 @@ def readiness_chat_messages(summary, settings, kind, work_date):
     result = []
     staff_chats = {int(g["chat_id"]) for g in settings["groups"]}
     if kind == "summary":
-        lines = [f"<b>📝 Сверка готовности на {date_label}</b>"]
+        ready_counts = {code: len(groups.get(code, {}).get("ready", [])) for code in GROUP_LABELS}
+        lines = [
+            f"<b>📝 Сверка готовности на {date_label}</b>",
+            "",
+            f"<b>Всего готовы: {sum(ready_counts.values())}</b>",
+        ]
+        lines.extend(f"{escape(label)}: <b>{ready_counts[code]}</b>" for code, label in GROUP_LABELS.items())
         for code, label in GROUP_LABELS.items():
             group = groups.get(code, {})
             lines += ["", f"<b>{escape(label)}</b>"]
-            for status, title in [("ready", "Готовы"), ("not_ready", "На основной"), ("day_off", "Выходной"), ("responded", "Отписались без готовности"), ("no_response", "Не отписались")]:
+            for status, title in [("ready", "Готовы"), ("not_ready", "На основной"), ("day_off", "Выходной"), ("no_response", "Не отписались")]:
+                if code == "reserve" and status == "no_response":
+                    continue
                 people = sort_people(group.get(status, []))
                 lines.append(f"<b>{title}: {len(people)}</b>")
                 lines.extend(f"{i}. {readiness_chat_person(p)}" + (" 🚗" if status == "ready" and p.get("has_car") else "") for i, p in enumerate(people, 1))
