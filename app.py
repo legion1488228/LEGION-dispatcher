@@ -2396,7 +2396,7 @@ def readiness_chat_messages(summary, settings, kind, work_date):
             group = groups.get(code, {})
             lines += ["", f"<b>{escape(label)}</b>"]
             for status, title in [("ready", "Готовы"), ("not_ready", "На основной"), ("day_off", "Выходной"), ("no_response", "Не отписались")]:
-                if code == "reserve" and status == "no_response":
+                if code == "reserve" and status != "ready":
                     continue
                 people = sort_people(group.get(status, []))
                 lines.append(f"<b>{title}: {len(people)}</b>")
