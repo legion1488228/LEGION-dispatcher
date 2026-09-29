@@ -127,6 +127,7 @@ def startup():
     _seed_gbu_agents()
     with Session(engine) as db:
         _recover_employee_profiles(db)
+        _purge_demo_cash_entries(db)
         for emp in db.execute(select(Employee)).scalars():
             if _cashier_excluded(db, emp):
                 emp.is_cashier = False
@@ -429,6 +430,31 @@ def _is_owner(db: Session, tg_id: int) -> bool:
 def _require_owner(db: Session, user: TelegramUser) -> None:
     if not _is_owner(db, user.id):
         raise HTTPException(status_code=403, detail="Касса доступна только владельцу")
+
+
+def _purge_demo_cash_entries(db: Session) -> int:
+    """Remove only the two demo cashiers' entries; caller commits atomically."""
+    def demo_label(name: str, metro: str = "") -> bool:
+        name = re.sub(r"\s+", " ", (name or "").casefold()).strip()
+        metro = re.sub(r"\s+", " ", (metro or "").casefold()).strip()
+        return bool(re.fullmatch(r"иван (марьино|волжская)(?: \d{3}(?: см)?)?", name)
+                    or (name == "иван" and metro in {"марьино", "волжская"}))
+
+    target_ids = {8038387894}  # Иван Волжская, existing retired profile.
+    for emp in db.execute(select(Employee)).scalars():
+        if emp.tg_id and (demo_label(emp.full_name, emp.metro)
+                         or str(emp.telegram_username or "").lstrip("@").casefold() == "legionritual"):
+            target_ids.add(int(emp.tg_id))
+    entries = db.execute(select(CashEntry)).scalars().all()
+    # Historical labels also identify the account when its employee profile is absent.
+    target_ids.update(int(row.brigadier_tg_id) for row in entries
+                      if row.brigadier_tg_id and demo_label(row.brigadier_name))
+    removed = 0
+    for row in entries:
+        if row.brigadier_tg_id in target_ids:
+            db.delete(row)
+            removed += 1
+    return removed
 
 
 def _cashier_excluded(db: Session, emp) -> bool:
