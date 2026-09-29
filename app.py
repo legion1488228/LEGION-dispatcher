@@ -127,6 +127,9 @@ def startup():
     _seed_gbu_agents()
     with Session(engine) as db:
         _recover_employee_profiles(db)
+        for emp in db.execute(select(Employee)).scalars():
+            if _cashier_excluded(db, emp):
+                emp.is_cashier = False
         for emp in db.execute(select(Employee).where(Employee.tg_id.in_(HIDDEN_TG_IDS))).scalars():
             emp.active = False
             emp.is_cashier = False
@@ -197,6 +200,11 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
         }
       };
       const refresh=qs('#cashRefreshNow');""", 1)
+
+# Owner cash access is read-only; the reminder action remains available.
+INLINE_INDEX_HTML = re.sub(r'<button[^>]*data-cash-(?:edit|del)="[^"\n]*"[^>]*>.*?</button>', '', INLINE_INDEX_HTML)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('Суммы можно исправлять вручную.', 'Доступен просмотр кассы.')
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('Здесь можно вручную изменить кассу сотрудника', 'Записи кассиров за выбранную дату')
 
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -423,6 +431,18 @@ def _require_owner(db: Session, user: TelegramUser) -> None:
         raise HTTPException(status_code=403, detail="Касса доступна только владельцу")
 
 
+def _cashier_excluded(db: Session, emp) -> bool:
+    if emp.tg_id and (int(emp.tg_id) == 8038387894 or _is_owner(db, int(emp.tg_id))):
+        return True
+    label = re.sub(r"\s+", " ", f"{emp.full_name or ''} {emp.metro or ''}".casefold()).strip()
+    return bool(re.search(r"\bиван\s+(марьино|волжская)\b", label))
+
+
+def _cash_excluded_ids(db: Session) -> set[int]:
+    return set(HIDDEN_TG_IDS) | {int(emp.tg_id) for emp in db.execute(select(Employee)).scalars()
+                               if emp.tg_id and _cashier_excluded(db, emp)}
+
+
 def _cash_brigadier_label(db: Session, tg_id: int, fallback: str = "") -> str:
     if int(tg_id) in HIDDEN_TG_IDS:
         return "Скрытая архивная запись"
@@ -646,6 +666,8 @@ def _upsert_employee(db: Session, data: EmployeeSync) -> Employee:
     if emp.tg_id in HIDDEN_TG_IDS:
         emp.is_cashier = False
     _apply_profile_override(db, emp)
+    if _cashier_excluded(db, emp):
+        emp.is_cashier = False
     db.flush()
     return emp
 
@@ -1756,7 +1778,7 @@ def bot_toggle_cashier(tg_id: int, data: CashierToggle, db: Session = Depends(ge
         raise HTTPException(404, "Бригадир не найден")
     emp = db.execute(select(Employee).where(Employee.tg_id == tg_id, Employee.group_code == "brigadier")).scalar_one_or_none()
     if not emp: raise HTTPException(404, "Бригадир не найден в Диспетчерской")
-    emp.is_cashier = bool(data.is_cashier); db.commit()
+    emp.is_cashier = bool(data.is_cashier) and not _cashier_excluded(db, emp); db.commit()
     return {"ok": True, "tg_id": tg_id, "is_cashier": bool(emp.is_cashier)}
 
 
@@ -1764,7 +1786,7 @@ def bot_toggle_cashier(tg_id: int, data: CashierToggle, db: Session = Depends(ge
 def bot_create_cash_entry(data: CashEntryCreate, db: Session = Depends(get_db)):
     emp = db.execute(select(Employee).where(Employee.tg_id == data.tg_id, Employee.group_code == "brigadier")).scalar_one_or_none()
     if not emp or not emp.active: raise HTTPException(404, "Бригадир не найден")
-    if not emp.is_cashier: raise HTTPException(403, "Этот бригадир не назначен кассовым")
+    if not emp.is_cashier or _cashier_excluded(db, emp): raise HTTPException(403, "Этот бригадир не назначен кассовым")
     row = CashEntry(work_date=data.work_date, brigadier_tg_id=data.tg_id, brigadier_name=emp.full_name, category=data.category, team_size=data.team_size, commission_rub=data.commission_rub, kickback_rub=data.kickback_rub, reserve_count=data.reserve_count, notes=data.notes.strip())
     db.add(row); db.commit(); db.refresh(row)
     start, end = _period_bounds(data.work_date)
@@ -1780,7 +1802,7 @@ def bot_delete_own_cash_day(data: BrigadierCashDayDelete, db: Session = Depends(
             Employee.group_code == "brigadier",
         )
     ).scalar_one_or_none()
-    if not emp or not emp.active or not emp.is_cashier:
+    if not emp or not emp.active or not emp.is_cashier or _cashier_excluded(db, emp):
         raise HTTPException(403, "Удаление кассы недоступно")
 
     rows = db.execute(
@@ -1838,7 +1860,7 @@ def bot_delete_own_cash_entry(entry_id: int, data: BrigadierCashEntryDelete, db:
             Employee.group_code == "brigadier",
         )
     ).scalar_one_or_none()
-    if not emp or not emp.active or not emp.is_cashier:
+    if not emp or not emp.active or not emp.is_cashier or _cashier_excluded(db, emp):
         raise HTTPException(403, "Удаление кассы недоступно")
 
     payload = {
@@ -1873,7 +1895,7 @@ def bot_edit_own_cash(entry_id: int, data: BrigadierCashPatch, db: Session = Dep
     if not row or int(row.brigadier_tg_id) != int(data.tg_id):
         raise HTTPException(404, "Запись кассы не найдена")
     emp = db.execute(select(Employee).where(Employee.tg_id == data.tg_id, Employee.group_code == "brigadier")).scalar_one_or_none()
-    if not emp or not emp.active or not emp.is_cashier:
+    if not emp or not emp.active or not emp.is_cashier or _cashier_excluded(db, emp):
         raise HTTPException(403, "Изменение кассы недоступно")
     payload = data.model_dump(exclude_unset=True)
     payload.pop("tg_id", None)
@@ -1887,9 +1909,9 @@ def bot_edit_own_cash(entry_id: int, data: BrigadierCashPatch, db: Session = Dep
 @app.get("/api/cash")
 def owner_cash_day(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
     _require_owner(db, user)
-    rows = db.execute(select(CashEntry).where(CashEntry.work_date == work_date, CashEntry.brigadier_tg_id.notin_(HIDDEN_TG_IDS)).order_by(CashEntry.brigadier_name, CashEntry.id)).scalars().all()
+    rows = db.execute(select(CashEntry).where(CashEntry.work_date == work_date, CashEntry.brigadier_tg_id.notin_(_cash_excluded_ids(db))).order_by(CashEntry.brigadier_name, CashEntry.id)).scalars().all()
     start, end = _period_bounds(work_date)
-    period_rows = db.execute(select(CashEntry).where(CashEntry.work_date >= start, CashEntry.work_date <= end, CashEntry.brigadier_tg_id.notin_(HIDDEN_TG_IDS))).scalars().all()
+    period_rows = db.execute(select(CashEntry).where(CashEntry.work_date >= start, CashEntry.work_date <= end, CashEntry.brigadier_tg_id.notin_(_cash_excluded_ids(db)))).scalars().all()
     return {"work_date": work_date.isoformat(), "rows": [_cash_row_dict(x, db) for x in rows], "day": {"commission_rub": sum(x.commission_rub or 0 for x in rows), "kickback_rub": sum(x.kickback_rub or 0 for x in rows), "cash_rub": sum(x.commission_rub or 0 for x in rows), "total_rub": sum(x.commission_rub or 0 for x in rows)}, "period": {"start": start.isoformat(), "end": end.isoformat(), "commission_rub": sum(x.commission_rub or 0 for x in period_rows), "kickback_rub": sum(x.kickback_rub or 0 for x in period_rows), "cash_rub": sum(x.commission_rub or 0 for x in period_rows), "total_rub": sum(x.commission_rub or 0 for x in period_rows), "entries": len(period_rows)}}
 
 
@@ -1900,7 +1922,7 @@ def owner_cash_ledger(on_date: date, db: Session = Depends(get_db), user: Telegr
 
     entries = db.execute(
         select(CashEntry)
-        .where(CashEntry.work_date >= start, CashEntry.work_date <= end, CashEntry.brigadier_tg_id.notin_(HIDDEN_TG_IDS))
+        .where(CashEntry.work_date >= start, CashEntry.work_date <= end, CashEntry.brigadier_tg_id.notin_(_cash_excluded_ids(db)))
         .order_by(CashEntry.work_date, CashEntry.brigadier_name, CashEntry.id)
     ).scalars().all()
 
@@ -1913,7 +1935,7 @@ def owner_cash_ledger(on_date: date, db: Session = Depends(get_db), user: Telegr
     brig_by_tg = {
         int(emp.tg_id): _cash_brigadier_label(db, int(emp.tg_id), emp.full_name)
         for emp in current_cashiers
-        if emp.tg_id
+        if emp.tg_id and not _cashier_excluded(db, emp)
     }
     for row in entries:
         brig_by_tg.setdefault(
@@ -2011,17 +2033,14 @@ def owner_cash_ledger(on_date: date, db: Session = Depends(get_db), user: Telegr
 
 @app.patch("/api/cash/{entry_id}")
 def owner_patch_cash(entry_id: int, data: CashEntryPatch, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
-    _require_owner(db, user); row = db.get(CashEntry, entry_id)
-    if not row: raise HTTPException(404, "Запись кассы не найдена")
-    for key, value in data.model_dump(exclude_unset=True).items(): setattr(row, key, value)
-    db.commit(); db.refresh(row); return _cash_row_dict(row, db)
+    _require_owner(db, user)
+    raise HTTPException(403, "Владельцу доступен только просмотр кассы")
 
 
 @app.delete("/api/cash/{entry_id}")
 def owner_delete_cash(entry_id: int, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
-    _require_owner(db, user); row = db.get(CashEntry, entry_id)
-    if not row: raise HTTPException(404, "Запись кассы не найдена")
-    db.delete(row); db.commit(); return {"ok": True}
+    _require_owner(db, user)
+    raise HTTPException(403, "Владельцу доступен только просмотр кассы")
 
 
 @app.post("/api/bot/employees/membership", dependencies=[Depends(_bot_key)])
