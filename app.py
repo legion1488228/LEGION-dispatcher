@@ -170,6 +170,34 @@ for _phone_id, _telegram_id in (("profilePhone", "profileTelegram"),
         _payload, _payload + ",telegram_username:qs('#" + _telegram_id + "').value.trim()", 1)
 
 
+# Cash reminder control shares the existing owner-only cash modal.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    'async function openCashTable(){',
+    "let cashReminderSending=false;\nasync function openCashTable(){", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    '<span>Откат отдельно</span></div>\n        </div>',
+    '<span>Откат отдельно</span></div>\n'
+    '          <button class="secondary" id="cashReminder" style="align-self:center;padding:12px 8px" ${cashReminderSending ? "disabled" : ""}>🔔 Сверка</button>\n'
+    '        </div>', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "      const refresh=qs('#cashRefreshNow');",
+    """      const reminder=qs('#cashReminder');
+      if(reminder) reminder.onclick=async()=>{
+        if(cashReminderSending) return;
+        cashReminderSending=true;
+        reminder.disabled=true;
+        try{
+          const result=await api('/api/cash/reminder',{method:'POST'});
+          toast(`Отправлено в группы: ${result.sent_chats} из ${result.sent_chats+result.failed_chats}`);
+        }catch(error){toast(error.message || 'Не удалось отправить напоминание')}
+        finally{
+          cashReminderSending=false;
+          const current=qs('#cashReminder');
+          if(current) current.disabled=false;
+        }
+      };
+      const refresh=qs('#cashRefreshNow');""", 1)
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return HTMLResponse(INLINE_INDEX_HTML, headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"})
@@ -2534,3 +2562,58 @@ async def send_readiness_chat_action(kind: Literal["summary", "reminders"],
         else:
             failed += 1
     return {"sent_chats": sent, "failed_chats": failed, "work_date": day.isoformat(), "empty": not messages}
+
+
+class CashReminderConfig(Base):
+    __tablename__ = "cash_reminder_config"
+    id = Column(Integer, primary_key=True)
+    payload = Column(String, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
+    sent_at = Column(DateTime, nullable=True)
+
+
+class CashReminderSettings(BaseModel):
+    chat_ids: list[int] = Field(max_length=1000)
+
+
+@app.post("/api/bot/cash/chat-settings", dependencies=[Depends(_bot_key)])
+def sync_cash_reminder_settings(data: CashReminderSettings, db: Session = Depends(get_db)):
+    # Only group destinations, deduplicated even when cashiers share a group.
+    chat_ids = sorted({chat_id for chat_id in data.chat_ids if chat_id < 0})
+    row = db.get(CashReminderConfig, 1)
+    if row is None:
+        row = CashReminderConfig(id=1)
+        db.add(row)
+    row.payload = json.dumps(chat_ids)
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/cash/reminder")
+async def send_cash_reminder(db: Session = Depends(get_db),
+                             user: TelegramUser = Depends(require_admin)):
+    _require_owner(db, user)
+    now = datetime.utcnow()
+    row = db.execute(select(CashReminderConfig).where(
+        CashReminderConfig.id == 1).with_for_update()).scalar_one_or_none()
+    if row is None or now - row.updated_at > timedelta(minutes=5):
+        raise HTTPException(409, "Связь с ботом не обновлена. Проверьте, что новый bot.py запущен, и повторите через минуту.")
+    if row.sent_at and now - row.sent_at < timedelta(seconds=60):
+        raise HTTPException(429, "Напоминание уже отправлялось. Повторите через минуту.")
+    chat_ids = sorted({int(chat_id) for chat_id in json.loads(row.payload) if int(chat_id) < 0})
+    if not chat_ids:
+        raise HTTPException(409, "Нет подключённых групп действующих кассиров.")
+    row.sent_at = now
+    db.commit()
+    sent, failed = 0, 0
+    for chat_id in chat_ids:
+        try:
+            delivered = await send_telegram_message(chat_id, "напоминаю о сверке кассы сегодня 🔔")
+        except Exception:
+            delivered = False
+        if delivered:
+            sent += 1
+        else:
+            failed += 1
+    return {"sent_chats": sent, "failed_chats": failed}
