@@ -290,6 +290,11 @@ _cash_html = _cash_html.replace("    cashRange=btn.dataset.cashRange;", "    if(
 _cash_html = _cash_html.replace("  cashRefreshTimer=setInterval(()=>{\n    if(qs('#cashTableBody')) drawCash();\n  },10000);", "  if(cashActive()){\n    if(cashRefreshTimer) clearInterval(cashRefreshTimer);\n    cashRefreshTimer=setInterval(()=>{if(cashActive()) drawCash()},10000);\n  }", 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_cash_start] + _cash_html + INLINE_INDEX_HTML[_cash_end:]
 
+
+# Owner-only entry point inside the cash modal.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('showModal(\'💰 Касса\', `', 'showModal(\'💰 Касса\', `<button class="secondary" style="margin-bottom:12px" onclick="openPersonalTables()">📒 Мои таблицы</button>', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace("</script>\n</body>", 'async function openPersonalTables(){\n if(!state.bootstrap?.is_owner){toast(\'Доступно только владельцу\');return}\n let month=new Date().toLocaleDateString(\'sv-SE\',{timeZone:\'Europe/Moscow\'}).slice(0,7),kind=\'earnings\',data=null,busy=false,request=0;\n showModal(\'📒 Мои таблицы\',`<p class="muted">Личные записи по месяцам. Нажмите сумму или заголовок для изменения. Пустое значение очищает ячейку. Сохранение после каждой правки.</p><label>Месяц<input type="month" id="personalMonth" value="${month}" style="width:100%;box-sizing:border-box"></label><div style="display:flex;gap:6px;overflow:auto;margin:12px 0"><button class="primary" data-personal-kind="earnings">Заработок</button><button class="secondary" data-personal-kind="cash">Касса</button><button class="secondary" data-personal-kind="kickbacks">Откаты</button></div><button class="secondary" id="personalAdd">＋ Столбец</button><div id="personalStatus" class="muted" role="status"></div><div id="personalGrid" style="overflow:auto;margin-top:12px;max-height:60vh"></div>`);\n const grid=qs(\'#personalGrid\'),status=qs(\'#personalStatus\'),session=cashModalGeneration;\n const active=()=>session===cashModalGeneration && qs(\'#personalGrid\')===grid;\n const money=cents=>new Intl.NumberFormat(\'ru-RU\',{maximumFractionDigits:2}).format(cents/100);\n function lock(value){busy=value;qsa(\'[data-personal-kind],#personalMonth,#personalAdd\').forEach(e=>e.disabled=value)}\n function render(){\n  const left=grid.scrollLeft,top=grid.scrollTop;\n  const totalRow=(title,values)=>`<tr style="color:var(--gold);background:#211d14"><th>${title}</th>${values.map(v=>`<td>${money(v)}</td>`).join(\'\')}<td><b>${money(values.reduce((a,b)=>a+b,0))}</b></td></tr>`;\n  let rows=\'\';\n  for(let day=1;day<=data.days;day++){\n   const values=data.columns.map((_,col)=>data.cells[`${day}:${col}`]||0);\n   rows+=`<tr><th>${day}</th>${values.map((v,col)=>`<td><button class="contact-btn" style="min-width:80px" data-personal-cell="${day}:${col}" aria-label="${day}, ${esc(data.columns[col])}">${Object.hasOwn(data.cells,`${day}:${col}`)?money(v):\'—\'}</button></td>`).join(\'\')}<td><b>${money(values.reduce((a,b)=>a+b,0))}</b></td></tr>`;\n   if(day===15) rows+=totalRow(\'Итого 1–15\',data.first);\n  }\n  rows+=totalRow(\'Итого 16–\'+data.days,data.second)+totalRow(\'За месяц\',data.total);\n  grid.innerHTML=`<table style="border-collapse:separate;border-spacing:8px;min-width:100%;text-align:right"><thead><tr><th>День</th>${data.columns.map((name,col)=>`<th><button class="secondary" style="white-space:nowrap" data-personal-col="${col}">${esc(name)} ✍️</button></th>`).join(\'\')}<th>Итого ₽</th></tr></thead><tbody>${rows}</tbody></table>`;\n  grid.scrollLeft=left;grid.scrollTop=top;\n  qsa(\'[data-personal-cell]\',grid).forEach(btn=>btn.onclick=()=>{\n   if(busy)return;const [day,column]=btn.dataset.personalCell.split(\':\').map(Number),key=`${day}:${column}`;\n   const value=prompt(`${data.columns[column]} · ${day}.${month.slice(5)}\\nСумма ₽ (пусто — очистить)`,Object.hasOwn(data.cells,key)?String(data.cells[key]/100):\'\');\n   if(value!==null) save({action:\'cell\',day,column,value});\n  });\n  qsa(\'[data-personal-col]\',grid).forEach(btn=>btn.onclick=()=>{\n   if(busy)return;const column=Number(btn.dataset.personalCol),value=prompt(\'Название столбца\',data.columns[column]);\n   if(value!==null)save({action:\'rename\',column,value});\n  });\n }\n async function load(){\n  const id=++request;lock(true);grid.innerHTML=\'<div class="empty">Загрузка…</div>\';status.textContent=\'\';\n  try{const result=await api(`/api/personal-tables/${kind}/${month}`);if(!active()||id!==request)return;data=result;render()}\n  catch(e){if(active()&&id===request){data=null;grid.innerHTML=\'\';status.textContent=e.message}}\n  finally{if(active()&&id===request)lock(false)}\n }\n async function save(change){\n  if(busy||!data||!active())return;lock(true);status.textContent=\'Сохранение…\';\n  try{const result=await api(`/api/personal-tables/${kind}/${month}`,{method:\'PATCH\',body:{...change,version:data.version}});if(!active())return;data=result;render();status.textContent=\'✓ Сохранено\'}\n  catch(e){if(active())status.textContent=\'Не сохранено: \'+e.message}\n  finally{if(active())lock(false)}\n }\n qs(\'#personalAdd\').onclick=()=>{if(busy||!data)return;const value=prompt(\'Название нового столбца\');if(value!==null)save({action:\'add\',value})};\n qs(\'#personalMonth\').onchange=e=>{if(!e.target.value)return;month=e.target.value;load()};\n qsa(\'[data-personal-kind]\').forEach(btn=>btn.onclick=()=>{if(busy)return;kind=btn.dataset.personalKind;qsa(\'[data-personal-kind]\').forEach(x=>x.className=x===btn?\'primary\':\'secondary\');load()});\n await load();\n}\n' + "\n</script>\n</body>", 1)
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return HTMLResponse(INLINE_INDEX_HTML, headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"})
@@ -2759,3 +2764,108 @@ def owner_cash_months(db: Session = Depends(get_db), user: TelegramUser = Depend
     months = {day.strftime("%Y-%m") for day in dates}
     months.add(datetime.now(ZoneInfo("Europe/Moscow")).strftime("%Y-%m"))
     return {"months": sorted(months, reverse=True)}
+
+# Personal manual ledgers are separate from cash reported by brigadiers.
+PERSONAL_TABLE_COLUMNS = {
+    "earnings": ["Касса", "ГБУ", "Наличка"],
+    "cash": ["Влад Ряз", "Игорь", "Леха", "Роща", "Лев", "Арсений", "Лухман", "Перово", "Давыд", "Донской", "Макс", "Рома"],
+    "kickbacks": ["Марине", "Владу", "Заказы"],
+}
+
+class PersonalMonthlyTable(Base):
+    __tablename__ = "personal_monthly_tables"
+    id = Column(Integer, primary_key=True)
+    owner_id = Column(BigInteger, nullable=False)
+    month = Column(String(7), nullable=False)
+    kind = Column(String(20), nullable=False)
+    payload = Column(String, nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    __table_args__ = (UniqueConstraint("owner_id", "month", "kind", name="uq_personal_month_table"),)
+
+class PersonalTableChange(BaseModel):
+    version: int = Field(ge=0)
+    action: Literal["cell", "rename", "add"]
+    day: int = Field(default=1, ge=1, le=31)
+    column: int = Field(default=0, ge=0, le=39)
+    value: str = Field(default="", max_length=100)
+
+
+def _personal_month_days(month: str) -> int:
+    import calendar
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}", month):
+        raise HTTPException(422, "Выберите месяц")
+    try:
+        first = date.fromisoformat(month + "-01")
+    except ValueError:
+        raise HTTPException(422, "Некорректный месяц")
+    return calendar.monthrange(first.year, first.month)[1]
+
+
+def _personal_table_result(row, kind: str, month: str) -> dict:
+    days = _personal_month_days(month)
+    data = json.loads(row.payload) if row else {"columns": list(PERSONAL_TABLE_COLUMNS[kind]), "cells": {}}
+    sums = lambda first, last: [sum(data["cells"].get(f"{day}:{col}", 0) for day in range(first, last + 1)) for col in range(len(data["columns"]))]
+    return {**data, "month": month, "kind": kind, "days": days, "version": row.version if row else 0,
+            "first": sums(1, 15), "second": sums(16, days), "total": sums(1, days)}
+
+
+@app.get("/api/personal-tables/{kind}/{month}")
+def personal_table_get(kind: Literal["earnings", "cash", "kickbacks"], month: str,
+                       db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    _require_owner(db, user)
+    _personal_month_days(month)
+    row = db.execute(select(PersonalMonthlyTable).where(PersonalMonthlyTable.owner_id == user.id,
+        PersonalMonthlyTable.month == month, PersonalMonthlyTable.kind == kind)).scalar_one_or_none()
+    return _personal_table_result(row, kind, month)
+
+
+@app.patch("/api/personal-tables/{kind}/{month}")
+def personal_table_edit(kind: Literal["earnings", "cash", "kickbacks"], month: str, change: PersonalTableChange,
+                        db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    from decimal import Decimal, InvalidOperation
+    _require_owner(db, user)
+    days = _personal_month_days(month)
+    row = db.execute(select(PersonalMonthlyTable).where(PersonalMonthlyTable.owner_id == user.id,
+        PersonalMonthlyTable.month == month, PersonalMonthlyTable.kind == kind).with_for_update()).scalar_one_or_none()
+    if change.version != (row.version if row else 0):
+        raise HTTPException(409, "Таблица изменена в другом окне. Откройте её заново и повторите правку.")
+    data = _personal_table_result(row, kind, month)
+    columns, cells = data["columns"], data["cells"]
+    if change.action != "add" and change.column >= len(columns):
+        raise HTTPException(422, "Столбец не найден")
+    if change.action == "cell":
+        if change.day > days:
+            raise HTTPException(422, "В выбранном месяце нет такого дня")
+        raw = change.value.strip().replace(" ", "").replace("\u00a0", "").replace(",", ".")
+        key = f"{change.day}:{change.column}"
+        if not raw:
+            cells.pop(key, None)
+        else:
+            try:
+                amount = Decimal(raw)
+                if not amount.is_finite() or abs(amount) > Decimal("1000000000") or amount != amount.quantize(Decimal("0.01")):
+                    raise InvalidOperation
+            except InvalidOperation:
+                raise HTTPException(422, "Введите сумму с точностью до копеек")
+            cells[key] = int(amount * 100)
+    else:
+        name = change.value.strip()
+        if not name:
+            raise HTTPException(422, "Введите название столбца")
+        if change.action == "add":
+            if len(columns) >= 40:
+                raise HTTPException(422, "Допускается не более 40 столбцов")
+            columns.append(name)
+        else:
+            columns[change.column] = name
+    if row is None:
+        row = PersonalMonthlyTable(owner_id=user.id, month=month, kind=kind, version=0)
+        db.add(row)
+    row.payload = json.dumps({"columns": columns, "cells": cells}, ensure_ascii=False)
+    row.version += 1
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "Таблица уже создана в другом окне. Откройте её заново.")
+    return _personal_table_result(row, kind, month)
