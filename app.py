@@ -2953,3 +2953,11 @@ def list_number_cards(work_date: date, db: Session = Depends(get_db), user: Tele
     return {"count": len(rows), "items": [{"id": r.id, "employee": _employee_dict(employees[r.tg_id]) if r.tg_id in employees else {"full_name": r.full_name, "display_name": r.full_name},
         "phone": r.phone, "source": r.source, "surname": r.surname,
         "sent_at": (r.sent_at.replace(tzinfo=timezone.utc) if r.sent_at.tzinfo is None else r.sent_at).isoformat()} for r in rows]}
+
+
+@app.get("/api/bot/number-cards", dependencies=[Depends(_bot_key)])
+def bot_number_card_history(tg_id: int, db: Session = Depends(get_db)):
+    rows = db.scalars(select(NumberCardEvent).where(NumberCardEvent.tg_id == tg_id).order_by(NumberCardEvent.id)).all()
+    return {"items": [{"chat_id":r.chat_id,"message_id":r.message_id,"work_date":r.work_date.isoformat(),
+        "tg_id":r.tg_id,"full_name":r.full_name,"phone":r.phone,"source":r.source,"surname":r.surname,
+        "sent_at":r.sent_at.isoformat()} for r in rows]}
