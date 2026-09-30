@@ -270,6 +270,26 @@ _cash_html = _cash_html.replace('  await drawCash();\n  cashRefreshTimer=', """ 
   cashRefreshTimer=""", 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_cash_start] + _cash_html + INLINE_INDEX_HTML[_cash_end:]
 
+# Each modal opening owns its refresh timer and outstanding requests.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('function showModal(title, body) {',
+    'let cashModalGeneration=0;\nfunction showModal(title, body) {cashModalGeneration++;if(cashRefreshTimer){clearInterval(cashRefreshTimer);cashRefreshTimer=null}', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('function closeModal(){',
+    'function closeModal(){cashModalGeneration++;', 1)
+_cash_start = INLINE_INDEX_HTML.index('async function openCashTable(){')
+_cash_end = INLINE_INDEX_HTML.index('// Events', _cash_start)
+_cash_html = INLINE_INDEX_HTML[_cash_start:_cash_end]
+_cash_html = _cash_html.replace("  const rub=n=>", "  const cashSession=cashModalGeneration;\n  const cashBody=qs('#cashTableBody');\n  const cashActive=()=>cashSession===cashModalGeneration && qs('#cashTableBody')===cashBody && !qs('#modal').classList.contains('hidden');\n  const rub=n=>", 1)
+_cash_html = _cash_html.replace("    if(!body) return;", "    if(!body || !cashActive()) return;", 1)
+_cash_html = _cash_html.replace("    const request=++cashRequest;", "    const request=++cashRequest;\n    const requestedMonth=cashMonth, requestedRange=cashRange;", 1)
+_cash_html = _cash_html.replace("if(request!==cashRequest || qs('#cashTableBody')!==body) return;", "if(!cashActive() || request!==cashRequest || requestedMonth!==cashMonth || requestedRange!==cashRange) return;\n      if(String(ledger.start).slice(0,7)!==requestedMonth || String(ledger.end).slice(0,7)!==requestedMonth) throw new Error('Не удалось обновить выбранный месяц. Повторите попытку.');", 1)
+_cash_html = _cash_html.replace("if(request===cashRequest && qs('#cashTableBody')===body)", "if(cashActive() && request===cashRequest)", 1)
+_cash_html = _cash_html.replace("      requestAnimationFrame(()=>{", "      requestAnimationFrame(()=>{\n        if(!cashActive() || request!==cashRequest) return;", 1)
+_cash_html = _cash_html.replace("    cashMonth=value;qs('#cashMonth').value=value;", "    if(!cashActive()) return;\n    if(cashMonth!==value) cashBody.innerHTML='<div class=empty>Загрузка выбранного месяца…</div>';\n    cashMonth=value;qs('#cashMonth').value=value;", 1)
+_cash_html = _cash_html.replace("  qs('#cashMonth').onchange=event=>selectMonth(event.target.value);", "  qs('#cashMonth').oninput=event=>selectMonth(event.target.value);\n  qs('#cashMonth').onchange=event=>{if(event.target.value!==cashMonth) selectMonth(event.target.value)};", 1)
+_cash_html = _cash_html.replace("    cashRange=btn.dataset.cashRange;", "    if(!cashActive()) return;\n    cashBody.innerHTML='<div class=empty>Загрузка выбранного периода…</div>';\n    cashRange=btn.dataset.cashRange;", 1)
+_cash_html = _cash_html.replace("  cashRefreshTimer=setInterval(()=>{\n    if(qs('#cashTableBody')) drawCash();\n  },10000);", "  if(cashActive()){\n    if(cashRefreshTimer) clearInterval(cashRefreshTimer);\n    cashRefreshTimer=setInterval(()=>{if(cashActive()) drawCash()},10000);\n  }", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_cash_start] + _cash_html + INLINE_INDEX_HTML[_cash_end:]
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return HTMLResponse(INLINE_INDEX_HTML, headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"})
