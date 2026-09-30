@@ -207,6 +207,69 @@ INLINE_INDEX_HTML = re.sub(r'<button[^>]*data-cash-(?:edit|del)="[^"\n]*"[^>]*>.
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('Суммы можно исправлять вручную.', 'Доступен просмотр кассы.')
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('Здесь можно вручную изменить кассу сотрудника', 'Записи кассиров за выбранную дату')
 
+# Independent cash archive navigation: never changes the dispatcher's working date.
+_cash_start = INLINE_INDEX_HTML.index('async function openCashTable(){')
+_cash_end = INLINE_INDEX_HTML.index('// Events', _cash_start)
+_cash_html = INLINE_INDEX_HTML[_cash_start:_cash_end]
+_cash_html = _cash_html.replace("  showModal('💰 Касса', `", """  let cashMonth=new Date().toLocaleDateString('sv-SE',{timeZone:'Europe/Moscow'}).slice(0,7);
+  let cashRange='month', cashRequest=0;
+  showModal('💰 Касса', `""", 1)
+_cash_html = _cash_html.replace('<div id="cashTableBody">', """<div style="display:flex;gap:8px;align-items:center;margin:12px 0">
+      <button class="secondary" id="cashPrevMonth" aria-label="Предыдущий месяц">‹</button>
+      <label style="flex:1;min-width:0">Месяц кассы<input id="cashMonth" type="month" value="${cashMonth}" style="width:100%;box-sizing:border-box"></label>
+      <button class="secondary" id="cashNextMonth" aria-label="Следующий месяц">›</button>
+    </div>
+    <div id="cashMonthTabs" style="display:flex;gap:6px;overflow-x:auto;margin-bottom:10px"></div>
+    <div style="display:flex;gap:6px;margin-bottom:12px">
+      <button class="primary" data-cash-range="month">Весь месяц</button>
+      <button class="secondary" data-cash-range="first">1–15</button>
+      <button class="secondary" data-cash-range="second">16–конец</button>
+    </div>
+    <div id="cashTableBody">""", 1)
+_cash_html = _cash_html.replace("    if(!body) return;", """    if(!body) return;
+    const request=++cashRequest;
+    const cashDate=cashMonth+(cashRange==='second'?'-16':'-01');""", 1)
+_cash_html = _cash_html.replace("""      const [ledger, selectedDay]=await Promise.all([
+        api(`/api/cash/ledger?on_date=${state.selectedDate}`),
+        api(`/api/cash?work_date=${state.selectedDate}`)
+      ]);
+      if(!qs('#cashTableBody')) return;""", """      const ledger=await api(`/api/cash/ledger?on_date=${cashDate}&period=${cashRange==='month'?'month':'half'}`);
+      const selectedDay={rows:[]};
+      if(request!==cashRequest || qs('#cashTableBody')!==body) return;""", 1)
+# The archive is a complete daily matrix, not a second list for dispatcher's selected day.
+_details_start = _cash_html.index('        <div class="section-head" style="margin-top:16px">')
+_details_end = _cash_html.index('      `;', _details_start)
+_cash_html = _cash_html[:_details_start] + _cash_html[_details_end:]
+_cash_html = _cash_html.replace("if(qs('#cashTableBody')) qs('#cashTableBody').innerHTML=", "if(request===cashRequest && qs('#cashTableBody')===body) body.innerHTML=", 1)
+_cash_html = _cash_html.replace('  await drawCash();\n  cashRefreshTimer=', """  function selectMonth(value){
+    if(!/^[0-9]{4}-[0-9]{2}$/.test(value) || Number(value.slice(5))<1 || Number(value.slice(5))>12 || Number(value.slice(0,4))<1) return;
+    cashMonth=value;qs('#cashMonth').value=value;
+    qsa('[data-cash-month]').forEach(btn=>btn.className=btn.dataset.cashMonth===value?'primary':'secondary');
+    drawCash();
+  }
+  qs('#cashMonth').onchange=event=>selectMonth(event.target.value);
+  function shiftMonth(offset){
+    const [year,month]=cashMonth.split('-').map(Number);
+    const next=new Date(Date.UTC(year,month-1+offset,1));
+    selectMonth(next.toISOString().slice(0,7));
+  }
+  qs('#cashPrevMonth').onclick=()=>shiftMonth(-1);
+  qs('#cashNextMonth').onclick=()=>shiftMonth(1);
+  qsa('[data-cash-range]').forEach(btn=>btn.onclick=()=>{
+    cashRange=btn.dataset.cashRange;
+    qsa('[data-cash-range]').forEach(item=>item.className=item===btn?'primary':'secondary');
+    drawCash();
+  });
+  const tabs=qs('#cashMonthTabs');
+  api('/api/cash/months').then(data=>{
+    if(qs('#cashMonthTabs')!==tabs) return;
+    tabs.innerHTML=data.months.map(month=>`<button style="white-space:nowrap" class="${month===cashMonth?'primary':'secondary'}" data-cash-month="${esc(month)}">${fmtMonthYear(month+'-01')}</button>`).join('');
+    qsa('[data-cash-month]',tabs).forEach(btn=>btn.onclick=()=>selectMonth(btn.dataset.cashMonth));
+  }).catch(()=>{if(qs('#cashMonthTabs')===tabs) tabs.textContent='Выберите месяц выше';});
+  await drawCash();
+  cashRefreshTimer=""", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_cash_start] + _cash_html + INLINE_INDEX_HTML[_cash_end:]
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return HTMLResponse(INLINE_INDEX_HTML, headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"})
@@ -1942,9 +2005,13 @@ def owner_cash_day(work_date: date, db: Session = Depends(get_db), user: Telegra
 
 
 @app.get("/api/cash/ledger")
-def owner_cash_ledger(on_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+def owner_cash_ledger(on_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin), period: Literal["half", "month"] = "half"):
     _require_owner(db, user)
     start, end = _period_bounds(on_date)
+    if period == "month":
+        import calendar
+        start = on_date.replace(day=1)
+        end = on_date.replace(day=calendar.monthrange(on_date.year, on_date.month)[1])
 
     entries = db.execute(
         select(CashEntry)
@@ -2662,3 +2729,13 @@ async def send_cash_reminder(db: Session = Depends(get_db),
         else:
             failed += 1
     return {"sent_chats": sent, "failed_chats": failed}
+
+
+@app.get("/api/cash/months")
+def owner_cash_months(db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    _require_owner(db, user)
+    dates = db.execute(select(CashEntry.work_date).where(
+        CashEntry.brigadier_tg_id.notin_(_cash_excluded_ids(db))).distinct()).scalars().all()
+    months = {day.strftime("%Y-%m") for day in dates}
+    months.add(datetime.now(ZoneInfo("Europe/Moscow")).strftime("%Y-%m"))
+    return {"months": sorted(months, reverse=True)}
