@@ -3005,30 +3005,34 @@ def bot_number_card_history(tg_id: int, db: Session = Depends(get_db)):
         "sent_at":r.sent_at.isoformat()} for r in rows]}
 
 
-# Owner-only removal in the staff directory. The server enforces the same permission.
-_employee_delete_start = INLINE_INDEX_HTML.index('async function loadEmployees(){')
-INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_employee_delete_start] + INLINE_INDEX_HTML[_employee_delete_start:].replace(
-    '<div class="car">${x.has_car?',
-    '${state.bootstrap?.is_owner && Number(x.tg_id)!==Number(state.bootstrap.user.id) ? `<button class="secondary danger" data-employee-delete="${x.id}" aria-label="Удалить сотрудника" title="Удалить сотрудника" style="min-width:44px;min-height:44px;padding:6px">🗑</button>` : ""}<div class="car">${x.has_car?',
+# Owner-only deletion inside the employee edit card.
+_profile_start = INLINE_INDEX_HTML.index('function openEmployeeProfile(')
+_profile_end = INLINE_INDEX_HTML.index('function openManualReadiness(', _profile_start)
+_profile_html = INLINE_INDEX_HTML[_profile_start:_profile_end]
+_profile_html = _profile_html.replace(
+    '<button type="submit" class="primary">Сохранить</button></form>',
+    '<div style="display:flex;align-items:center;justify-content:space-between;gap:16px"><button type="submit" class="primary">Сохранить</button>${state.bootstrap?.is_owner && Number(employee.tg_id)!==Number(state.bootstrap.user.id) ? `<button type="button" id="deleteEmployeeProfile" class="secondary danger" aria-label="Удалить сотрудника" title="Удалить сотрудника" style="min-width:44px;min-height:44px;padding:8px;font-size:22px">🗑</button>` : ""}</div></form>',
     1,
 )
-INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
-    "  wireContactButtons(qs('#employeesList'));",
-    """  qsa('[data-employee-delete]',qs('#employeesList')).forEach(button=>button.onclick=async()=>{
-    const employee=filtered.find(x=>Number(x.id)===Number(button.dataset.employeeDelete));
-    if(!employee || button.disabled)return;
+_profile_html = _profile_html.replace(
+    "  qs('#employeeProfileForm').onsubmit=async event=>{",
+    """  const deleteButton=qs('#deleteEmployeeProfile');
+  if(deleteButton)deleteButton.onclick=async()=>{
+    if(deleteButton.disabled)return;
     if(!confirm(`Удалить сотрудника «${employeeListName(employee)}» из рабочих списков? История заказов и кассы сохранится. Автоматическая синхронизация не вернёт его в список.`))return;
-    button.disabled=true;
-    const scroll=window.scrollY;
+    const saveButton=qs('#employeeProfileForm button[type="submit"]');
+    deleteButton.disabled=true;saveButton.disabled=true;
     try{
       await api(`/api/employees/${employee.id}`,{method:'DELETE'});
-      await loadEmployees();
+      closeModal();
+      await loadReadiness();
+      if(onSaved)await onSaved();
       state.bootstrap=await api(`/api/bootstrap?work_date=${state.selectedDate}`);
-      renderSummary();
+      renderSummary();restoreEmployeeScroll(position);
       toast('Сотрудник удалён из рабочих списков');
-      requestAnimationFrame(()=>window.scrollTo(0,scroll));
-    }catch(e){toast(e.message,5000);button.disabled=false}
-  });
-  wireContactButtons(qs('#employeesList'));""",
+    }catch(error){toast(error.message,4500);deleteButton.disabled=false;saveButton.disabled=false;}
+  };
+  qs('#employeeProfileForm').onsubmit=async event=>{""",
     1,
 )
+INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_profile_start] + _profile_html + INLINE_INDEX_HTML[_profile_end:]
