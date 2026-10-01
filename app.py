@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 from sqlalchemy import and_, func, or_, select, inspect as sa_inspect, text
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import Column, Integer, BigInteger, String, Date, DateTime, UniqueConstraint
@@ -2935,6 +2935,8 @@ class DispatchCountChange(BaseModel):
 @app.patch("/api/dispatch-counts/{work_date}")
 def edit_dispatch_count(work_date: date, change: DispatchCountChange,
                         db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    if change.field != 'requested_staff':
+        raise HTTPException(422, 'Введите количество заказов по категориям')
     row = db.get(DispatchDayCounts, work_date)
     if row is None:
         row = DispatchDayCounts(work_date=work_date, requested_staff=0)
@@ -2947,6 +2949,97 @@ def edit_dispatch_count(work_date: date, change: DispatchCountChange,
     setattr(row, change.field, change.value)
     db.commit()
     return {"saved": True}
+
+
+ORDER_COUNT_TYPES = {
+    'private': ['standard:3', 'standard:4', 'standard:5', 'standard:6', 'vip:4', 'vip:6', 'elite:4', 'elite:6'],
+    'gbu': ['standard:4', 'standard:6', 'elite:4', 'elite:6'],
+}
+
+
+class DispatchCategoryCounts(Base):
+    __tablename__ = 'dispatch_category_counts'
+    work_date = Column(Date, primary_key=True)
+    source = Column(String(20), primary_key=True)
+    payload = Column(String, nullable=False)
+    unallocated = Column(Integer, nullable=False, default=0)
+    version = Column(Integer, nullable=False, default=1)
+
+
+class CategoryCountsChange(BaseModel):
+    counts: dict[str, StrictInt]
+    unallocated: int = Field(default=0, ge=0, le=100000, strict=True)
+    version: int = Field(ge=0, strict=True)
+
+
+def _category_counts(db, work_date, source):
+    row = db.get(DispatchCategoryCounts, (work_date, source))
+    counts = dict.fromkeys(ORDER_COUNT_TYPES[source], 0)
+    if row:
+        counts.update(json.loads(row.payload))
+        return {'counts': counts, 'unallocated': row.unallocated, 'total': sum(counts.values())+row.unallocated, 'version': row.version}
+    manual = db.get(DispatchDayCounts, work_date)
+    old_total = getattr(manual, source+'_count') if manual else None
+    unallocated = 0
+    if old_total is not None:
+        # Old numeric overrides have no reliable category breakdown.
+        unallocated = old_total
+    else:
+        for order in db.scalars(select(Order).where(Order.work_date==work_date, Order.source==source, Order.status!='cancelled')):
+            key=f'{order.category}:{order.team_size}'
+            if key in counts: counts[key]+=1
+            else: unallocated+=1
+    return {'counts':counts,'unallocated':unallocated,'total':sum(counts.values())+unallocated,'version':0}
+
+
+@app.get('/api/order-counts/{work_date}/{source}')
+def get_category_counts(work_date: date, source: Literal['private','gbu'], db: Session=Depends(get_db), user: TelegramUser=Depends(require_admin)):
+    return _category_counts(db,work_date,source)
+
+
+@app.put('/api/order-counts/{work_date}/{source}')
+def save_category_counts(work_date: date, source: Literal['private','gbu'], change: CategoryCountsChange,
+                         db: Session=Depends(get_db), user: TelegramUser=Depends(require_admin)):
+    if set(change.counts)!=set(ORDER_COUNT_TYPES[source]) or any(type(v) is not int or not 0<=v<=100000 for v in change.counts.values()):
+        raise HTTPException(422,'Введите целые неотрицательные количества для допустимых категорий')
+    total=sum(change.counts.values())+change.unallocated
+    if total>100000: raise HTTPException(422,'Слишком большое количество заказов')
+    row=db.execute(select(DispatchCategoryCounts).where(DispatchCategoryCounts.work_date==work_date, DispatchCategoryCounts.source==source).with_for_update()).scalar_one_or_none()
+    if (row.version if row else 0)!=change.version:
+        raise HTTPException(409,'Данные изменены в другом окне. Откройте категории заново.')
+    if row is None:
+        row=DispatchCategoryCounts(work_date=work_date,source=source,version=0)
+        db.add(row)
+    row.payload=json.dumps(change.counts);row.unallocated=change.unallocated;row.version+=1
+    try:
+        db.flush()
+        # Keep existing day cards and date strip compatible with the new breakdown.
+        manual=db.execute(select(DispatchDayCounts).where(DispatchDayCounts.work_date==work_date).with_for_update()).scalar_one_or_none()
+        if manual is None:
+            manual=DispatchDayCounts(work_date=work_date,requested_staff=0);db.add(manual)
+        setattr(manual,source+'_count',total)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409,'Данные изменены в другом окне. Откройте категории заново.')
+    return {'saved':True,'total':total,'version':row.version}
+
+
+@app.get('/api/order-count-period')
+def order_count_period(month: str, half: Literal['first','second']='first', db: Session=Depends(get_db), user: TelegramUser=Depends(require_admin)):
+    days=_personal_month_days(month)
+    first=date.fromisoformat(month+'-01').replace(day=1 if half=='first' else 16)
+    last=first.replace(day=15 if half=='first' else days)
+    result={src:{'counts':dict.fromkeys(keys,0),'unallocated':0,'total':0} for src,keys in ORDER_COUNT_TYPES.items()}
+    daily=[]
+    for offset in range((last-first).days+1):
+        day=first+timedelta(days=offset);item={'date':day.isoformat()}
+        for src in ORDER_COUNT_TYPES:
+            values=_category_counts(db,day,src);item[src]=values['total']
+            for key,value in values['counts'].items():result[src]['counts'][key]+=value
+            result[src]['unallocated']+=values['unallocated'];result[src]['total']+=values['total']
+        item['total']=item['private']+item['gbu'];daily.append(item)
+    return {'start':first.isoformat(),'end':last.isoformat(),'days':days,'sources':result,'daily':daily,'total':sum(x['total'] for x in result.values())}
 
 class NumberCardEvent(Base):
     __tablename__ = "number_card_events"
@@ -3036,3 +3129,57 @@ _profile_html = _profile_html.replace(
     1,
 )
 INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_profile_start] + _profile_html + INLINE_INDEX_HTML[_profile_end:]
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    '<div class="metric"><b>${s.orders_total}</b><span>Заказов</span></div>',
+    '<button class="metric" id="orderPeriodBtn"><b>${s.orders_total}</b><span>Заказов · итоги ›</span></button>', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "  qs('#numberCardsBtn').onclick=openNumberCards;",
+    "  qs('#orderPeriodBtn').onclick=openOrderCountPeriod;\n  qs('#numberCardsBtn').onclick=openNumberCards;", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    'async function editDispatchCount(field){',
+    "async function editDispatchCount(field){\n if(field==='private_count'||field==='gbu_count'){await openOrderCategoryCounts(field==='private_count'?'private':'gbu');return}",1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</script>\n</body>', r'''
+const orderCountTypes={private:['standard:3','standard:4','standard:5','standard:6','vip:4','vip:6','elite:4','elite:6'],gbu:['standard:4','standard:6','elite:4','elite:6']};
+const orderCountLabel=key=>{const [cat,size]=key.split(':');return `${{standard:'Стандарт',vip:'Вип',elite:'Элит'}[cat]} · ${size} чел`};
+async function openOrderCategoryCounts(source){
+ const day=state.selectedDate;
+ showModal(source==='gbu'?'Заказы ГБУ':'Частные заказы','<div id="categoryCountBody">Загрузка…</div>');
+ const body=qs('#categoryCountBody');
+ try{
+  const data=await api(`/api/order-counts/${day}/${source}`);if(qs('#categoryCountBody')!==body)return;
+  body.innerHTML=`<p class="muted">На ${esc(day)}. Укажите количество заказов каждой категории — не число сотрудников.</p>
+   <form id="categoryCountForm">${orderCountTypes[source].map(key=>`<label class="employee-row"><span>${orderCountLabel(key)}</span><input data-category="${key}" type="number" inputmode="numeric" min="0" max="100000" step="1" required value="${data.counts[key]||0}" style="width:90px"></label>`).join('')}
+   ${data.unallocated?`<div class="attention"><p>Ранее введено без категорий: ${data.unallocated}. При распределении уменьшайте остаток, чтобы не посчитать заказы дважды.</p><label>Без категории <input id="categoryUnallocated" type="number" inputmode="numeric" min="0" max="100000" step="1" required value="${data.unallocated}" style="width:100px"></label></div>`:''}
+   <h3>Всего: <span id="categoryCountTotal">${data.total}</span></h3><button class="primary" type="submit">Сохранить</button></form>`;
+  const form=qs('#categoryCountForm');
+  const read=()=>{const counts={};qsa('[data-category]',body).forEach(el=>counts[el.dataset.category]=Number(el.value));return {counts,unallocated:Number(qs('#categoryUnallocated')?.value||0),version:data.version}};
+  form.oninput=()=>{const v=read();qs('#categoryCountTotal').textContent=Object.values(v.counts).reduce((a,b)=>a+b,0)+v.unallocated};
+  form.onsubmit=async event=>{
+   event.preventDefault();const button=form.querySelector('button[type="submit"]');if(button.disabled)return;
+   const values=read();if([...Object.values(values.counts),values.unallocated].some(v=>!Number.isInteger(v)||v<0||v>100000)){toast('Введите целые неотрицательные количества');return}
+   button.disabled=true;
+   try{await api(`/api/order-counts/${day}/${source}`,{method:'PUT',body:JSON.stringify(values)});
+    if(qs('#categoryCountBody')===body)closeModal();
+    await loadBootstrap(state.selectedDate);toast('Количество заказов сохранено');
+   }catch(e){toast(e.message,6000);button.disabled=false}
+  };
+ }catch(e){if(qs('#categoryCountBody')===body)body.textContent=e.message}
+}
+async function openOrderCountPeriod(){
+ let month=state.selectedDate.slice(0,7),half=Number(state.selectedDate.slice(8))<=15?'first':'second',request=0;
+ showModal('Итоги заказов',`<div id="orderPeriodPanel"><label>Месяц <input id="orderPeriodMonth" type="month" value="${month}"></label><div style="display:flex;gap:8px;margin:14px 0"><button id="orderHalfFirst" class="secondary">1–15</button><button id="orderHalfSecond" class="secondary">16–конец</button></div><div id="orderPeriodBody"></div></div>`);
+ const panel=qs('#orderPeriodPanel'),body=qs('#orderPeriodBody');
+ async function draw(){
+  const id=++request;if(qs('#orderPeriodPanel')!==panel)return;
+  qs('#orderHalfFirst').className=half==='first'?'primary':'secondary';qs('#orderHalfSecond').className=half==='second'?'primary':'secondary';body.textContent='Загрузка…';
+  try{const r=await api(`/api/order-count-period?month=${encodeURIComponent(month)}&half=${half}`);if(id!==request||qs('#orderPeriodPanel')!==panel)return;
+   body.innerHTML=`<div class="attention"><h3>Всего заказов: ${r.total}</h3><p>${esc(r.start)} — ${esc(r.end)}</p></div>${['private','gbu'].map(src=>`<h3>${src==='gbu'?'ГБУ':'Частные'}: ${r.sources[src].total}</h3>${orderCountTypes[src].map(key=>`<div class="employee-row"><span>${orderCountLabel(key)}</span><b>${r.sources[src].counts[key]}</b></div>`).join('')}${r.sources[src].unallocated?`<p>Без категории: ${r.sources[src].unallocated}</p>`:''}`).join('')}<h3>По дням</h3><table style="width:100%"><thead><tr><th>День</th><th>Частные</th><th>ГБУ</th><th>Всего</th></tr></thead><tbody>${r.daily.map(d=>`<tr><td>${d.date.slice(8)}</td><td>${d.private}</td><td>${d.gbu}</td><td>${d.total}</td></tr>`).join('')}</tbody></table>`;
+  }catch(e){if(id===request&&qs('#orderPeriodPanel')===panel)body.textContent=e.message}
+ }
+ qs('#orderPeriodMonth').onchange=e=>{if(e.target.value){month=e.target.value;draw()}};
+ qs('#orderHalfFirst').onclick=()=>{half='first';draw()};qs('#orderHalfSecond').onclick=()=>{half='second';draw()};await draw();
+}
+</script>
+</body>''',1)
