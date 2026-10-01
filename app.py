@@ -885,12 +885,13 @@ def _day_summary(db: Session, work_date: date):
     orders = db.execute(select(Order).where(Order.work_date == work_date)).scalars().all()
     active = [o for o in orders if o.status != "cancelled"]
     readiness = readiness_summary_data(db, work_date)
-    manual = db.get(DispatchDayCounts, work_date)
-    private = manual.private_count if manual and manual.private_count is not None else sum(o.source == "private" for o in active)
-    gbu = manual.gbu_count if manual and manual.gbu_count is not None else sum(o.source == "gbu" for o in active)
+    completion = order_completion_data(db, work_date)
+    private = completion["sources"]["private"]["expected"]
+    gbu = completion["sources"]["gbu"]["expected"]
     return {
         "requested_staff": _requested_staff_from_orders(db, work_date),
         "number_cards_count": db.scalar(select(func.count(NumberCardEvent.id)).where(NumberCardEvent.work_date == work_date, _visible_number_card())),
+        "order_completion": completion,
         "orders_total": private + gbu,
         "private_count": private,
         "gbu_count": gbu,
@@ -3141,8 +3142,82 @@ class NumberCardDeletion(Base):
     deleted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
+class NumberCardClosure(Base):
+    __tablename__ = 'number_card_closures'
+    event_id = Column(Integer, primary_key=True)
+    report_chat_id = Column(BigInteger, nullable=False)
+    report_message_id = Column(BigInteger, nullable=False)
+    received_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    __table_args__ = (UniqueConstraint('report_chat_id', 'report_message_id', name='uq_number_close_report'),)
+
+
+class NumberCardClosureInput(BaseModel):
+    card: NumberCardInput
+    report_chat_id: int = Field(lt=0)
+    report_message_id: int = Field(gt=0)
+
+
 def _visible_number_card():
     return ~select(NumberCardDeletion.event_id).where(NumberCardDeletion.event_id == NumberCardEvent.id).exists()
+
+
+def order_completion_data(db: Session, work_date: date):
+    counts = {source: {'cards': 0, 'closed': 0} for source in ORDER_COUNT_TYPES}
+    rows = db.execute(
+        select(NumberCardEvent.source, func.count(NumberCardEvent.id), func.count(NumberCardClosure.event_id))
+        .outerjoin(NumberCardClosure, NumberCardClosure.event_id == NumberCardEvent.id)
+        .where(NumberCardEvent.work_date == work_date, _visible_number_card())
+        .group_by(NumberCardEvent.source)
+    ).all()
+    for source, cards, closed in rows:
+        if source in counts:
+            counts[source] = {'cards': cards, 'closed': closed}
+    for source, item in counts.items():
+        expected = int(_category_counts(db, work_date, source)['total'])
+        item.update(expected=expected,
+                    missing_numbers=max(0, expected - item['cards']),
+                    extra_numbers=max(0, item['cards'] - expected),
+                    missing_reports=max(0, expected - item['closed']),
+                    extra_reports=max(0, item['closed'] - expected),
+                    complete=expected > 0 and item['cards'] == expected and item['closed'] == expected)
+    return {'work_date': work_date.isoformat(), 'sources': counts,
+            'expected': sum(x['expected'] for x in counts.values()),
+            'cards': sum(x['cards'] for x in counts.values()),
+            'closed': sum(x['closed'] for x in counts.values())}
+
+
+@app.get('/api/bot/order-completion', dependencies=[Depends(_bot_key)])
+def bot_order_completion(work_date: date, db: Session = Depends(get_db)):
+    result = order_completion_data(db, work_date)
+    # The bot publishes queued reports only for the current, non-deleted cards.
+    rows = db.scalars(select(NumberCardEvent).where(
+        NumberCardEvent.work_date == work_date, _visible_number_card()
+    ).order_by(NumberCardEvent.id)).all()
+    result['number_cards'] = [{'chat_id': row.chat_id, 'message_id': row.message_id,
+                               'tg_id': row.tg_id, 'source': row.source} for row in rows]
+    return result
+
+
+@app.post('/api/bot/number-cards/closed', dependencies=[Depends(_bot_key)])
+def record_number_card_closure(data: NumberCardClosureInput, db: Session = Depends(get_db)):
+    # The card can arrive with its report if its earlier sync was interrupted.
+    result = record_number_card(data.card, db)
+    card = db.get(NumberCardEvent, result['id'])
+    if card.tg_id != data.card.tg_id or card.source != data.card.source or card.work_date != data.card.work_date:
+        raise HTTPException(409, 'Данные карточки не совпадают')
+    row = db.get(NumberCardClosure, card.id)
+    if row is None:
+        row = NumberCardClosure(event_id=card.id, report_chat_id=data.report_chat_id,
+                                report_message_id=data.report_message_id)
+        db.add(row)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            row = db.get(NumberCardClosure, card.id)
+    if row is None or (row.report_chat_id, row.report_message_id) != (data.report_chat_id, data.report_message_id):
+        raise HTTPException(409, 'Отчёт уже привязан к другой записи')
+    return {'saved': True, 'id': card.id}
 
 
 @app.delete('/api/number-cards/{event_id}')
@@ -3181,7 +3256,8 @@ def record_number_card(data: NumberCardInput, db: Session = Depends(get_db)):
 def list_number_cards(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
     rows = db.scalars(select(NumberCardEvent).where(NumberCardEvent.work_date == work_date, _visible_number_card()).order_by(NumberCardEvent.sent_at, NumberCardEvent.id)).all()
     employees = {e.tg_id: e for e in db.scalars(select(Employee).where(Employee.tg_id.in_([r.tg_id for r in rows])))} if rows else {}
-    return {"count": len(rows), "items": [{"id": r.id, "employee": _employee_dict(employees[r.tg_id]) if r.tg_id in employees else {"full_name": r.full_name, "display_name": r.full_name},
+    closed_ids = set(db.scalars(select(NumberCardClosure.event_id).where(NumberCardClosure.event_id.in_([r.id for r in rows])))) if rows else set()
+    return {"count": len(rows), "progress": order_completion_data(db, work_date), "items": [{"id": r.id, "closed": r.id in closed_ids, "employee": _employee_dict(employees[r.tg_id]) if r.tg_id in employees else {"full_name": r.full_name, "display_name": r.full_name},
         "phone": brigadier_phone8(r.phone), "source": r.source, "surname": r.surname,
         "sent_at": (r.sent_at.replace(tzinfo=timezone.utc) if r.sent_at.tzinfo is None else r.sent_at).isoformat()} for r in rows]}
 
@@ -3300,7 +3376,7 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_number_list_start] + r'''async function 
  async function draw(){
   try{
    const r=await api(`/api/number-cards?work_date=${day}`);if(qs('#numberCardsBody')!==body)return;
-   body.className='';body.innerHTML=`<div class="attention"><h4>Отправлено: ${r.count}</h4><p>За ${esc(day)}. Кто выставил номер через бота.</p></div>${r.items.map((x,i)=>`<div class="employee-row"><div class="name"><b>${i+1}. ${esc(employeeListName(x.employee))}</b><small>${x.source==='gbu'?'ГБУ':'Частный'} · ${esc(x.surname)} · ${esc(new Date(x.sent_at).toLocaleTimeString('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'}))}</small><small>📞 ${esc(x.phone)} · Номер отправлен</small></div>${state.bootstrap?.is_owner?`<button type="button" class="secondary danger" data-number-delete="${x.id}" aria-label="Удалить запись" style="min-width:44px;min-height:44px">🗑</button>`:''}</div>`).join('')||'<div class="empty">Номера пока не отправляли</div>'}`;
+   body.className='';body.innerHTML=`<div class="attention"><h4>Номера: ${r.count}/${r.progress.expected}</h4><p>За ${esc(day)}. Кто выставил номер через бота.</p>${["private","gbu"].map(source=>{const p=r.progress.sources[source];return `<p><b>${source==="gbu"?"ГБУ":"Частные"}</b> · Номера ${p.cards}/${p.expected} · Закрыто ${p.closed}/${p.expected}${p.complete?" ✅":""}${p.missing_numbers?` · Не хватает номеров: ${p.missing_numbers}`:""}${p.extra_numbers?` · ⚠️ Лишних номеров: ${p.extra_numbers}`:""}</p>`}).join("")}</div>${r.items.map((x,i)=>`<div class="employee-row"><div class="name"><b>${i+1}. ${esc(employeeListName(x.employee))}</b><small>${x.source==='gbu'?'ГБУ':'Частный'} · ${esc(x.surname)} · ${esc(new Date(x.sent_at).toLocaleTimeString('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'}))}</small><small>📞 ${esc(x.phone)} · ${x.closed?"✅ Заказ закрыт":"Ожидается закрытие"}</small></div>${state.bootstrap?.is_owner?`<button type="button" class="secondary danger" data-number-delete="${x.id}" aria-label="Удалить запись" style="min-width:44px;min-height:44px">🗑</button>`:''}</div>`).join('')||'<div class="empty">Номера пока не отправляли</div>'}`;
    qsa('[data-number-delete]',body).forEach(button=>button.onclick=async()=>{
     const item=r.items.find(x=>Number(x.id)===Number(button.dataset.numberDelete));if(!item||button.disabled)return;
     if(!confirm(`Удалить запись «${employeeListName(item.employee)} · ${item.surname}» из списка и подсчёта за ${day}? Сообщение в Telegram останется.`))return;
@@ -3318,3 +3394,15 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_number_list_start] + r'''async function 
  }
  await draw();
 }''' + INLINE_INDEX_HTML[_number_list_end:]
+
+
+# Match the dashboard counters to the same dated plan used for completion notices.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    '<b>📱 ${s.number_cards_count||0}</b>',
+    '<b>📱 ${s.number_cards_count||0}/${s.orders_total}</b>', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    '<span>Частных</span></button>',
+    '<span>Частных</span><span>Закрыто ${s.order_completion?.sources.private.closed||0}/${s.private_count}</span></button>', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    '<span>ГБУ</span></button>',
+    '<span>ГБУ</span><span>Закрыто ${s.order_completion?.sources.gbu.closed||0}/${s.gbu_count}</span></button>', 1)
