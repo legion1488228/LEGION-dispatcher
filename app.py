@@ -49,8 +49,22 @@ SOURCE_LABELS = {"private": "Частный", "gbu": "ГБУ"}
 HIDDEN_TG_IDS = {630614760}
 
 
+class EmployeeDeletion(Base):
+    __tablename__ = "employee_deletions"
+    employee_id = Column(Integer, primary_key=True)
+    tg_id = Column(BigInteger, nullable=True, index=True)
+    deleted_by_tg_id = Column(BigInteger, nullable=False)
+    deleted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
 def _visible_employee():
-    return or_(Employee.tg_id.is_(None), Employee.tg_id.notin_(HIDDEN_TG_IDS))
+    return and_(
+        or_(Employee.tg_id.is_(None), Employee.tg_id.notin_(HIDDEN_TG_IDS)),
+        ~select(EmployeeDeletion.employee_id).where(or_(
+            EmployeeDeletion.employee_id == Employee.id,
+            and_(Employee.tg_id.is_not(None), EmployeeDeletion.tg_id == Employee.tg_id),
+        )).exists(),
+    )
 
 app = FastAPI(title="ЛЕГИОН — Диспетчерская", version="1.0.1")
 
@@ -762,6 +776,16 @@ def _upsert_employee(db: Session, data: EmployeeSync) -> Employee:
         db.add(emp)
     elif data.tg_id and not emp.tg_id:
         emp.tg_id = data.tg_id
+    deleted = db.get(EmployeeDeletion, emp.id) if emp.id else None
+    if not deleted and emp.tg_id:
+        deleted = db.execute(select(EmployeeDeletion).where(EmployeeDeletion.tg_id == emp.tg_id)).scalars().first()
+    if deleted:
+        if emp.tg_id and not deleted.tg_id:
+            deleted.tg_id = emp.tg_id
+        emp.active = False
+        emp.is_cashier = False
+        db.flush()
+        return emp
     if not data.preserve_identity or not emp.full_name:
         emp.full_name = data.full_name.strip()
     if data.phone.strip():
@@ -1797,6 +1821,24 @@ def bulk_employees(items: list[EmployeeSync], db: Session = Depends(get_db), use
         result.append(emp)
     db.commit()
     return [_employee_dict(x) for x in result if x.tg_id not in HIDDEN_TG_IDS]
+
+
+@app.delete("/api/employees/{employee_id}")
+def delete_employee(employee_id: int, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    if not _is_owner(db, user.id):
+        raise HTTPException(403, "Удаление сотрудников доступно только владельцу")
+    emp = db.get(Employee, employee_id)
+    if emp is None:
+        raise HTTPException(404, "Сотрудник не найден")
+    if emp.tg_id == user.id:
+        raise HTTPException(400, "Свой аккаунт удалить нельзя")
+    if db.get(EmployeeDeletion, employee_id) is None:
+        db.add(EmployeeDeletion(employee_id=employee_id, tg_id=emp.tg_id, deleted_by_tg_id=user.id))
+    # Keep accounting and previous assignments intact; remove only from active staff.
+    emp.active = False
+    emp.is_cashier = False
+    db.commit()
+    return {"ok": True, "employee_id": employee_id}
 
 
 # ---------- BOT integration ----------
@@ -2961,3 +3003,32 @@ def bot_number_card_history(tg_id: int, db: Session = Depends(get_db)):
     return {"items": [{"chat_id":r.chat_id,"message_id":r.message_id,"work_date":r.work_date.isoformat(),
         "tg_id":r.tg_id,"full_name":r.full_name,"phone":r.phone,"source":r.source,"surname":r.surname,
         "sent_at":r.sent_at.isoformat()} for r in rows]}
+
+
+# Owner-only removal in the staff directory. The server enforces the same permission.
+_employee_delete_start = INLINE_INDEX_HTML.index('async function loadEmployees(){')
+INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_employee_delete_start] + INLINE_INDEX_HTML[_employee_delete_start:].replace(
+    '<div class="car">${x.has_car?',
+    '${state.bootstrap?.is_owner && Number(x.tg_id)!==Number(state.bootstrap.user.id) ? `<button class="secondary danger" data-employee-delete="${x.id}" aria-label="Удалить сотрудника" title="Удалить сотрудника" style="min-width:44px;min-height:44px;padding:6px">🗑</button>` : ""}<div class="car">${x.has_car?',
+    1,
+)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "  wireContactButtons(qs('#employeesList'));",
+    """  qsa('[data-employee-delete]',qs('#employeesList')).forEach(button=>button.onclick=async()=>{
+    const employee=filtered.find(x=>Number(x.id)===Number(button.dataset.employeeDelete));
+    if(!employee || button.disabled)return;
+    if(!confirm(`Удалить сотрудника «${employeeListName(employee)}» из рабочих списков? История заказов и кассы сохранится. Автоматическая синхронизация не вернёт его в список.`))return;
+    button.disabled=true;
+    const scroll=window.scrollY;
+    try{
+      await api(`/api/employees/${employee.id}`,{method:'DELETE'});
+      await loadEmployees();
+      state.bootstrap=await api(`/api/bootstrap?work_date=${state.selectedDate}`);
+      renderSummary();
+      toast('Сотрудник удалён из рабочих списков');
+      requestAnimationFrame(()=>window.scrollTo(0,scroll));
+    }catch(e){toast(e.message,5000);button.disabled=false}
+  });
+  wireContactButtons(qs('#employeesList'));""",
+    1,
+)
