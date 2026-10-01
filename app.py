@@ -3150,11 +3150,14 @@ async function openOrderCategoryCounts(source){
  try{
   const data=await api(`/api/order-counts/${day}/${source}`);if(qs('#categoryCountBody')!==body)return;
   body.innerHTML=`<p class="muted">На ${esc(day)}. Укажите количество заказов каждой категории — не число сотрудников.</p>
-   <form id="categoryCountForm">${orderCountTypes[source].map(key=>`<label class="employee-row"><span>${orderCountLabel(key)}</span><input data-category="${key}" type="number" inputmode="numeric" min="0" max="100000" step="1" required value="${data.counts[key]||0}" style="width:90px"></label>`).join('')}
-   ${data.unallocated?`<div class="attention"><p>Ранее введено без категорий: ${data.unallocated}. При распределении уменьшайте остаток, чтобы не посчитать заказы дважды.</p><label>Без категории <input id="categoryUnallocated" type="number" inputmode="numeric" min="0" max="100000" step="1" required value="${data.unallocated}" style="width:100px"></label></div>`:''}
-   <h3>Всего: <span id="categoryCountTotal">${data.total}</span></h3><button class="primary" type="submit">Сохранить</button></form>`;
+   <form id="categoryCountForm">${orderCountTypes[source].map(key=>`<label class="employee-row"><span>${orderCountLabel(key)}</span><input data-category="${key}" type="number" inputmode="numeric" min="0" max="100000" step="1" value="${data.counts[key]||''}" style="width:90px"></label>`).join('')}
+   <h3>Всего: <span id="categoryCountTotal">${Object.values(data.counts).reduce((a,b)=>a+b,0)}</span></h3><button class="primary" type="submit">Сохранить</button></form>`;
   const form=qs('#categoryCountForm');
-  const read=()=>{const counts={};qsa('[data-category]',body).forEach(el=>counts[el.dataset.category]=Number(el.value));return {counts,unallocated:Number(qs('#categoryUnallocated')?.value||0),version:data.version}};
+  qsa('[data-category]',body).forEach(input=>{
+   input.onfocus=()=>{if(input.value==='0')input.value=''};
+   input.onblur=()=>{if(input.value!==''&&Number.isInteger(Number(input.value))&&Number(input.value)>=0)input.value=Number(input.value)===0?'':String(Number(input.value))};
+  });
+  const read=()=>{const counts={};qsa('[data-category]',body).forEach(el=>counts[el.dataset.category]=Number(el.value));return {counts,unallocated:0,version:data.version}};
   form.oninput=()=>{const v=read();qs('#categoryCountTotal').textContent=Object.values(v.counts).reduce((a,b)=>a+b,0)+v.unallocated};
   form.onsubmit=async event=>{
    event.preventDefault();const button=form.querySelector('button[type="submit"]');if(button.disabled)return;
