@@ -49,6 +49,15 @@ SOURCE_LABELS = {"private": "Частный", "gbu": "ГБУ"}
 HIDDEN_TG_IDS = {630614760}
 
 
+def brigadier_phone8(value: str | None) -> str:
+    """Use the domestic prefix for complete Russian numbers, keeping other values intact."""
+    original = str(value or "").strip()
+    compact = re.sub(r"[\s()\-]", "", original)
+    if re.fullmatch(r"(?:\+?7|8)[0-9]{10}", compact):
+        return "8" + compact[-10:]
+    return original
+
+
 class EmployeeDeletion(Base):
     __tablename__ = "employee_deletions"
     employee_id = Column(Integer, primary_key=True)
@@ -141,6 +150,7 @@ def startup():
     _seed_gbu_agents()
     with Session(engine) as db:
         _recover_employee_profiles(db)
+        _normalize_brigadier_phones(db)
         _purge_demo_cash_entries(db)
         for emp in db.execute(select(Employee)).scalars():
             if _cashier_excluded(db, emp):
@@ -605,6 +615,18 @@ def _cash_row_dict(x: CashEntry, db: Session | None = None) -> dict:
     }
 
 
+def _normalize_brigadier_phones(db):
+    for emp in db.scalars(select(Employee).where(Employee.group_code == "brigadier")):
+        override = db.get(EmployeePhoneOverride, emp.id)
+        if override is not None:
+            override.phone = brigadier_phone8(override.phone)
+            emp.phone = override.phone
+        else:
+            emp.phone = brigadier_phone8(emp.phone)
+    for card in db.scalars(select(NumberCardEvent)):
+        card.phone = brigadier_phone8(card.phone)
+
+
 def _employee_dict(emp: Employee, workload: int = 0, readiness_status: str | None = None, brig_height: int | None = None):
     diff = abs((emp.height_cm or 0) - brig_height) if brig_height and emp.height_cm else None
     return {
@@ -612,7 +634,7 @@ def _employee_dict(emp: Employee, workload: int = 0, readiness_status: str | Non
         "tg_id": emp.tg_id,
         "full_name": emp.full_name,
         "display_name": ((emp.full_name.split()[0] if emp.full_name else "") + (f" {emp.metro.strip()}" if emp.group_code == "brigadier" and (emp.metro or "").strip() else "") + (f" {emp.height_cm}" if emp.group_code == "brigadier" and emp.height_cm else "")).strip() or emp.full_name,
-        "phone": emp.phone,
+        "phone": brigadier_phone8(emp.phone) if emp.group_code == "brigadier" else emp.phone,
         "telegram_username": emp.telegram_username or "",
         "telegram_url": (f"https://t.me/{(emp.telegram_username or '').lstrip('@')}" if emp.telegram_username else (f"tg://user?id={emp.tg_id}" if emp.tg_id else "")),
         "group_code": emp.group_code,
@@ -1428,6 +1450,10 @@ def _apply_profile_override(db, emp):
     telegram_override = db.get(EmployeeTelegramOverride, emp.id) if emp.id else None
     if telegram_override is not None:
         emp.telegram_username = telegram_override.telegram_username
+    if emp.group_code == "brigadier":
+        emp.phone = brigadier_phone8(emp.phone)
+        if phone_override is not None:
+            phone_override.phone = emp.phone
 
 
 def _save_employee_profile(db, emp, name, metro, height, phone=None, telegram_username=None):
@@ -1445,7 +1471,9 @@ def _save_employee_profile(db, emp, name, metro, height, phone=None, telegram_us
         value = re.sub(r"[\s()\-]", "", phone)
         if value and not re.fullmatch(r"\+?[0-9]{7,15}", value):
             raise HTTPException(422, "Укажите корректный номер телефона")
-        if len(value) == 11 and value.startswith("8"):
+        if emp.group_code == "brigadier":
+            value = brigadier_phone8(value)
+        elif len(value) == 11 and value.startswith("8"):
             value = "+7" + value[1:]
         elif len(value) == 11 and value.startswith("7"):
             value = "+" + value
@@ -1642,7 +1670,7 @@ def apply_manual_readiness(db, work_date, groups, cutoff):
         if linked:
             item.update(full_name=linked.full_name, display_name=_employee_dict(linked)["display_name"],
                         metro=linked.metro, height_cm=linked.height_cm,
-                        phone=linked.phone, telegram_username=linked.telegram_username or "",
+                        phone=_employee_dict(linked)["phone"], telegram_username=linked.telegram_username or "",
                         telegram_url=_employee_dict(linked)["telegram_url"])
         item["cutoff_status"] = row.status if row.reported_at <= cutoff else item.get("cutoff_status", "no_response")
         groups[row.group_code][row.status].append(item)
@@ -1892,7 +1920,7 @@ def bot_import_staff_reference(items: list[StaffReferenceItem], db: Session = De
             stats["updated"] += 1
         else:
             emp = Employee(
-                tg_id=None, full_name=item.full_name.strip(), phone=item.phone,
+                tg_id=None, full_name=item.full_name.strip(), phone=brigadier_phone8(item.phone) if item.group_code == "brigadier" else item.phone,
                 telegram_username=item.telegram_username.strip().lstrip("@"),
                 group_code=item.group_code, metro=item.metro, active=False,
                 is_cashier=False,
@@ -3138,7 +3166,7 @@ def delete_number_card(event_id: int, db: Session = Depends(get_db), user: Teleg
 def record_number_card(data: NumberCardInput, db: Session = Depends(get_db)):
     row = db.scalar(select(NumberCardEvent).where(NumberCardEvent.chat_id == data.chat_id, NumberCardEvent.message_id == data.message_id))
     if row is None:
-        row = NumberCardEvent(**data.model_dump())
+        row = NumberCardEvent(**{**data.model_dump(), "phone": brigadier_phone8(data.phone)})
         db.add(row)
         try:
             db.commit()
@@ -3154,7 +3182,7 @@ def list_number_cards(work_date: date, db: Session = Depends(get_db), user: Tele
     rows = db.scalars(select(NumberCardEvent).where(NumberCardEvent.work_date == work_date, _visible_number_card()).order_by(NumberCardEvent.sent_at, NumberCardEvent.id)).all()
     employees = {e.tg_id: e for e in db.scalars(select(Employee).where(Employee.tg_id.in_([r.tg_id for r in rows])))} if rows else {}
     return {"count": len(rows), "items": [{"id": r.id, "employee": _employee_dict(employees[r.tg_id]) if r.tg_id in employees else {"full_name": r.full_name, "display_name": r.full_name},
-        "phone": r.phone, "source": r.source, "surname": r.surname,
+        "phone": brigadier_phone8(r.phone), "source": r.source, "surname": r.surname,
         "sent_at": (r.sent_at.replace(tzinfo=timezone.utc) if r.sent_at.tzinfo is None else r.sent_at).isoformat()} for r in rows]}
 
 
@@ -3162,7 +3190,7 @@ def list_number_cards(work_date: date, db: Session = Depends(get_db), user: Tele
 def bot_number_card_history(tg_id: int, db: Session = Depends(get_db)):
     rows = db.scalars(select(NumberCardEvent).where(NumberCardEvent.tg_id == tg_id).order_by(NumberCardEvent.id)).all()
     return {"items": [{"chat_id":r.chat_id,"message_id":r.message_id,"work_date":r.work_date.isoformat(),
-        "tg_id":r.tg_id,"full_name":r.full_name,"phone":r.phone,"source":r.source,"surname":r.surname,
+        "tg_id":r.tg_id,"full_name":r.full_name,"phone":brigadier_phone8(r.phone),"source":r.source,"surname":r.surname,
         "sent_at":r.sent_at.isoformat()} for r in rows]}
 
 
