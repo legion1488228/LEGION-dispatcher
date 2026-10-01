@@ -307,7 +307,7 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_cash_start] + _cash_html + INLINE_INDEX_
 
 # Owner-only entry point inside the cash modal.
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('showModal(\'💰 Касса\', `', 'showModal(\'💰 Касса\', `<button class="secondary" style="margin-bottom:12px" onclick="openPersonalTables()">📒 Мои таблицы</button>', 1)
-INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace("</script>\n</body>", 'async function openPersonalTables(){\n if(!state.bootstrap?.is_owner){toast(\'Доступно только владельцу\');return}\n let month=new Date().toLocaleDateString(\'sv-SE\',{timeZone:\'Europe/Moscow\'}).slice(0,7),kind=\'earnings\',data=null,busy=false,request=0;\n showModal(\'📒 Мои таблицы\',`<p class="muted">Личные записи по месяцам. Нажмите сумму или заголовок для изменения. Пустое значение очищает ячейку. Сохранение после каждой правки.</p><label>Месяц<input type="month" id="personalMonth" value="${month}" style="width:100%;box-sizing:border-box"></label><div style="display:flex;gap:6px;overflow:auto;margin:12px 0"><button class="primary" data-personal-kind="earnings">Заработок</button><button class="secondary" data-personal-kind="cash">Касса</button><button class="secondary" data-personal-kind="kickbacks">Откаты</button></div><button class="secondary" id="personalAdd">＋ Столбец</button><div id="personalStatus" class="muted" role="status"></div><div id="personalGrid" style="overflow:auto;margin-top:12px;max-height:60vh"></div>`);\n const grid=qs(\'#personalGrid\'),status=qs(\'#personalStatus\'),session=cashModalGeneration;\n const active=()=>session===cashModalGeneration && qs(\'#personalGrid\')===grid;\n const money=cents=>new Intl.NumberFormat(\'ru-RU\',{maximumFractionDigits:2}).format(cents/100);\n function lock(value){busy=value;qsa(\'[data-personal-kind],#personalMonth,#personalAdd\').forEach(e=>e.disabled=value)}\n function render(){\n  const left=grid.scrollLeft,top=grid.scrollTop;\n  const totalRow=(title,values)=>`<tr style="color:var(--gold);background:#211d14"><th>${title}</th>${values.map(v=>`<td>${money(v)}</td>`).join(\'\')}<td><b>${money(values.reduce((a,b)=>a+b,0))}</b></td></tr>`;\n  let rows=\'\';\n  for(let day=1;day<=data.days;day++){\n   const values=data.columns.map((_,col)=>data.cells[`${day}:${col}`]||0);\n   rows+=`<tr><th>${day}</th>${values.map((v,col)=>`<td><button class="contact-btn" style="min-width:80px" data-personal-cell="${day}:${col}" aria-label="${day}, ${esc(data.columns[col])}">${Object.hasOwn(data.cells,`${day}:${col}`)?money(v):\'—\'}</button></td>`).join(\'\')}<td><b>${money(values.reduce((a,b)=>a+b,0))}</b></td></tr>`;\n   if(day===15) rows+=totalRow(\'Итого 1–15\',data.first);\n  }\n  rows+=totalRow(\'Итого 16–\'+data.days,data.second)+totalRow(\'За месяц\',data.total);\n  grid.innerHTML=`<table style="border-collapse:separate;border-spacing:8px;min-width:100%;text-align:right"><thead><tr><th>День</th>${data.columns.map((name,col)=>`<th><button class="secondary" style="white-space:nowrap" data-personal-col="${col}">${esc(name)} ✍️</button></th>`).join(\'\')}<th>Итого ₽</th></tr></thead><tbody>${rows}</tbody></table>`;\n  grid.scrollLeft=left;grid.scrollTop=top;\n  qsa(\'[data-personal-cell]\',grid).forEach(btn=>btn.onclick=()=>{\n   if(busy)return;const [day,column]=btn.dataset.personalCell.split(\':\').map(Number),key=`${day}:${column}`;\n   const value=prompt(`${data.columns[column]} · ${day}.${month.slice(5)}\\nСумма ₽ (пусто — очистить)`,Object.hasOwn(data.cells,key)?String(data.cells[key]/100):\'\');\n   if(value!==null) save({action:\'cell\',day,column,value});\n  });\n  qsa(\'[data-personal-col]\',grid).forEach(btn=>btn.onclick=()=>{\n   if(busy)return;const column=Number(btn.dataset.personalCol),value=prompt(\'Название столбца\',data.columns[column]);\n   if(value!==null)save({action:\'rename\',column,value});\n  });\n }\n async function load(){\n  const id=++request;lock(true);grid.innerHTML=\'<div class="empty">Загрузка…</div>\';status.textContent=\'\';\n  try{const result=await api(`/api/personal-tables/${kind}/${month}`);if(!active()||id!==request)return;data=result;render()}\n  catch(e){if(active()&&id===request){data=null;grid.innerHTML=\'\';status.textContent=e.message}}\n  finally{if(active()&&id===request)lock(false)}\n }\n async function save(change){\n  if(busy||!data||!active())return;lock(true);status.textContent=\'Сохранение…\';\n  try{const result=await api(`/api/personal-tables/${kind}/${month}`,{method:\'PATCH\',body:JSON.stringify({...change,version:data.version})});if(!active())return;data=result;render();status.textContent=\'✓ Сохранено\'}\n  catch(e){if(active())status.textContent=\'Не сохранено: \'+e.message}\n  finally{if(active())lock(false)}\n }\n qs(\'#personalAdd\').onclick=()=>{if(busy||!data)return;const value=prompt(\'Название нового столбца\');if(value!==null)save({action:\'add\',value})};\n qs(\'#personalMonth\').onchange=e=>{if(!e.target.value)return;month=e.target.value;load()};\n qsa(\'[data-personal-kind]\').forEach(btn=>btn.onclick=()=>{if(busy)return;kind=btn.dataset.personalKind;qsa(\'[data-personal-kind]\').forEach(x=>x.className=x===btn?\'primary\':\'secondary\');load()});\n await load();\n}\n' + "\n</script>\n</body>", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace("</script>\n</body>", 'async function openPersonalTables(){\n if(!state.bootstrap?.is_owner){toast(\'Доступно только владельцу\');return}\n let month=new Date().toLocaleDateString(\'sv-SE\',{timeZone:\'Europe/Moscow\'}).slice(0,7),kind=\'earnings\',data=null,busy=false,request=0;\n showModal(\'📒 Мои таблицы\',`<p class="muted">Касса в «Заработке» и «Марине» в «Откатах» заполняются автоматически из общей кассы по дням. Остальные суммы можно редактировать. Сохранение после каждой правки.</p><label>Месяц<input type="month" id="personalMonth" value="${month}" style="width:100%;box-sizing:border-box"></label><div style="display:flex;gap:6px;overflow:auto;margin:12px 0"><button class="primary" data-personal-kind="earnings">Заработок</button><button class="secondary" data-personal-kind="cash">Касса</button><button class="secondary" data-personal-kind="kickbacks">Откаты</button></div><button class="secondary" id="personalAdd">＋ Столбец</button><div id="personalStatus" class="muted" role="status"></div><div id="personalGrid" style="overflow:auto;margin-top:12px;max-height:60vh"></div>`);\n const grid=qs(\'#personalGrid\'),status=qs(\'#personalStatus\'),session=cashModalGeneration;\n const active=()=>session===cashModalGeneration && qs(\'#personalGrid\')===grid;\n const money=cents=>new Intl.NumberFormat(\'ru-RU\',{maximumFractionDigits:2}).format(cents/100);\n function lock(value){busy=value;qsa(\'[data-personal-kind],#personalMonth,#personalAdd\').forEach(e=>e.disabled=value)}\n function render(){\n  const left=grid.scrollLeft,top=grid.scrollTop;\n  const totalRow=(title,values)=>`<tr style="color:var(--gold);background:#211d14"><th>${title}</th>${values.map(v=>`<td>${money(v)}</td>`).join(\'\')}<td><b>${money(values.reduce((a,b)=>a+b,0))}</b></td></tr>`;\n  let rows=\'\';\n  for(let day=1;day<=data.days;day++){\n   const values=data.columns.map((_,col)=>data.cells[`${day}:${col}`]||0);\n   rows+=`<tr><th>${day}</th>${values.map((v,col)=>`<td><button class="contact-btn" style="min-width:80px" ${data.automatic_columns.includes(col)?\'disabled title="Из общей кассы"\':\'\'} data-personal-cell="${day}:${col}" aria-label="${day}, ${esc(data.columns[col])}">${Object.hasOwn(data.cells,`${day}:${col}`)?money(v):\'—\'}</button></td>`).join(\'\')}<td><b>${money(values.reduce((a,b)=>a+b,0))}</b></td></tr>`;\n   if(day===15) rows+=totalRow(\'Итого 1–15\',data.first);\n  }\n  rows+=totalRow(\'Итого 16–\'+data.days,data.second)+totalRow(\'За месяц\',data.total);\n  grid.innerHTML=`<table style="border-collapse:separate;border-spacing:8px;min-width:100%;text-align:right"><thead><tr><th>День</th>${data.columns.map((name,col)=>`<th><button class="secondary" style="white-space:nowrap" ${data.automatic_columns.includes(col)?\'disabled\':\'\'} data-personal-col="${col}">${esc(name)} ${data.automatic_columns.includes(col)?\'· авто\':\'✍️\'}</button></th>`).join(\'\')}<th>Итого ₽</th></tr></thead><tbody>${rows}</tbody></table>`;\n  grid.scrollLeft=left;grid.scrollTop=top;\n  qsa(\'[data-personal-cell]\',grid).forEach(btn=>btn.onclick=()=>{\n   if(busy)return;const [day,column]=btn.dataset.personalCell.split(\':\').map(Number),key=`${day}:${column}`;\n   const value=prompt(`${data.columns[column]} · ${day}.${month.slice(5)}\\nСумма ₽ (пусто — очистить)`,Object.hasOwn(data.cells,key)?String(data.cells[key]/100):\'\');\n   if(value!==null) save({action:\'cell\',day,column,value});\n  });\n  qsa(\'[data-personal-col]\',grid).forEach(btn=>btn.onclick=()=>{\n   if(busy)return;const column=Number(btn.dataset.personalCol),value=prompt(\'Название столбца\',data.columns[column]);\n   if(value!==null)save({action:\'rename\',column,value});\n  });\n }\n async function load(){\n  const id=++request;lock(true);grid.innerHTML=\'<div class="empty">Загрузка…</div>\';status.textContent=\'\';\n  try{const result=await api(`/api/personal-tables/${kind}/${month}`);if(!active()||id!==request)return;data=result;render()}\n  catch(e){if(active()&&id===request){data=null;grid.innerHTML=\'\';status.textContent=e.message}}\n  finally{if(active()&&id===request)lock(false)}\n }\n async function save(change){\n  if(busy||!data||!active())return;++request;lock(true);status.textContent=\'Сохранение…\';\n  try{const result=await api(`/api/personal-tables/${kind}/${month}`,{method:\'PATCH\',body:JSON.stringify({...change,version:data.version})});if(!active())return;data=result;render();status.textContent=\'✓ Сохранено\'}\n  catch(e){if(active())status.textContent=\'Не сохранено: \'+e.message}\n  finally{if(active())lock(false)}\n }\n qs(\'#personalAdd\').onclick=()=>{if(busy||!data)return;const value=prompt(\'Название нового столбца\');if(value!==null)save({action:\'add\',value})};\n qs(\'#personalMonth\').onchange=e=>{if(!e.target.value)return;month=e.target.value;load()};\n qsa(\'[data-personal-kind]\').forEach(btn=>btn.onclick=()=>{if(busy)return;kind=btn.dataset.personalKind;qsa(\'[data-personal-kind]\').forEach(x=>x.className=x===btn?\'primary\':\'secondary\');load()});\n await load();\n const timer=setInterval(async()=>{\n  if(!active()){clearInterval(timer);return}\n  if(busy||!data)return;\n  const id=request,loadedKind=kind,loadedMonth=month;\n  try{const result=await api(`/api/personal-tables/${loadedKind}/${loadedMonth}`);\n   if(active()&&!busy&&id===request&&kind===loadedKind&&month===loadedMonth&&data.version===result.version){data=result;render()}\n  }catch(e){}\n },15000);\n}\n\n' + "\n</script>\n</body>", 1)
 
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -868,7 +868,7 @@ def _day_summary(db: Session, work_date: date):
     gbu = manual.gbu_count if manual and manual.gbu_count is not None else sum(o.source == "gbu" for o in active)
     return {
         "requested_staff": manual.requested_staff if manual else 0,
-        "number_cards_count": db.scalar(select(func.count(NumberCardEvent.id)).where(NumberCardEvent.work_date == work_date)),
+        "number_cards_count": db.scalar(select(func.count(NumberCardEvent.id)).where(NumberCardEvent.work_date == work_date, _visible_number_card())),
         "orders_total": private + gbu,
         "private_count": private,
         "gbu_count": gbu,
@@ -2819,7 +2819,7 @@ def owner_cash_months(db: Session = Depends(get_db), user: TelegramUser = Depend
 PERSONAL_TABLE_COLUMNS = {
     "earnings": ["Касса", "ГБУ", "Наличка"],
     "cash": ["Влад Ряз", "Игорь", "Леха", "Роща", "Лев", "Арсений", "Лухман", "Перово", "Давыд", "Донской", "Макс", "Рома"],
-    "kickbacks": ["Марине", "Владу", "Заказы"],
+    "kickbacks": ["Марине", "Владу"],
 }
 
 class PersonalMonthlyTable(Base):
@@ -2851,11 +2851,33 @@ def _personal_month_days(month: str) -> int:
     return calendar.monthrange(first.year, first.month)[1]
 
 
-def _personal_table_result(row, kind: str, month: str) -> dict:
+def _personal_table_result(row, kind: str, month: str, db=None) -> dict:
     days = _personal_month_days(month)
     data = json.loads(row.payload) if row else {"columns": list(PERSONAL_TABLE_COLUMNS[kind]), "cells": {}}
+    # Project legacy columns without deleting stored history during a read.
+    keep = [i for i, name in enumerate(data["columns"])
+            if not (kind == "kickbacks" and name.strip().casefold() == "заказы")]
+    old_cells = data["cells"]
+    data = {"columns": [data["columns"][i] for i in keep],
+            "cells": {f"{day}:{col}": old_cells[f"{day}:{old}"]
+                      for col, old in enumerate(keep) for day in range(1, days + 1)
+                      if f"{day}:{old}" in old_cells}}
+    automatic = [0] if kind in ("earnings", "kickbacks") else []
+    if automatic:
+        data["columns"][0] = "Касса" if kind == "earnings" else "Марине"
+        for day in range(1, days + 1):
+            data["cells"].pop(f"{day}:0", None)
+        if db is not None:
+            start = date.fromisoformat(month + "-01")
+            entries = db.execute(select(CashEntry).where(
+                CashEntry.work_date >= start, CashEntry.work_date <= start.replace(day=days),
+                CashEntry.brigadier_tg_id.notin_(_cash_excluded_ids(db)))).scalars().all()
+            field = "commission_rub" if kind == "earnings" else "kickback_rub"
+            for entry in entries:
+                key = f"{entry.work_date.day}:0"
+                data["cells"][key] = data["cells"].get(key, 0) + int(getattr(entry, field) or 0) * 100
     sums = lambda first, last: [sum(data["cells"].get(f"{day}:{col}", 0) for day in range(first, last + 1)) for col in range(len(data["columns"]))]
-    return {**data, "month": month, "kind": kind, "days": days, "version": row.version if row else 0,
+    return {**data, "automatic_columns": automatic, "month": month, "kind": kind, "days": days, "version": row.version if row else 0,
             "first": sums(1, 15), "second": sums(16, days), "total": sums(1, days)}
 
 
@@ -2866,7 +2888,7 @@ def personal_table_get(kind: Literal["earnings", "cash", "kickbacks"], month: st
     _personal_month_days(month)
     row = db.execute(select(PersonalMonthlyTable).where(PersonalMonthlyTable.owner_id == user.id,
         PersonalMonthlyTable.month == month, PersonalMonthlyTable.kind == kind)).scalar_one_or_none()
-    return _personal_table_result(row, kind, month)
+    return _personal_table_result(row, kind, month, db)
 
 
 @app.patch("/api/personal-tables/{kind}/{month}")
@@ -2881,6 +2903,8 @@ def personal_table_edit(kind: Literal["earnings", "cash", "kickbacks"], month: s
         raise HTTPException(409, "Таблица изменена в другом окне. Откройте её заново и повторите правку.")
     data = _personal_table_result(row, kind, month)
     columns, cells = data["columns"], data["cells"]
+    if change.action != "add" and change.column in data["automatic_columns"]:
+        raise HTTPException(422, "Этот столбец заполняется автоматически из общей кассы")
     if change.action != "add" and change.column >= len(columns):
         raise HTTPException(422, "Столбец не найден")
     if change.action == "cell":
@@ -2900,6 +2924,8 @@ def personal_table_edit(kind: Literal["earnings", "cash", "kickbacks"], month: s
             cells[key] = int(amount * 100)
     else:
         name = change.value.strip()
+        if kind == "kickbacks" and name.casefold() == "заказы":
+            raise HTTPException(422, "Заказы учитываются на главном экране")
         if not name:
             raise HTTPException(422, "Введите название столбца")
         if change.action == "add":
@@ -2918,7 +2944,7 @@ def personal_table_edit(kind: Literal["earnings", "cash", "kickbacks"], month: s
     except IntegrityError:
         db.rollback()
         raise HTTPException(409, "Таблица уже создана в другом окне. Откройте её заново.")
-    return _personal_table_result(row, kind, month)
+    return _personal_table_result(row, kind, month, db)
 
 
 class DispatchDayCounts(Base):
@@ -3066,6 +3092,35 @@ class NumberCardInput(BaseModel):
     surname: str = Field(max_length=100)
     sent_at: datetime
 
+
+class NumberCardDeletion(Base):
+    __tablename__ = 'number_card_deletions'
+    event_id = Column(Integer, primary_key=True)
+    deleted_by_tg_id = Column(BigInteger, nullable=False)
+    deleted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+def _visible_number_card():
+    return ~select(NumberCardDeletion.event_id).where(NumberCardDeletion.event_id == NumberCardEvent.id).exists()
+
+
+@app.delete('/api/number-cards/{event_id}')
+def delete_number_card(event_id: int, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    if not _is_owner(db, user.id):
+        raise HTTPException(403, 'Удаление доступно только владельцу')
+    row = db.get(NumberCardEvent, event_id)
+    if row is None:
+        raise HTTPException(404, 'Запись не найдена')
+    if db.get(NumberCardDeletion, event_id) is None:
+        db.add(NumberCardDeletion(event_id=event_id, deleted_by_tg_id=user.id))
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            if db.get(NumberCardDeletion, event_id) is None:
+                raise
+    return {'ok': True, 'id': event_id}
+
 @app.post("/api/bot/number-cards", dependencies=[Depends(_bot_key)])
 def record_number_card(data: NumberCardInput, db: Session = Depends(get_db)):
     row = db.scalar(select(NumberCardEvent).where(NumberCardEvent.chat_id == data.chat_id, NumberCardEvent.message_id == data.message_id))
@@ -3083,7 +3138,7 @@ def record_number_card(data: NumberCardInput, db: Session = Depends(get_db)):
 
 @app.get("/api/number-cards")
 def list_number_cards(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
-    rows = db.scalars(select(NumberCardEvent).where(NumberCardEvent.work_date == work_date).order_by(NumberCardEvent.sent_at, NumberCardEvent.id)).all()
+    rows = db.scalars(select(NumberCardEvent).where(NumberCardEvent.work_date == work_date, _visible_number_card()).order_by(NumberCardEvent.sent_at, NumberCardEvent.id)).all()
     employees = {e.tg_id: e for e in db.scalars(select(Employee).where(Employee.tg_id.in_([r.tg_id for r in rows])))} if rows else {}
     return {"count": len(rows), "items": [{"id": r.id, "employee": _employee_dict(employees[r.tg_id]) if r.tg_id in employees else {"full_name": r.full_name, "display_name": r.full_name},
         "phone": r.phone, "source": r.source, "surname": r.surname,
@@ -3186,3 +3241,31 @@ async function openOrderCountPeriod(){
 }
 </script>
 </body>''',1)
+
+_number_list_start = INLINE_INDEX_HTML.index('async function openNumberCards(){')
+_number_list_end = INLINE_INDEX_HTML.index('\n}', _number_list_start) + 2
+INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_number_list_start] + r'''async function openNumberCards(){
+ const day=state.selectedDate;
+ showModal('📱 Номера в группе','<div id="numberCardsBody" class="empty">Загрузка…</div>');
+ const body=qs('#numberCardsBody');
+ async function draw(){
+  try{
+   const r=await api(`/api/number-cards?work_date=${day}`);if(qs('#numberCardsBody')!==body)return;
+   body.className='';body.innerHTML=`<div class="attention"><h4>Отправлено: ${r.count}</h4><p>За ${esc(day)}. Кто выставил номер через бота.</p></div>${r.items.map((x,i)=>`<div class="employee-row"><div class="name"><b>${i+1}. ${esc(employeeListName(x.employee))}</b><small>${x.source==='gbu'?'ГБУ':'Частный'} · ${esc(x.surname)} · ${esc(new Date(x.sent_at).toLocaleTimeString('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'}))}</small><small>📞 ${esc(x.phone)} · Номер отправлен</small></div>${state.bootstrap?.is_owner?`<button type="button" class="secondary danger" data-number-delete="${x.id}" aria-label="Удалить запись" style="min-width:44px;min-height:44px">🗑</button>`:''}</div>`).join('')||'<div class="empty">Номера пока не отправляли</div>'}`;
+   qsa('[data-number-delete]',body).forEach(button=>button.onclick=async()=>{
+    const item=r.items.find(x=>Number(x.id)===Number(button.dataset.numberDelete));if(!item||button.disabled)return;
+    if(!confirm(`Удалить запись «${employeeListName(item.employee)} · ${item.surname}» из списка и подсчёта за ${day}? Сообщение в Telegram останется.`))return;
+    button.disabled=true;const modal=qs('#modal'),scroll=modal.scrollTop;
+    try{
+     await api(`/api/number-cards/${item.id}`,{method:'DELETE'});
+     await draw();
+     if(qs('#numberCardsBody')===body)modal.scrollTop=scroll;
+     const selected=state.selectedDate,bootstrap=await api(`/api/bootstrap?work_date=${selected}`);
+     if(state.selectedDate===selected){state.bootstrap=bootstrap;renderSummary()}
+     toast('Запись удалена');
+    }catch(e){button.disabled=false;toast(e.message,5000)}
+   });
+  }catch(e){if(qs('#numberCardsBody')===body)body.textContent=e.message}
+ }
+ await draw();
+}''' + INLINE_INDEX_HTML[_number_list_end:]
