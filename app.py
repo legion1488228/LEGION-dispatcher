@@ -488,6 +488,15 @@ class CashEntryCreate(BaseModel):
     kickback_rub: int = Field(default=0, ge=0)
     reserve_count: int = Field(default=0, ge=0, le=10)
     notes: str = ""
+    request_id: str | None = Field(default=None, min_length=16, max_length=64)
+
+
+class CashEntrySubmission(Base):
+    __tablename__ = 'cash_entry_submissions'
+    tg_id = Column(BigInteger, primary_key=True)
+    request_id = Column(String(64), primary_key=True)
+    entry_id = Column(Integer, nullable=False)
+    payload_hash = Column(String(64), nullable=False)
 
 
 class CashEntryPatch(BaseModel):
@@ -817,7 +826,8 @@ def _upsert_employee(db: Session, data: EmployeeSync) -> Employee:
     emp.group_code = data.group_code
     if data.height_cm is not None:
         emp.height_cm = data.height_cm
-    emp.has_car = data.has_car
+    if 'has_car' in getattr(data, 'model_fields_set', {'has_car'}):
+        emp.has_car = data.has_car
     if data.metro.strip():
         emp.metro = data.metro.strip()
     if data.is_cashier is not None:
@@ -1977,11 +1987,33 @@ def bot_toggle_cashier(tg_id: int, data: CashierToggle, db: Session = Depends(ge
 
 @app.post("/api/bot/cash", dependencies=[Depends(_bot_key)])
 def bot_create_cash_entry(data: CashEntryCreate, db: Session = Depends(get_db)):
-    emp = db.execute(select(Employee).where(Employee.tg_id == data.tg_id, Employee.group_code == "brigadier")).scalar_one_or_none()
+    emp = db.execute(select(Employee).where(Employee.tg_id == data.tg_id, Employee.group_code == "brigadier").with_for_update()).scalar_one_or_none()
     if not emp or not emp.active: raise HTTPException(404, "Бригадир не найден")
     if not emp.is_cashier or _cashier_excluded(db, emp): raise HTTPException(403, "Этот бригадир не назначен кассовым")
-    row = CashEntry(work_date=data.work_date, brigadier_tg_id=data.tg_id, brigadier_name=emp.full_name, category=data.category, team_size=data.team_size, commission_rub=data.commission_rub, kickback_rub=data.kickback_rub, reserve_count=data.reserve_count, notes=data.notes.strip())
-    db.add(row); db.commit(); db.refresh(row)
+    fingerprint = hashlib.sha256(data.model_dump_json(exclude={'request_id'}).encode()).hexdigest()
+    previous = db.get(CashEntrySubmission, (data.tg_id, data.request_id)) if data.request_id else None
+    if previous:
+        if previous.payload_hash != fingerprint:
+            raise HTTPException(409, 'Эта запись уже сохранена с другими данными')
+        row = db.get(CashEntry, previous.entry_id)
+        if row is None:
+            raise HTTPException(409, 'Эта запись уже была сохранена и затем удалена')
+    else:
+        row = CashEntry(work_date=data.work_date, brigadier_tg_id=data.tg_id, brigadier_name=emp.full_name, category=data.category, team_size=data.team_size, commission_rub=data.commission_rub, kickback_rub=data.kickback_rub, reserve_count=data.reserve_count, notes=data.notes.strip())
+        db.add(row)
+        db.flush()
+        if data.request_id:
+            db.add(CashEntrySubmission(tg_id=data.tg_id, request_id=data.request_id,
+                entry_id=row.id, payload_hash=fingerprint))
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            previous = db.get(CashEntrySubmission, (data.tg_id, data.request_id)) if data.request_id else None
+            row = db.get(CashEntry, previous.entry_id) if previous else None
+            if not previous or previous.payload_hash != fingerprint or row is None:
+                raise HTTPException(409, 'Не удалось сохранить запись. Повторите попытку.')
+        db.refresh(row)
     start, end = _period_bounds(data.work_date)
     period_rows = db.execute(select(CashEntry).where(CashEntry.brigadier_tg_id == data.tg_id, CashEntry.work_date >= start, CashEntry.work_date <= end)).scalars().all()
     return {"ok": True, "entry": _cash_row_dict(row), "period": {"start": start.isoformat(), "end": end.isoformat(), "commission_rub": sum(x.commission_rub or 0 for x in period_rows), "kickback_rub": sum(x.kickback_rub or 0 for x in period_rows), "cash_rub": sum(x.commission_rub or 0 for x in period_rows), "total_rub": sum(x.commission_rub or 0 for x in period_rows), "entries": len(period_rows)}}
@@ -2376,6 +2408,17 @@ def bot_brigade_contact(data: BrigadeContactReport, db: Session = Depends(get_db
 def bot_readiness(data: ReadinessReport, db: Session = Depends(get_db)):
     if data.tg_id in HIDDEN_TG_IDS:
         raise HTTPException(403, "Участник недоступен")
+    if data.raw_text == 'reconcile:local_ready_staff':
+        # A repair may fill a missing entry, but may not replace a later status,
+        # comment, car option or the original time of a real check-in.
+        emp = db.execute(select(Employee).where(Employee.tg_id == data.tg_id)
+                         .with_for_update()).scalar_one_or_none()
+        if emp:
+            existing = db.execute(select(Readiness).where(
+                Readiness.employee_id == emp.id, Readiness.work_date == data.work_date
+            )).scalar_one_or_none()
+            if existing:
+                return {"ok": True, "employee_id": emp.id, "status": existing.status}
     sync = EmployeeSync(
         preserve_identity=True,
         tg_id=data.tg_id,
