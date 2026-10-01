@@ -3242,12 +3242,14 @@ const orderCountLabel=key=>{const [cat,size]=key.split(':');return `${{standard:
 async function openOrderCategoryCounts(source){
  const day=state.selectedDate;
  showModal(source==='gbu'?'Заказы ГБУ':'Частные заказы','<div id="categoryCountBody">Загрузка…</div>');
+ qs('#modal').scrollTop=0;
  const body=qs('#categoryCountBody');
  try{
   const data=await api(`/api/order-counts/${day}/${source}`);if(qs('#categoryCountBody')!==body)return;
   body.innerHTML=`<p class="muted">На ${esc(day)}. Укажите количество заказов каждой категории — не число сотрудников.</p>
    <form id="categoryCountForm">${orderCountTypes[source].map(key=>`<label class="employee-row"><span>${orderCountLabel(key)}</span><span style="display:flex;align-items:center;gap:6px"><button class="secondary" type="button" data-step="-1" data-key="${key}" aria-label="Уменьшить ${orderCountLabel(key)}">−</button><input data-category="${key}" type="number" inputmode="numeric" min="0" max="100000" step="1" value="${data.counts[key]||''}" style="width:64px;text-align:center"><button class="secondary" type="button" data-step="1" data-key="${key}" aria-label="Добавить ${orderCountLabel(key)}">+</button></span></label>`).join('')}
-   <p class="muted">Кнопки + и − меняют количество заказов. Нажмите «Сохранить» для применения.</p><h3>Всего: <span id="categoryCountTotal">${Object.values(data.counts).reduce((a,b)=>a+b,0)}</span></h3><button class="primary" type="submit">Сохранить</button></form>`;
+   <div class="category-save-bar" style="position:sticky;bottom:0;z-index:3;display:flex;align-items:center;justify-content:space-between;gap:12px;background:#111114;padding:12px 0 0;margin-top:8px;border-top:1px solid var(--line)"><h3 style="margin:0;min-width:0;font-size:18px">Всего: <span id="categoryCountTotal">${Object.values(data.counts).reduce((a,b)=>a+b,0)}</span></h3><button class="primary" type="submit" style="flex-shrink:0">Сохранить</button></div>
+   </form>`;
   const form=qs('#categoryCountForm');
   qsa('[data-category]',body).forEach(input=>{
    input.onfocus=()=>{if(input.value==='0')input.value=''};
