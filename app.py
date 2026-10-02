@@ -17,7 +17,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, StrictInt
 from sqlalchemy import and_, func, or_, select, inspect as sa_inspect, text
 from sqlalchemy.orm import Session, selectinload
-from sqlalchemy import Column, Integer, BigInteger, String, Date, DateTime, UniqueConstraint
+from sqlalchemy import Column, Integer, BigInteger, String, Date, DateTime, Boolean, UniqueConstraint
 from sqlalchemy.exc import IntegrityError
 
 from database import Base, engine, get_db
@@ -902,6 +902,7 @@ def _day_summary(db: Session, work_date: date):
         "requested_staff": _requested_staff_from_orders(db, work_date),
         "number_cards_count": db.scalar(select(func.count(NumberCardEvent.id)).where(NumberCardEvent.work_date == work_date, _visible_number_card())),
         "order_completion": completion,
+        "photo_reports": photo_report_counts(db, work_date),
         "orders_total": private + gbu,
         "private_count": private,
         "gbu_count": gbu,
@@ -1825,6 +1826,8 @@ def readiness_summary_data(db: Session, work_date: date):
     manual_totals = apply_manual_readiness(db, work_date, groups, cutoff)
     on_contact = brigades_contact_data(db, work_date)
     manual_totals["brigades_on_contact"] = len(on_contact)
+    manual_totals["brigades_expected"] = sum(
+        x["expected"] for x in order_completion_data(db, work_date)["sources"].values())
 
     for g in groups.values():
         g["counts"] = {k: len(g[k]) for k in ["ready", "not_ready", "day_off", "responded", "no_response"]}
@@ -3200,6 +3203,44 @@ class NumberCardClosureInput(BaseModel):
     report_message_id: int = Field(gt=0)
 
 
+class PhotoReportEvent(Base):
+    __tablename__ = 'photo_report_events'
+    report_key = Column(String(180), primary_key=True)
+    tg_id = Column(BigInteger, nullable=False)
+    work_date = Column(Date, nullable=False, index=True)
+    source = Column(String(20), nullable=False)
+    active = Column(Boolean, nullable=False, default=True)
+
+
+class PhotoReportInput(BaseModel):
+    report_key: str = Field(min_length=1, max_length=180)
+    tg_id: int = Field(gt=0)
+    work_date: date
+    source: Literal['private', 'gbu']
+    active: bool = True
+
+
+@app.post('/api/bot/photo-reports', dependencies=[Depends(_bot_key)])
+def bot_photo_report(data: PhotoReportInput, db: Session = Depends(get_db)):
+    row = db.get(PhotoReportEvent, data.report_key)
+    if row and (row.tg_id, row.work_date, row.source) != (data.tg_id, data.work_date, data.source):
+        raise HTTPException(409, 'Фотоотчёт уже привязан к другой дате или категории')
+    if row is None:
+        row = PhotoReportEvent(**data.model_dump())
+        db.add(row)
+    else:
+        row.active = data.active
+    db.commit()
+    return {'ok': True}
+
+
+def photo_report_counts(db: Session, work_date: date):
+    counts = dict(db.execute(select(PhotoReportEvent.source, func.count(PhotoReportEvent.report_key))
+        .where(PhotoReportEvent.work_date == work_date, PhotoReportEvent.active.is_(True))
+        .group_by(PhotoReportEvent.source)).all())
+    return {source: int(counts.get(source, 0)) for source in ('private', 'gbu')}
+
+
 def _visible_number_card():
     return ~select(NumberCardDeletion.event_id).where(NumberCardDeletion.event_id == NumberCardEvent.id).exists()
 
@@ -3440,6 +3481,15 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_number_list_start] + r'''async function 
 
 
 # Match the dashboard counters to the same dated plan used for completion notices.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    'state.bootstrap=await api(`/api/bootstrap?work_date=${state.selectedDate}`); const cashBtn=',
+    'const refreshDay=state.selectedDate;const freshBootstrap=await api(`/api/bootstrap?work_date=${refreshDay}`);if(state.selectedDate!==refreshDay)return;state.bootstrap=freshBootstrap; const cashBtn=', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    '<div class="metric ${s.unassigned_count?\'warn\':\'good\'}"><b>${s.complete_count}/${s.orders_total}</b><span>Укомплект.</span></div>',
+    '<div class="metric"><span>📸 Фотоотчёты</span><span style="color:var(--text)">Частные <strong>${s.photo_reports?.private||0}/${s.private_count}</strong></span><span style="color:var(--text)">ГБУ <strong>${s.photo_reports?.gbu||0}/${s.gbu_count}</strong></span></div>', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    '${r.totals.brigades_on_contact||0}</b>',
+    '${r.totals.brigades_on_contact||0}/${r.totals.brigades_expected||0}</b>', 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     '<b>📱 ${s.number_cards_count||0}</b>',
     '<b>📱 ${s.number_cards_count||0}/${s.orders_total}</b>', 1)
