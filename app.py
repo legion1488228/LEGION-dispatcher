@@ -3686,5 +3686,5 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     function renderDates() {""",
 ).replace(
     '<strong>${esc(d.label)}</strong><small>${d.count} заказов</small>',
-    '<strong style="white-space:nowrap">${esc(shortCalendarDay(d.date))}</strong>${["Сегодня","Завтра"].includes(d.label)?`<small>${esc(d.label)}</small>`:""}<small>${d.count} заказов</small>',
+    '<strong style="display:block;white-space:nowrap">${esc(shortCalendarDay(d.date))}</strong>${["Сегодня","Завтра"].includes(d.label)?`<small style="display:block;line-height:1.35;margin-top:4px">${esc(d.label)}</small>`:""}<small style="display:block;white-space:nowrap;line-height:1.35;margin-top:4px">${d.count} заказов</small>',
 )
