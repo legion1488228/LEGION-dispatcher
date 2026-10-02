@@ -3661,7 +3661,7 @@ INLINE_INDEX_HTML = _contact_bulk_delete_ui(INLINE_INDEX_HTML)
 
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     'id="readinessHistoryBtn">🧾 История</button>',
-    'id="readinessHistoryBtn" title="Отправить сообщение о выходном в четыре группы">Кнопка Рощи<br><small>(Ревизорская)</small></button>',
+    'id="readinessHistoryBtn" title="Отправить сообщение о выходном в четыре группы">🧐 Кнопка Рощи<br><small>(Ревизорская)</small></button>',
 ).replace(
     "qs('#readinessHistoryBtn').onclick=openReadinessHistory;",
     """qs('#readinessHistoryBtn').onclick=async event=>{
