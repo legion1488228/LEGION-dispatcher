@@ -851,13 +851,14 @@ def api_me(user: TelegramUser = Depends(require_admin)):
 
 @app.get("/api/bootstrap")
 def bootstrap(work_date: date | None = None, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
-    selected = work_date or (datetime.now(MOSCOW).date() + timedelta(days=1))
+    selected = work_date or datetime.now(MOSCOW).date()
     dates = _date_folders(db, selected)
     summary = _day_summary(db, selected)
     return {
         "user": {"id": user.id, "name": user.full_name},
         "is_owner": _is_owner(db, user.id),
         "selected_date": selected.isoformat(),
+        "today": datetime.now(MOSCOW).date().isoformat(),
         "dates": dates,
         "summary": summary,
         "groups": GROUP_LABELS,
@@ -3499,3 +3500,65 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     '<span>ГБУ</span></button>',
     '<span>ГБУ</span><span>Закрыто ${s.order_completion?.sources.gbu.closed||0}/${s.gbu_count}</span></button>', 1)
+
+
+def _organize_day_dashboard(html):
+    html = html.replace('<section id="summary" class="summary-grid"></section>',
+        '<div id="selectedDayHeader" class="section-head"></div><h3>Заказы</h3><section id="summary" class="summary-grid"></section>', 1)
+    html = html.replace('<section id="readinessView" class="view active">',
+        '<section id="readinessView" class="view active"><div id="employeeReadiness">', 1)
+    html = html.replace('<div id="readinessGroups"></div>', '<div id="readinessGroups"></div></div>', 1)
+    html = html.replace('<h2>Готовность</h2><p class="muted">Официальный срез — 15:30</p>',
+        '<h2>Готовность сотрудников</h2><p id="readinessDayLabel" class="muted"></p>', 1)
+    html = html.replace('grid-template-columns:repeat(3,minmax(0,1fr))',
+                        'grid-template-columns:repeat(2,minmax(0,1fr))', 1)
+    # A single date owns each request. Late replies cannot overwrite a newer selection.
+    html = html.replace('async function loadBootstrap(date=null) {',
+        "let dayRequest=0;\nasync function loadBootstrap(date=null) {\n  const request=++dayRequest;\n  if(date)state.selectedDate=date;\n  qs('#summary').innerHTML='<div class=\"muted\">Загрузка выбранного дня…</div>';\n  qs('#readinessView').style.visibility='hidden';", 1)
+    html = html.replace('  state.bootstrap = data;',
+        '  if(request!==dayRequest)return;\n  state.bootstrap = data;\n  qs(\'#readinessView\').style.visibility=\'visible\';', 1)
+    html = html.replace('async function loadReadiness(){\n  const r=await api(`/api/readiness/summary?work_date=${state.selectedDate}`);',
+        'async function loadReadiness(){\n  const day=state.selectedDate;\n  const r=await api(`/api/readiness/summary?work_date=${day}`);\n  if(state.selectedDate!==day||r.work_date!==day)return;\n  qs(\'#readinessDayLabel\').textContent=fmtDate(day)+\' · Срез в 15:30\';', 1)
+    html = re.sub(r'    <button id="brigadesContactCount"[^\n]+\n', '', html, count=1)
+    html = html.replace("  qs('#brigadesContactCount').onclick=openContactBrigades;", '', 1)
+    html = html.replace('count.textContent=String(ids.size);',
+        "count.textContent=String(ids.size)+'/'+state.bootstrap.summary.orders_total;", 1)
+    start=html.index('function renderSummary() {')
+    end=html.index('async function openContactBrigades()', start)
+    html=html[:start]+r'''function renderSummary() {
+  const s=state.bootstrap.summary, day=state.selectedDate;
+  const future=day>state.bootstrap.today;
+  qs('#selectedDayHeader').innerHTML=`<h2>${esc(fmtDate(day))}</h2><label class="muted">Выбрать дату <input type="date" id="dashboardDate" value="${day}" style="max-width:160px"></label>`;
+  qs('#dashboardDate').onchange=e=>{if(e.target.value)loadBootstrap(e.target.value).catch(e=>toast(e.message))};
+  qs('#summary').innerHTML=`
+    <div class="metric"><b>${s.orders_total}</b><span>Всего заказов</span></div>
+    <button class="metric" data-count-field="private_count"><b>${s.private_count} ✍️</b><span>Частные</span></button>
+    <button class="metric" data-count-field="gbu_count"><b>${s.gbu_count} ✍️</b><span>ГБУ</span></button>
+    <div class="metric"><b>${s.requested_staff||0}</b><span>Нужно сотрудников</span></div>`;
+  qsa('[data-count-field]').forEach(btn=>btn.onclick=()=>editDispatchCount(btn.dataset.countField));
+  const view=qs('#readinessView');
+  for(const id of ['orderPreparation','brigadeWork']){
+    if(!qs('#'+id)){const section=document.createElement('section');section.id=id;section.style.margin='24px 0';view.appendChild(section)}
+  }
+  const p=s.order_completion?.sources.private||{},g=s.order_completion?.sources.gbu||{};
+  qs('#orderPreparation').innerHTML=`<h2>Подготовка заказов</h2><p class="muted">${esc(fmtDate(day))} · Номера и закрытие относятся к дате заказа</p>
+    <button class="secondary" id="numberCardsBtn" style="width:100%;margin-bottom:12px">📱 Номера в группе ${s.number_cards_count||0}/${s.orders_total} ›</button>
+    <div class="summary-grid" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+    <div class="metric"><b>Частные</b><span>Номера ${p.cards||0}/${s.private_count}</span><span>Закрыто ${p.closed||0}/${s.private_count}</span></div>
+    <div class="metric"><b>ГБУ</b><span>Номера ${g.cards||0}/${s.gbu_count}</span><span>Закрыто ${g.closed||0}/${s.gbu_count}</span></div></div>`;
+  qs('#numberCardsBtn').onclick=openNumberCards;
+  qs('#brigadeWork').innerHTML=`<h2>Работа бригад</h2><p class="muted">${esc(fmtDate(day))}${future?' · В день заказа':''}</p>
+    <div class="summary-grid" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+    <button id="brigadesContactCount" class="metric good"><b>${s.brigades_on_contact||0}/${s.orders_total}</b><span>Бригады на связи ›</span></button>
+    <div class="metric"><b>${s.photo_reports?.private||0}/${s.private_count}</b><span>Фото · частные</span></div>
+    <div class="metric"><b>${s.photo_reports?.gbu||0}/${s.gbu_count}</b><span>Фото · ГБУ</span></div></div>`;
+  qs('#brigadesContactCount').onclick=openContactBrigades;
+  const sections=future?['employeeReadiness','orderPreparation','brigadeWork']:['brigadeWork','orderPreparation','employeeReadiness'];
+  for(const id of sections)view.appendChild(qs('#'+id));
+}
+
+''' + html[end:]
+    return html
+
+
+INLINE_INDEX_HTML = _organize_day_dashboard(INLINE_INDEX_HTML)
