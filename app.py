@@ -2822,7 +2822,7 @@ def readiness_chat_messages(summary, settings, kind, work_date):
 
 
 @app.post("/api/readiness/chat/{kind}")
-async def send_readiness_chat_action(kind: Literal["summary", "reminders"],
+async def send_readiness_chat_action(kind: Literal["summary", "reminders", "roshcha"],
         db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
     now = datetime.utcnow()
     config = db.execute(select(ReadinessChatConfig).where(ReadinessChatConfig.id == 1).with_for_update()).scalar_one_or_none()
@@ -2834,8 +2834,18 @@ async def send_readiness_chat_action(kind: Literal["summary", "reminders"],
         raise HTTPException(429, "Отправка уже запускалась. Повторите через 30 секунд.")
     settings = json.loads(config.payload)
     day = datetime.now(ZoneInfo("Europe/Moscow")).date() + timedelta(days=1)
-    summary = readiness_summary_data(db, day)
-    messages = readiness_chat_messages(summary, settings, kind, day)
+    if kind == "roshcha":
+        required = {"brigadier", "main", "cashless", "reserve"}
+        configured = {g["group_code"] for g in settings["groups"]}
+        missing = required - configured
+        if missing:
+            raise HTTPException(409, "Не подключены группы: " + ", ".join(GROUP_LABELS[c] for c in sorted(missing)))
+        messages = [(chat_id, ["❗️Кто не получил заказ-выходной❗️"])
+                    for chat_id in sorted({int(g["chat_id"]) for g in settings["groups"]
+                                           if g["group_code"] in required})]
+    else:
+        summary = readiness_summary_data(db, day)
+        messages = readiness_chat_messages(summary, settings, kind, day)
     if kind == "summary" and not messages:
         raise HTTPException(409, "У бота не настроен административный чат для сверки.")
     if kind == "reminders":
@@ -3648,3 +3658,20 @@ function openDeleteBrigadeContacts(day,people){
 
 
 INLINE_INDEX_HTML = _contact_bulk_delete_ui(INLINE_INDEX_HTML)
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    'id="readinessHistoryBtn">🧾 История</button>',
+    'id="readinessHistoryBtn" title="Отправить сообщение о выходном в четыре группы">Кнопка Рощи<br><small>(Ревизорская)</small></button>',
+).replace(
+    "qs('#readinessHistoryBtn').onclick=openReadinessHistory;",
+    """qs('#readinessHistoryBtn').onclick=async event=>{
+      const button=event.currentTarget;
+      if(button.disabled)return;
+      button.disabled=true;
+      try{
+        const r=await api('/api/readiness/chat/roshcha',{method:'POST'});
+        toast(r.failed_chats ? `Отправлено в ${r.sent_chats} групп. Ошибок: ${r.failed_chats}` : `Сообщение отправлено в ${r.sent_chats} группы`,5000);
+      }catch(e){toast(e.message,5000)}
+      finally{setTimeout(()=>{button.disabled=false},30000)}
+    };""",
+)
