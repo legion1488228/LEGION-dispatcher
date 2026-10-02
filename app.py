@@ -1770,19 +1770,52 @@ def manual_brigade_contact(employee_id: int, work_date: date, db: Session = Depe
     return {"ok": True}
 
 
-def brigades_contact_data(db: Session, work_date: date):
+def brigade_contact_states(db: Session, work_date: date):
+    states = {}
     logs = db.execute(select(ImportLog).where(ImportLog.kind == "brigade_contact")
-                      .order_by(ImportLog.created_at.desc())).scalars().all()
-    ids = set()
+                      .order_by(ImportLog.created_at.desc(), ImportLog.id.desc())).scalars().all()
     for log in logs:
         try:
             record = json.loads(log.result_json or "{}")
             if record.get("work_date") == work_date.isoformat():
                 tg_id = int(record.get("tg_id") or 0)
-                if tg_id and tg_id not in HIDDEN_TG_IDS:
-                    ids.add(tg_id)
-        except (ValueError, TypeError):
+                if tg_id and tg_id not in states:
+                    states[tg_id] = not record.get("deleted", False)
+        except (ValueError, TypeError, AttributeError):
             continue
+    return states
+
+
+class BrigadeContactDelete(BaseModel):
+    employee_ids: list[int]
+
+
+@app.post("/api/readiness/brigade-contacts/delete")
+def delete_brigade_contacts(data: BrigadeContactDelete, work_date: date,
+                           db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    _require_owner(db, user)
+    if not data.employee_ids or len(data.employee_ids) > 1000:
+        raise HTTPException(400, "Выберите от 1 до 1000 отметок")
+    selected = set(data.employee_ids)
+    people = [p for p in brigades_contact_data(db, work_date) if p["id"] in selected]
+    for person in people:
+        db.add(ImportLog(kind="brigade_contact", created_by_tg_id=user.id,
+            raw_text="Удаление отметки связи владельцем",
+            result_json=json.dumps({"tg_id": person["tg_id"], "work_date": work_date.isoformat(),
+                                    "deleted": True}, ensure_ascii=False)))
+        orders = db.execute(select(Order).join(Assignment, Assignment.order_id == Order.id)
+            .join(Employee, Employee.id == Assignment.employee_id).where(
+                Employee.tg_id == person["tg_id"], Assignment.role == "brigadier",
+                Order.work_date == work_date)).scalars().all()
+        for order in orders:
+            order.brigade_on_contact_at = None
+    db.commit()
+    return {"ok": True, "deleted": len(people), "remaining": len(brigades_contact_data(db, work_date))}
+
+
+def brigades_contact_data(db: Session, work_date: date):
+    ids = {tg_id for tg_id, active in brigade_contact_states(db, work_date).items()
+           if active and tg_id not in HIDDEN_TG_IDS}
     if not ids:
         return []
     employees = db.execute(select(Employee).where(
@@ -2367,6 +2400,9 @@ def bot_brigadier_orders(tg_id: int, work_date: date, db: Session = Depends(get_
 def bot_brigade_contact(data: BrigadeContactReport, db: Session = Depends(get_db)):
     if data.tg_id in HIDDEN_TG_IDS:
         raise HTTPException(403, "Бригадир недоступен")
+    # A delayed bot retry must not restore an explicitly removed daily mark.
+    if brigade_contact_states(db, data.work_date).get(data.tg_id) is False:
+        return {"ok": True, "count": 0, "orders": [], "removed": True}
     rows = db.execute(
         select(Order)
         .join(Assignment, Assignment.order_id == Order.id)
@@ -3566,3 +3602,49 @@ def _organize_day_dashboard(html):
 
 
 INLINE_INDEX_HTML = _organize_day_dashboard(INLINE_INDEX_HTML)
+
+
+def _contact_bulk_delete_ui(html):
+    start = html.index('async function openContactBrigades(')
+    end = html.index('async function openAddBrigadeContact(', start)
+    return html[:start] + r'''
+async function openContactBrigades(workDay){
+  const day=typeof workDay==='string'?workDay:state.selectedDate;
+  try{
+    const r=await api(`/api/readiness/summary?work_date=${day}`);
+    const people=r.brigades_on_contact||[];
+    showModal('Связь бригад',`<div class="attention"><div style="display:flex;align-items:center;justify-content:space-between;gap:8px"><h4>Всего: ${people.length}</h4><button class="secondary small" id="addBrigadeContact">＋ Добавить</button></div><p>За ${esc(day)}. Каждый бригадир учитывается один раз.</p></div>${readinessPersonRows(people)}`);
+    qs('#addBrigadeContact').onclick=()=>openAddBrigadeContact(day,people);
+    if(state.bootstrap?.is_owner){
+      const button=document.createElement('button');
+      button.className='secondary danger small';button.textContent='Удалить';button.disabled=!people.length;
+      button.style.cssText='margin-left:auto;flex-shrink:0';
+      qs('#closeModal').before(button);
+      button.onclick=()=>openDeleteBrigadeContacts(day,people);
+    }
+  }catch(e){toast(e.message,4000)}
+}
+function openDeleteBrigadeContacts(day,people){
+  const selected=new Set();
+  showModal('Удалить отметки связи',`<p class="muted">За ${esc(day)}. Выберите бригады.</p><label style="display:flex;gap:12px;padding:12px"><input type="checkbox" id="contactSelectAll"> Выбрать все</label><div class="list">${people.map((p,i)=>`<label class="employee-row" style="cursor:pointer;justify-content:flex-start;gap:12px"><input type="checkbox" data-contact-select="${p.id}" style="width:22px;height:22px;flex-shrink:0"><b>${i+1}. ${esc(employeeListName(p))}</b></label>`).join('')}</div><div style="position:sticky;bottom:0;background:var(--card,#17171c);padding:12px 0;display:flex;gap:8px"><button class="secondary" id="cancelContactDelete">Отмена</button><button class="primary" id="submitContactDelete" disabled>Удалить выбранные (0)</button></div>`);
+  const submit=qs('#submitContactDelete'),all=qs('#contactSelectAll');
+  const checks=qsa('[data-contact-select]',qs('#modal'));
+  const update=()=>{submit.disabled=!selected.size;submit.textContent=`Удалить выбранные (${selected.size})`;all.checked=selected.size===people.length;all.indeterminate=selected.size>0&&selected.size<people.length};
+  checks.forEach(c=>c.onchange=()=>{const id=Number(c.dataset.contactSelect);if(c.checked)selected.add(id);else selected.delete(id);update()});
+  all.onchange=()=>{checks.forEach(c=>{c.checked=all.checked;const id=Number(c.dataset.contactSelect);if(c.checked)selected.add(id);else selected.delete(id)});update()};
+  qs('#cancelContactDelete').onclick=()=>openContactBrigades(day);
+  submit.onclick=async()=>{
+    if(submit.disabled)return;
+    submit.disabled=true;all.disabled=true;checks.forEach(c=>c.disabled=true);
+    try{
+      const result=await api(`/api/readiness/brigade-contacts/delete?work_date=${day}`,{method:'POST',body:JSON.stringify({employee_ids:[...selected]})});
+      if(state.selectedDate===day){const counter=qs('#brigadesContactCount b');if(counter)counter.textContent=String(result.remaining)+'/'+String(state.bootstrap.summary.orders_total||0)}
+      toast(`Удалено отметок: ${result.deleted}`);
+      await openContactBrigades(day);
+    }catch(e){toast(e.message,4000);all.disabled=false;checks.forEach(c=>c.disabled=false);update()}
+  };
+}
+''' + html[end:]
+
+
+INLINE_INDEX_HTML = _contact_bulk_delete_ui(INLINE_INDEX_HTML)
