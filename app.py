@@ -3509,7 +3509,8 @@ def _organize_day_dashboard(html):
         '<section id="readinessView" class="view active"><div id="employeeReadiness">', 1)
     html = html.replace('<div id="readinessGroups"></div>', '<div id="readinessGroups"></div></div>', 1)
     html = html.replace('<h2>Готовность</h2><p class="muted">Официальный срез — 15:30</p>',
-        '<h2>Готовность сотрудников</h2><p id="readinessDayLabel" class="muted"></p>', 1)
+        '<h2 id="readinessTitle">Готовность сотрудников</h2><p id="readinessDayLabel" class="muted"></p>', 1)
+    html = re.sub(r'(<button[^>]*id="readinessCountBtn"[^>]*>.*?</button>)(<button[^>]*id="readinessRemindersBtn"[^>]*>.*?</button>)', r'\2\1', html, count=1)
     html = html.replace('grid-template-columns:repeat(3,minmax(0,1fr))',
                         'grid-template-columns:repeat(2,minmax(0,1fr))', 1)
     # A single date owns each request. Late replies cannot overwrite a newer selection.
@@ -3528,6 +3529,9 @@ def _organize_day_dashboard(html):
     html=html[:start]+r'''function renderSummary() {
   const s=state.bootstrap.summary, day=state.selectedDate;
   const future=day>state.bootstrap.today;
+  const tomorrow=new Date(Date.parse(state.bootstrap.today+'T12:00:00Z')+86400000).toISOString().slice(0,10);
+  const closingTitle=day===tomorrow?'Закрытие заказов на завтра':day===state.bootstrap.today?'Закрытие заказов на сегодня':'Закрытие заказов';
+  qs('#readinessTitle').textContent='Готовность сотрудников'+(day===tomorrow?' на завтра':day===state.bootstrap.today?' на сегодня':'');
   qs('#selectedDayHeader').innerHTML=`<h2>${esc(fmtDate(day))}</h2><label class="muted">Выбрать дату <input type="date" id="dashboardDate" value="${day}" style="max-width:160px"></label>`;
   qs('#dashboardDate').onchange=e=>{if(e.target.value)loadBootstrap(e.target.value).catch(e=>toast(e.message))};
   qs('#summary').innerHTML=`
@@ -3541,19 +3545,19 @@ def _organize_day_dashboard(html):
     if(!qs('#'+id)){const section=document.createElement('section');section.id=id;section.style.margin='24px 0';view.appendChild(section)}
   }
   const p=s.order_completion?.sources.private||{},g=s.order_completion?.sources.gbu||{};
-  qs('#orderPreparation').innerHTML=`<h2>Подготовка заказов</h2><p class="muted">${esc(fmtDate(day))} · Номера и закрытие относятся к дате заказа</p>
+  qs('#orderPreparation').innerHTML=`<h2>${closingTitle}</h2><p class="muted">${esc(fmtDate(day))} · Номера и закрытие относятся к дате заказа</p>
     <button class="secondary" id="numberCardsBtn" style="width:100%;margin-bottom:12px">📱 Номера в группе ${s.number_cards_count||0}/${s.orders_total} ›</button>
     <div class="summary-grid" style="grid-template-columns:repeat(2,minmax(0,1fr))">
     <div class="metric"><b>Частные</b><span>Номера ${p.cards||0}/${s.private_count}</span><span>Закрыто ${p.closed||0}/${s.private_count}</span></div>
     <div class="metric"><b>ГБУ</b><span>Номера ${g.cards||0}/${s.gbu_count}</span><span>Закрыто ${g.closed||0}/${s.gbu_count}</span></div></div>`;
   qs('#numberCardsBtn').onclick=openNumberCards;
-  qs('#brigadeWork').innerHTML=`<h2>Работа бригад</h2><p class="muted">${esc(fmtDate(day))}${future?' · В день заказа':''}</p>
+  qs('#brigadeWork').innerHTML=`<h2>Контроль бригады утром</h2><p class="muted">${esc(fmtDate(day))}${future?' · В день заказа':''}</p>
     <div class="summary-grid" style="grid-template-columns:repeat(3,minmax(0,1fr))">
     <button id="brigadesContactCount" class="metric good"><b>${s.brigades_on_contact||0}/${s.orders_total}</b><span>Бригады на связи ›</span></button>
     <div class="metric"><b>${s.photo_reports?.private||0}/${s.private_count}</b><span>Фото · частные</span></div>
     <div class="metric"><b>${s.photo_reports?.gbu||0}/${s.gbu_count}</b><span>Фото · ГБУ</span></div></div>`;
   qs('#brigadesContactCount').onclick=openContactBrigades;
-  const sections=future?['employeeReadiness','orderPreparation','brigadeWork']:['brigadeWork','orderPreparation','employeeReadiness'];
+  const sections=future?['orderPreparation','brigadeWork','employeeReadiness']:['brigadeWork','orderPreparation','employeeReadiness'];
   for(const id of sections)view.appendChild(qs('#'+id));
 }
 
