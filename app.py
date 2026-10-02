@@ -3675,3 +3675,16 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
       finally{setTimeout(()=>{button.disabled=false},30000)}
     };""",
 )
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    'function renderDates() {',
+    """function shortCalendarDay(value) {
+      const parts=value.split('-').map(Number);
+      const day=new Date(Date.UTC(parts[0],parts[1]-1,parts[2])).getUTCDay();
+      return ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'][day]+', '+value.slice(8,10)+'.'+value.slice(5,7);
+    }
+    function renderDates() {""",
+).replace(
+    '<strong>${esc(d.label)}</strong><small>${d.count} заказов</small>',
+    '<strong style="white-space:nowrap">${esc(shortCalendarDay(d.date))}</strong>${["Сегодня","Завтра"].includes(d.label)?`<small>${esc(d.label)}</small>`:""}<small>${d.count} заказов</small>',
+)
