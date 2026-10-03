@@ -3667,6 +3667,14 @@ function openDeleteBrigadeContacts(day,people){
 
 INLINE_INDEX_HTML = _contact_bulk_delete_ui(INLINE_INDEX_HTML)
 
+# Hide the daily/period grand-total column only in the kickbacks table.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "  grid.scrollLeft=left;grid.scrollTop=top;\n  qsa('[data-marina-day]',grid)",
+    "  if(kind==='kickbacks') grid.querySelectorAll('tr').forEach(row=>row.lastElementChild?.remove());\n"
+    "  grid.scrollLeft=left;grid.scrollTop=top;\n  qsa('[data-marina-day]',grid)",
+    1,
+)
+
 # Only contact-list records carry contact_order_count; other employee lists stay unchanged.
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     '<div class="car">${x.has_car?\'🚗\':\'\'}</div>',
