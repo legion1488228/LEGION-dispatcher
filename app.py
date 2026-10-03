@@ -140,6 +140,15 @@ def _startup_migrations():
     if "tea_reported_at" not in order_cols:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE orders ADD COLUMN tea_reported_at TIMESTAMP NULL"))
+    # A combined Telegram message can close several orders and be replaced.
+    # Keep the old table intact while copying its records into the new schema.
+    if inspector.has_table("number_card_closures"):
+        with engine.begin() as conn:
+            conn.execute(text("""INSERT INTO number_card_closures_v2
+                (event_id,report_chat_id,report_message_id,received_at)
+                SELECT event_id,report_chat_id,report_message_id,received_at
+                FROM number_card_closures WHERE true
+                ON CONFLICT(event_id) DO NOTHING"""))
 
 
 @app.on_event("startup")
@@ -3244,12 +3253,11 @@ class NumberCardDeletion(Base):
 
 
 class NumberCardClosure(Base):
-    __tablename__ = 'number_card_closures'
+    __tablename__ = 'number_card_closures_v2'
     event_id = Column(Integer, primary_key=True)
     report_chat_id = Column(BigInteger, nullable=False)
     report_message_id = Column(BigInteger, nullable=False)
     received_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    __table_args__ = (UniqueConstraint('report_chat_id', 'report_message_id', name='uq_number_close_report'),)
 
 
 class NumberCardClosureInput(BaseModel):
@@ -3344,6 +3352,8 @@ def record_number_card_closure(data: NumberCardClosureInput, db: Session = Depen
     card = db.get(NumberCardEvent, result['id'])
     if card.tg_id != data.card.tg_id or card.source != data.card.source or card.work_date != data.card.work_date:
         raise HTTPException(409, 'Данные карточки не совпадают')
+    if db.get(NumberCardDeletion, card.id) is not None:
+        return {'saved': False, 'ignored': True, 'id': card.id}
     row = db.get(NumberCardClosure, card.id)
     if row is None:
         row = NumberCardClosure(event_id=card.id, report_chat_id=data.report_chat_id,
@@ -3354,9 +3364,30 @@ def record_number_card_closure(data: NumberCardClosureInput, db: Session = Depen
         except IntegrityError:
             db.rollback()
             row = db.get(NumberCardClosure, card.id)
-    if row is None or (row.report_chat_id, row.report_message_id) != (data.report_chat_id, data.report_message_id):
-        raise HTTPException(409, 'Отчёт уже привязан к другой записи')
+    if row is None:
+        raise HTTPException(409, 'Не удалось сохранить отчёт')
+    row.report_chat_id = data.report_chat_id
+    row.report_message_id = data.report_message_id
+    db.commit()
     return {'saved': True, 'id': card.id}
+
+
+@app.post('/api/bot/number-cards/edit', dependencies=[Depends(_bot_key)])
+def edit_number_card(data: NumberCardInput, db: Session = Depends(get_db)):
+    row = db.scalar(select(NumberCardEvent).where(
+        NumberCardEvent.chat_id == data.chat_id, NumberCardEvent.message_id == data.message_id))
+    if (row is None or row.tg_id != data.tg_id or row.work_date != data.work_date
+            or db.get(NumberCardDeletion, row.id) is not None):
+        return {'saved': False, 'error': 'Карточка удалена или недоступна.'}
+    photo = db.get(PhotoReportEvent, f'card:{row.chat_id}:{row.message_id}')
+    if row.source != data.source and photo and photo.active:
+        return {'saved': False, 'error': 'Категорию можно изменить до отправки фото по заказу.'}
+    surname = data.surname.strip().upper()
+    if not surname:
+        return {'saved': False, 'error': 'Укажите фамилию умершего.'}
+    row.surname, row.source = surname, data.source
+    db.commit()
+    return {'saved': True, 'id': row.id}
 
 
 @app.delete('/api/number-cards/{event_id}')
@@ -3403,7 +3434,7 @@ def list_number_cards(work_date: date, db: Session = Depends(get_db), user: Tele
 
 @app.get("/api/bot/number-cards", dependencies=[Depends(_bot_key)])
 def bot_number_card_history(tg_id: int, db: Session = Depends(get_db)):
-    rows = db.scalars(select(NumberCardEvent).where(NumberCardEvent.tg_id == tg_id).order_by(NumberCardEvent.id)).all()
+    rows = db.scalars(select(NumberCardEvent).where(NumberCardEvent.tg_id == tg_id, _visible_number_card()).order_by(NumberCardEvent.id)).all()
     return {"items": [{"chat_id":r.chat_id,"message_id":r.message_id,"work_date":r.work_date.isoformat(),
         "tg_id":r.tg_id,"full_name":r.full_name,"phone":brigadier_phone8(r.phone),"source":r.source,"surname":r.surname,
         "sent_at":r.sent_at.isoformat()} for r in rows]}
