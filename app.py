@@ -1810,7 +1810,9 @@ def delete_brigade_contacts(data: BrigadeContactDelete, work_date: date,
         for order in orders:
             order.brigade_on_contact_at = None
     db.commit()
-    return {"ok": True, "deleted": len(people), "remaining": len(brigades_contact_data(db, work_date))}
+    remaining = brigades_contact_data(db, work_date)
+    return {"ok": True, "deleted": len(people),
+            "remaining": sum(p["contact_order_count"] for p in remaining)}
 
 
 def brigades_contact_data(db: Session, work_date: date):
@@ -1822,8 +1824,14 @@ def brigades_contact_data(db: Session, work_date: date):
         Employee.tg_id.in_(ids), Employee.active.is_(True), Employee.group_code == "brigadier",
         _visible_employee(),
     ).order_by(Employee.full_name)).scalars().all()
-    # One brigadier represents one brigade, regardless of repeated messages/orders.
+    # Keep one person in the list; their check-in covers every visible daily card.
     unique = {emp.tg_id: _employee_dict(emp) for emp in employees}
+    counts = dict(db.execute(select(NumberCardEvent.tg_id, func.count(NumberCardEvent.id))
+        .where(NumberCardEvent.work_date == work_date, _visible_number_card(),
+               NumberCardEvent.tg_id.in_(list(unique)))
+        .group_by(NumberCardEvent.tg_id)).all()) if unique else {}
+    for tg_id, person in unique.items():
+        person["contact_order_count"] = int(counts.get(tg_id, 0))
     return list(unique.values())
 
 
@@ -1859,7 +1867,7 @@ def readiness_summary_data(db: Session, work_date: date):
 
     manual_totals = apply_manual_readiness(db, work_date, groups, cutoff)
     on_contact = brigades_contact_data(db, work_date)
-    manual_totals["brigades_on_contact"] = len(on_contact)
+    manual_totals["brigades_on_contact"] = sum(p["contact_order_count"] for p in on_contact)
     manual_totals["brigades_expected"] = sum(
         x["expected"] for x in order_completion_data(db, work_date)["sources"].values())
 
@@ -3623,7 +3631,7 @@ async function openContactBrigades(workDay){
   try{
     const r=await api(`/api/readiness/summary?work_date=${day}`);
     const people=r.brigades_on_contact||[];
-    showModal('Связь бригад',`<div class="attention"><div style="display:flex;align-items:center;justify-content:space-between;gap:8px"><h4>Всего: ${people.length}</h4><button class="secondary small" id="addBrigadeContact">＋ Добавить</button></div><p>За ${esc(day)}. Каждый бригадир учитывается один раз.</p></div>${readinessPersonRows(people)}`);
+    showModal('Связь бригад',`<div class="attention"><div style="display:flex;align-items:center;justify-content:space-between;gap:8px"><h4>Связь по заказам: ${r.totals.brigades_on_contact}/${r.totals.brigades_expected}</h4><button class="secondary small" id="addBrigadeContact">＋ Добавить</button></div><p>За ${esc(day)}. Бригадиров на связи: ${people.length}. Одна отметка учитывает все номера бригадира на эту дату.</p></div>${readinessPersonRows(people)}`);
     qs('#addBrigadeContact').onclick=()=>openAddBrigadeContact(day,people);
     if(state.bootstrap?.is_owner){
       const button=document.createElement('button');
@@ -3658,6 +3666,18 @@ function openDeleteBrigadeContacts(day,people){
 
 
 INLINE_INDEX_HTML = _contact_bulk_delete_ui(INLINE_INDEX_HTML)
+
+# Only contact-list records carry contact_order_count; other employee lists stay unchanged.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    '<div class="car">${x.has_car?\'🚗\':\'\'}</div>',
+    '<div class="car" style="display:flex;align-items:center;gap:10px;flex-shrink:0">'
+    '${x.has_car?\'🚗\':\'\'}'
+    '${x.contact_order_count!==undefined?`<span aria-label="Связь по заказам: ${Number(x.contact_order_count)||0}" '
+    'title="Количество заказов на связи" style="display:inline-flex;align-items:center;justify-content:center;'
+    'min-width:32px;height:32px;padding:0 8px;border-radius:10px;background:#20382b;color:#55c98b;'
+    'font-weight:700;font-size:18px">${Number(x.contact_order_count)||0}</span>`:\'\'}</div>',
+    1,
+)
 
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     'id="readinessHistoryBtn">🧾 История</button>',
