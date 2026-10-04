@@ -912,6 +912,7 @@ def _day_summary(db: Session, work_date: date):
     return {
         "requested_staff": sum(requested_by_source.values()),
         "requested_staff_by_source": requested_by_source,
+        "requested_staff_without_carryouts": _requested_staff_from_orders(db, work_date, include_carryouts=False),
         "number_cards_count": db.scalar(select(func.count(NumberCardEvent.id)).where(NumberCardEvent.work_date == work_date, _visible_number_card())),
         "order_completion": completion,
         "photo_reports": photo_report_counts(db, work_date),
@@ -3645,7 +3646,7 @@ def _organize_day_dashboard(html):
     <div class="metric"><b>${s.orders_total}</b><span>Всего заказов</span></div>
     <button class="metric" data-count-field="private_count"><b>${s.private_count} ✍️</b><span>Частные</span></button>
     <button class="metric" data-count-field="gbu_count"><b>${s.gbu_count} ✍️</b><span>ГБУ</span></button>
-    <div class="metric" aria-label="Нужно сотрудников: ${s.requested_staff||0}. Частные: ${s.requested_staff_by_source?.private||0}. ГБУ: ${s.requested_staff_by_source?.gbu||0}"><b>${s.requested_staff||0}</b><span style="white-space:normal;overflow:visible">Нужно сотрудников</span><b style="font-size:14px;margin-top:8px">${s.requested_staff_by_source?.private||0} / ${s.requested_staff_by_source?.gbu||0}</b><span style="white-space:normal;overflow:visible">Частные / ГБУ</span></div>`;
+    <div class="metric" aria-label="Нужно сотрудников: ${s.requested_staff||0}. Без выносов: ${s.requested_staff_without_carryouts??s.requested_staff??0}. Частные: ${s.requested_staff_by_source?.private||0}. ГБУ: ${s.requested_staff_by_source?.gbu||0}"><b style="font-size:18px;overflow-wrap:anywhere">${s.requested_staff||0}${s.requested_staff_without_carryouts!=null && s.requested_staff_without_carryouts<s.requested_staff ? `(${s.requested_staff_without_carryouts})` : ""}</b><span style="white-space:normal;overflow:visible">Нужно сотрудников</span><b style="font-size:14px;margin-top:8px">${s.requested_staff_by_source?.private||0} / ${s.requested_staff_by_source?.gbu||0}</b><span style="white-space:normal;overflow:visible">Частные / ГБУ</span></div>`;
   qsa('[data-count-field]').forEach(btn=>btn.onclick=()=>editDispatchCount(btn.dataset.countField));
   const view=qs('#readinessView');
   for(const id of ['orderPreparation','brigadeWork']){
