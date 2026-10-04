@@ -908,8 +908,10 @@ def _day_summary(db: Session, work_date: date):
     completion = order_completion_data(db, work_date)
     private = completion["sources"]["private"]["expected"]
     gbu = completion["sources"]["gbu"]["expected"]
+    requested_by_source = _requested_staff_by_source(db, work_date)
     return {
-        "requested_staff": _requested_staff_from_orders(db, work_date),
+        "requested_staff": sum(requested_by_source.values()),
+        "requested_staff_by_source": requested_by_source,
         "number_cards_count": db.scalar(select(func.count(NumberCardEvent.id)).where(NumberCardEvent.work_date == work_date, _visible_number_card())),
         "order_completion": completion,
         "photo_reports": photo_report_counts(db, work_date),
@@ -3164,11 +3166,15 @@ def _category_counts(db, work_date, source):
     return {'counts':counts,'unallocated':unallocated,'total':sum(counts.values())+unallocated,'version':0}
 
 
+def _requested_staff_by_source(db, work_date, *, include_carryouts=True):
+    return {source: sum(int(key.rsplit(":", 1)[1]) * count
+                        for key, count in _category_counts(db, work_date, source)["counts"].items()
+                        if include_carryouts or not key.startswith("carryout:"))
+            for source in ORDER_COUNT_TYPES}
+
+
 def _requested_staff_from_orders(db, work_date, *, include_carryouts=True):
-    return sum(int(key.rsplit(":", 1)[1]) * count
-               for source in ORDER_COUNT_TYPES
-               for key, count in _category_counts(db, work_date, source)["counts"].items()
-               if include_carryouts or not key.startswith("carryout:"))
+    return sum(_requested_staff_by_source(db, work_date, include_carryouts=include_carryouts).values())
 
 
 @app.get('/api/order-counts/{work_date}/{source}')
@@ -3639,7 +3645,7 @@ def _organize_day_dashboard(html):
     <div class="metric"><b>${s.orders_total}</b><span>Всего заказов</span></div>
     <button class="metric" data-count-field="private_count"><b>${s.private_count} ✍️</b><span>Частные</span></button>
     <button class="metric" data-count-field="gbu_count"><b>${s.gbu_count} ✍️</b><span>ГБУ</span></button>
-    <div class="metric"><b>${s.requested_staff||0}</b><span>Нужно сотрудников</span></div>`;
+    <div class="metric" aria-label="Нужно сотрудников: ${s.requested_staff||0}. Частные: ${s.requested_staff_by_source?.private||0}. ГБУ: ${s.requested_staff_by_source?.gbu||0}"><b>${s.requested_staff||0}</b><span style="white-space:normal;overflow:visible">Нужно сотрудников</span><b style="font-size:14px;margin-top:8px">${s.requested_staff_by_source?.private||0} / ${s.requested_staff_by_source?.gbu||0}</b><span style="white-space:normal;overflow:visible">Частные / ГБУ</span></div>`;
   qsa('[data-count-field]').forEach(btn=>btn.onclick=()=>editDispatchCount(btn.dataset.countField));
   const view=qs('#readinessView');
   for(const id of ['orderPreparation','brigadeWork']){
