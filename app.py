@@ -3023,7 +3023,7 @@ def _personal_table_result(row, kind: str, month: str, db=None) -> dict:
             data["cells"].pop(key, None)
             if db is not None:
                 work_date = date.fromisoformat(month + "-01").replace(day=day)
-                data["cells"][key] = _requested_staff_from_orders(db, work_date) * 100 * 100
+                data["cells"][key] = _requested_staff_from_orders(db, work_date, include_carryouts=False) * 100 * 100
     if kind == "kickbacks" and db is not None:
         for day in range(1, days + 1):
             delta = int(adjustments.get(str(day), 0))
@@ -3124,7 +3124,7 @@ def edit_dispatch_count(work_date: date, change: DispatchCountChange,
 
 
 ORDER_COUNT_TYPES = {
-    'private': ['standard:3', 'standard:4', 'standard:5', 'standard:6', 'vip:4', 'vip:6', 'elite:4', 'elite:6'],
+    'private': ['standard:3', 'standard:4', 'standard:5', 'standard:6', 'vip:4', 'vip:6', 'elite:4', 'elite:6', 'carryout:2', 'carryout:3', 'carryout:4'],
     'gbu': ['standard:4', 'standard:6', 'elite:4', 'elite:6'],
 }
 
@@ -3164,10 +3164,11 @@ def _category_counts(db, work_date, source):
     return {'counts':counts,'unallocated':unallocated,'total':sum(counts.values())+unallocated,'version':0}
 
 
-def _requested_staff_from_orders(db, work_date):
+def _requested_staff_from_orders(db, work_date, *, include_carryouts=True):
     return sum(int(key.rsplit(":", 1)[1]) * count
                for source in ORDER_COUNT_TYPES
-               for key, count in _category_counts(db, work_date, source)["counts"].items())
+               for key, count in _category_counts(db, work_date, source)["counts"].items()
+               if include_carryouts or not key.startswith("carryout:"))
 
 
 @app.get('/api/order-counts/{work_date}/{source}')
@@ -3483,8 +3484,8 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     'async function editDispatchCount(field){',
     "async function editDispatchCount(field){\n if(field==='private_count'||field==='gbu_count'){await openOrderCategoryCounts(field==='private_count'?'private':'gbu');return}",1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</script>\n</body>', r'''
-const orderCountTypes={private:['standard:3','standard:4','standard:5','standard:6','vip:4','vip:6','elite:4','elite:6'],gbu:['standard:4','standard:6','elite:4','elite:6']};
-const orderCountLabel=key=>{const [cat,size]=key.split(':');return `${{standard:'Стандарт',vip:'Вип',elite:'Элит'}[cat]} · ${size} чел`};
+const orderCountTypes={private:['standard:3','standard:4','standard:5','standard:6','vip:4','vip:6','elite:4','elite:6','carryout:2','carryout:3','carryout:4'],gbu:['standard:4','standard:6','elite:4','elite:6']};
+const orderCountLabel=key=>{const [cat,size]=key.split(':');return `${{standard:'Стандарт',vip:'Вип',elite:'Элит',carryout:'Вынос'}[cat]} · ${size} чел`};
 async function openOrderCategoryCounts(source){
  const day=state.selectedDate;
  showModal(source==='gbu'?'Заказы ГБУ':'Частные заказы','<div id="categoryCountBody">Загрузка…</div>');
@@ -3493,16 +3494,31 @@ async function openOrderCategoryCounts(source){
  try{
   const data=await api(`/api/order-counts/${day}/${source}`);if(qs('#categoryCountBody')!==body)return;
   body.innerHTML=`<p class="muted">На ${esc(day)}. Укажите количество заказов каждой категории — не число сотрудников.</p>
-   <form id="categoryCountForm">${orderCountTypes[source].map(key=>`<label class="employee-row"><span>${orderCountLabel(key)}</span><span style="display:flex;align-items:center;gap:6px"><button class="secondary" type="button" data-step="-1" data-key="${key}" aria-label="Уменьшить ${orderCountLabel(key)}">−</button><input data-category="${key}" type="number" inputmode="numeric" min="0" max="100000" step="1" value="${data.counts[key]||''}" style="width:64px;text-align:center"><button class="secondary" type="button" data-step="1" data-key="${key}" aria-label="Добавить ${orderCountLabel(key)}">+</button></span></label>`).join('')}
+   <form id="categoryCountForm">${orderCountTypes[source].filter(key=>!key.startsWith('carryout:')).map(key=>`<label class="employee-row"><span>${orderCountLabel(key)}</span><span style="display:flex;align-items:center;gap:6px"><button class="secondary" type="button" data-step="-1" data-key="${key}" aria-label="Уменьшить ${orderCountLabel(key)}">−</button><input data-category="${key}" type="number" inputmode="numeric" min="0" max="100000" step="1" value="${data.counts[key]||''}" style="width:64px;text-align:center"><button class="secondary" type="button" data-step="1" data-key="${key}" aria-label="Добавить ${orderCountLabel(key)}">+</button></span></label>`).join('')}
+   ${source==='private'?`<details style="border:1px solid var(--line);border-radius:14px;padding:12px;margin-top:10px"><summary style="min-height:44px;font-weight:750">Вынос <span id="carryoutSummary" class="muted" aria-live="polite"></span></summary><label>Состав бригады <select id="carryoutSize" style="min-height:44px;font-size:16px"><option value="2">2 человека</option><option value="3">3 человека</option><option value="4">4 человека</option></select></label><div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-top:12px"><span>Количество заказов</span><span style="display:flex;gap:6px;align-items:center"><button type="button" class="secondary" id="carryoutMinus" aria-label="Уменьшить число выносов">−</button><input id="carryoutQuantity" type="number" inputmode="numeric" min="0" max="100000" step="1" style="width:64px;text-align:center;font-size:16px" aria-label="Количество выносов"><button type="button" class="secondary" id="carryoutPlus" aria-label="Добавить вынос">+</button></span></div></details>`:''}
    <div class="category-save-bar" style="position:sticky;bottom:0;z-index:3;display:flex;align-items:center;justify-content:space-between;gap:12px;background:#111114;padding:12px 0 0;margin-top:8px;border-top:1px solid var(--line)"><h3 style="margin:0;min-width:0;font-size:18px">Всего: <span id="categoryCountTotal">${Object.values(data.counts).reduce((a,b)=>a+b,0)}</span></h3><button class="primary" type="submit" style="flex-shrink:0">Сохранить</button></div>
    </form>`;
   const form=qs('#categoryCountForm');
+  const carryouts=source==='private'?Object.fromEntries([2,3,4].map(size=>['carryout:'+size,Number(data.counts['carryout:'+size]||0)])):{};
+  const drawCarryouts=()=>{
+   if(source!=='private')return;
+   qs('#carryoutSummary').textContent=[2,3,4].filter(size=>carryouts['carryout:'+size]>0).map(size=>`${size} чел. × ${carryouts['carryout:'+size]}`).join(' · ')||'Нет заказов';
+  };
   qsa('[data-category]',body).forEach(input=>{
    input.onfocus=()=>{if(input.value==='0')input.value=''};
    input.onblur=()=>{if(input.value!==''&&Number.isInteger(Number(input.value))&&Number(input.value)>=0)input.value=Number(input.value)===0?'':String(Number(input.value))};
   });
-  const read=()=>{const counts={};qsa('[data-category]',body).forEach(el=>counts[el.dataset.category]=Number(el.value));return {counts,unallocated:0,version:data.version}};
+  const read=()=>{const counts={...carryouts};qsa('[data-category]',body).forEach(el=>counts[el.dataset.category]=Number(el.value));return {counts,unallocated:0,version:data.version}};
   form.oninput=()=>{const v=read();qs('#categoryCountTotal').textContent=Object.values(v.counts).reduce((a,b)=>a+b,0)+v.unallocated};
+  if(source==='private'){
+   const size=qs('#carryoutSize'),quantity=qs('#carryoutQuantity');
+   const update=()=>{carryouts['carryout:'+size.value]=Number(quantity.value);drawCarryouts();form.oninput()};
+   size.onchange=()=>{quantity.value=carryouts['carryout:'+size.value]||''};
+   quantity.oninput=update;
+   qs('#carryoutMinus').onclick=()=>{quantity.value=Math.max(0,(Number(quantity.value)||0)-1);update()};
+   qs('#carryoutPlus').onclick=()=>{quantity.value=Math.min(100000,(Number(quantity.value)||0)+1);update()};
+   size.onchange();drawCarryouts();
+  }
   qsa('[data-step]',body).forEach(btn=>btn.onclick=()=>{
    const input=qsa('[data-category]',body).find(el=>el.dataset.category===btn.dataset.key);
    const value=Number(input.value)||0;
