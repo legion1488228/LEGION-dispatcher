@@ -2957,6 +2957,32 @@ def owner_cash_months(db: Session = Depends(get_db), user: TelegramUser = Depend
     months.add(datetime.now(ZoneInfo("Europe/Moscow")).strftime("%Y-%m"))
     return {"months": sorted(months, reverse=True)}
 
+# Net earnings is a computed display field, never an editable income column.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    'const totalRow=(title,values)=>',
+    'const totalRow=(title,values,net)=>',
+).replace(
+    '${money(values.reduce((a,b)=>a+b,0))}</b></td></tr>',
+    '${money(values.reduce((a,b)=>a+b,0))}</b></td>${kind===\'earnings\'?`<td style="color:var(--gold)"><b>${money(net)}</b></td>`:""}</tr>',
+    1,
+).replace(
+    '${money(values.reduce((a,b)=>a+b,0))}</b></td></tr>',
+    '${money(values.reduce((a,b)=>a+b,0))}</b></td>${kind===\'earnings\'?`<td style="color:var(--gold)"><b>${money(data.net_after_vlad.daily[String(day)])}</b></td>`:""}</tr>',
+    1,
+).replace(
+    "totalRow('Итого 1–15',data.first)",
+    "totalRow('Итого 1–15',data.first,data.net_after_vlad?.first)",
+).replace(
+    "totalRow('Итого 16–'+data.days,data.second)+totalRow('За месяц',data.total)",
+    "totalRow('Итого 16–'+data.days,data.second,data.net_after_vlad?.second)+totalRow('За месяц',data.total,data.net_after_vlad?.total)",
+).replace(
+    '<th>Итого ₽</th></tr></thead>',
+    '<th>Итого ₽</th>${kind===\'earnings\'?\'<th style="min-width:150px;color:var(--gold)">Чистыми<br>после вычета<br>Владу ₽</th>\':""}</tr></thead>',
+).replace(
+    '«Владу» — количество запрошенных сотрудников × 100 ₽ за день.',
+    '«Владу» — количество запрошенных сотрудников без выносов × 100 ₽ за день. «Чистыми» — итог дня минус надбавка Владу.',
+)
+
 # Personal manual ledgers are separate from cash reported by brigadiers.
 PERSONAL_TABLE_COLUMNS = {
     "earnings": ["Касса", "ГБУ", "Наличка"],
@@ -2991,6 +3017,19 @@ def _personal_month_days(month: str) -> int:
     except ValueError:
         raise HTTPException(422, "Некорректный месяц")
     return calendar.monthrange(first.year, first.month)[1]
+
+
+def _earnings_after_vlad(data, days, month, db):
+    daily = {}
+    for day in range(1, days + 1):
+        gross = sum(data['cells'].get(f'{day}:{col}', 0) for col in range(len(data['columns'])))
+        work_date = date.fromisoformat(month + '-01').replace(day=day)
+        allowance = _requested_staff_from_orders(db, work_date, include_carryouts=False) * 10000 if db is not None else 0
+        daily[str(day)] = gross - allowance
+    return {'daily': daily,
+            'first': sum(daily[str(day)] for day in range(1, 16)),
+            'second': sum(daily[str(day)] for day in range(16, days + 1)),
+            'total': sum(daily.values())}
 
 
 def _personal_table_result(row, kind: str, month: str, db=None) -> dict:
@@ -3033,6 +3072,8 @@ def _personal_table_result(row, kind: str, month: str, db=None) -> dict:
             if delta:
                 key = f"{day}:0"
                 data["cells"][key] = data["cells"].get(key, 0) + delta
+    if kind == 'earnings':
+        data['net_after_vlad'] = _earnings_after_vlad(data, days, month, db)
     sums = lambda first, last: [sum(data["cells"].get(f"{day}:{col}", 0) for day in range(first, last + 1)) for col in range(len(data["columns"]))]
     return {**data, "automatic_columns": automatic, "month": month, "kind": kind, "days": days, "version": row.version if row else 0,
             "first": sums(1, 15), "second": sums(16, days), "total": sums(1, days)}
