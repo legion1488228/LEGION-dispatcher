@@ -3578,6 +3578,30 @@ def record_number_card(data: NumberCardInput, db: Session = Depends(get_db)):
                 raise
     return {"saved": True, "id": row.id}
 
+class BrigadierNumberDelete(BaseModel):
+    tg_id: int = Field(gt=0)
+    chat_id: int = Field(lt=0)
+    message_id: int = Field(gt=0)
+
+
+@app.post('/api/bot/number-cards/delete', dependencies=[Depends(_bot_key)])
+def delete_brigadier_number(data: BrigadierNumberDelete, db: Session=Depends(get_db)):
+    row=db.scalar(select(NumberCardEvent).where(NumberCardEvent.chat_id==data.chat_id,
+        NumberCardEvent.message_id==data.message_id).with_for_update())
+    if not row or row.tg_id!=data.tg_id:
+        return {'saved':False,'error':'Номер не найден или принадлежит другому бригадиру.'}
+    if db.get(NumberCardDeletion,row.id):return {'saved':True}
+    job=db.get(NumberReassignment,row.id)
+    if job and job.status=='pending':
+        return {'saved':False,'error':'Дождитесь завершения замены бригадира.'}
+    photo=db.get(PhotoReportEvent,f'card:{row.chat_id}:{row.message_id}')
+    if photo:
+        return {'saved':False,'error':'По заказу уже есть фотоотчёт. Для удаления обратитесь к руководителю.'}
+    db.add(NumberCardDeletion(event_id=row.id,deleted_by_tg_id=data.tg_id))
+    db.commit()
+    return {'saved':True}
+
+
 @app.get("/api/number-cards")
 def list_number_cards(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
     rows = db.scalars(select(NumberCardEvent).where(NumberCardEvent.work_date == work_date, _visible_number_card()).order_by(NumberCardEvent.sent_at, NumberCardEvent.id)).all()
