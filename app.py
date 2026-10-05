@@ -3296,6 +3296,105 @@ class NumberCardInput(BaseModel):
     sent_at: datetime
 
 
+
+# Durable transfer requests: card identity and all completion records stay intact.
+class NumberReassignment(Base):
+    __tablename__ = 'number_reassignments'
+    event_id = Column(Integer, primary_key=True)
+    token = Column(String(64), nullable=False, index=True)
+    payload = Column(String, nullable=False)
+    status = Column(String(20), nullable=False, default='pending')
+    error = Column(String, nullable=False, default='')
+
+
+class NumberReassignInput(BaseModel):
+    event_ids: list[int] = Field(min_length=1, max_length=50)
+    old_tg_id: int = Field(gt=0)
+    new_tg_id: int = Field(gt=0)
+    keep_contact: bool = False
+
+
+@app.get('/api/number-reassign/brigadiers')
+def reassignment_candidates(db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    return {'items': [_employee_dict(e) for e in db.scalars(select(Employee).where(
+        Employee.active.is_(True), Employee.group_code=='brigadier',
+        Employee.tg_id.is_not(None), _visible_employee()).order_by(Employee.full_name))]}
+
+
+@app.post('/api/number-reassign')
+def request_number_reassignment(data: NumberReassignInput, db: Session=Depends(get_db), user: TelegramUser=Depends(require_admin)):
+    ids=sorted(set(data.event_ids))
+    rows=db.scalars(select(NumberCardEvent).where(NumberCardEvent.id.in_(ids)).order_by(NumberCardEvent.id).with_for_update()).all()
+    target=db.scalar(select(Employee).where(Employee.tg_id==data.new_tg_id, Employee.active.is_(True),
+        Employee.group_code=='brigadier', _visible_employee()))
+    if not target or not target.phone or data.new_tg_id==data.old_tg_id:
+        raise HTTPException(422,'Выберите другого действующего бригадира с номером телефона')
+    if len(rows)!=len(ids) or len({r.work_date for r in rows})!=1 or any(
+            r.tg_id!=data.old_tg_id or db.get(NumberCardDeletion,r.id) for r in rows):
+        raise HTTPException(409,'Заказы изменились. Откройте список заново')
+    if any((job:=db.get(NumberReassignment,r.id)) and job.status=='pending' for r in rows):
+        raise HTTPException(409,'Замена этих заказов уже выполняется')
+    token=secrets.token_hex(16)
+    payload={'token':token,'old_tg_id':data.old_tg_id,'new_tg_id':data.new_tg_id,
+        'label':_employee_dict(target)['display_name'],'phone':brigadier_phone8(target.phone),
+        'keep_contact':data.keep_contact,'requested_by':user.id,
+        'work_date':rows[0].work_date.isoformat(),'cards':[{
+            'event_id':r.id,'chat_id':r.chat_id,'message_id':r.message_id,'source':r.source,
+            'surname':r.surname} for r in rows]}
+    for r in rows:
+        job=db.get(NumberReassignment,r.id)
+        if not job: job=NumberReassignment(event_id=r.id);db.add(job)
+        job.token=token;job.payload=json.dumps(payload,ensure_ascii=False);job.status='pending';job.error=''
+    db.commit()
+    return {'token':token,'status':'pending'}
+
+
+@app.get('/api/number-reassign/{token}')
+def number_reassignment_status(token:str, db:Session=Depends(get_db), user:TelegramUser=Depends(require_admin)):
+    job=db.scalar(select(NumberReassignment).where(NumberReassignment.token==token))
+    if not job: raise HTTPException(404,'Замена не найдена')
+    return {'status':job.status,'error':job.error}
+
+
+@app.get('/api/bot/number-reassign', dependencies=[Depends(_bot_key)])
+def pending_number_reassignments(db:Session=Depends(get_db)):
+    jobs=db.scalars(select(NumberReassignment).where(NumberReassignment.status=='pending')).all()
+    return {'items':list({j.token:json.loads(j.payload) for j in jobs}.values())}
+
+
+class NumberReassignAck(BaseModel):
+    error: str = Field(default='',max_length=1000)
+
+
+@app.post('/api/bot/number-reassign/{token}', dependencies=[Depends(_bot_key)])
+def acknowledge_number_reassignment(token:str, data:NumberReassignAck, db:Session=Depends(get_db)):
+    jobs=db.scalars(select(NumberReassignment).where(NumberReassignment.token==token).order_by(NumberReassignment.event_id).with_for_update()).all()
+    if not jobs: raise HTTPException(404,'Замена не найдена')
+    if all(j.status=='done' for j in jobs): return {'ok':True}
+    if any(j.status!='pending' for j in jobs): return {'ok':False}
+    payload=json.loads(jobs[0].payload)
+    if data.error:
+        for j in jobs:j.status='failed';j.error=data.error
+    else:
+        day=date.fromisoformat(payload['work_date'])
+        for j in jobs:
+            r=db.get(NumberCardEvent,j.event_id)
+            r.tg_id=payload['new_tg_id'];r.full_name=payload['label'];r.phone=payload['phone']
+            photo=db.get(PhotoReportEvent,f'card:{r.chat_id}:{r.message_id}')
+            if photo:photo.tg_id=payload['new_tg_id']
+            j.status='done'
+        if payload['keep_contact'] and brigade_contact_states(db,day).get(payload['old_tg_id']):
+            db.add(ImportLog(kind='brigade_contact',created_by_tg_id=payload['requested_by'],
+                raw_text='Связь сохранена при замене бригадира',result_json=json.dumps({
+                    'tg_id':payload['new_tg_id'],'work_date':payload['work_date'],'source':'reassignment'})))
+        db.add(ImportLog(kind='number_reassignment',created_by_tg_id=payload['requested_by'],
+            raw_text='Замена бригадира',result_json=jobs[0].payload))
+    db.commit()
+    return {'ok':True}
+
+
+
+
 class NumberCardDeletion(Base):
     __tablename__ = 'number_card_deletions'
     event_id = Column(Integer, primary_key=True)
@@ -3430,6 +3529,9 @@ def edit_number_card(data: NumberCardInput, db: Session = Depends(get_db)):
     if (row is None or row.tg_id != data.tg_id or row.work_date != data.work_date
             or db.get(NumberCardDeletion, row.id) is not None):
         return {'saved': False, 'error': 'Карточка удалена или недоступна.'}
+    job=db.get(NumberReassignment,row.id)
+    if job and job.status=='pending':
+        return {'saved':False,'error':'Дождитесь завершения замены бригадира.'}
     photo = db.get(PhotoReportEvent, f'card:{row.chat_id}:{row.message_id}')
     if row.source != data.source and photo and photo.active:
         return {'saved': False, 'error': 'Категорию можно изменить до отправки фото по заказу.'}
@@ -3448,6 +3550,9 @@ def delete_number_card(event_id: int, db: Session = Depends(get_db), user: Teleg
     row = db.get(NumberCardEvent, event_id)
     if row is None:
         raise HTTPException(404, 'Запись не найдена')
+    job=db.get(NumberReassignment,event_id)
+    if job and job.status=='pending':
+        raise HTTPException(409,'Дождитесь завершения замены бригадира')
     if db.get(NumberCardDeletion, event_id) is None:
         db.add(NumberCardDeletion(event_id=event_id, deleted_by_tg_id=user.id))
         try:
@@ -3479,7 +3584,7 @@ def list_number_cards(work_date: date, db: Session = Depends(get_db), user: Tele
     employees = {e.tg_id: e for e in db.scalars(select(Employee).where(Employee.tg_id.in_([r.tg_id for r in rows])))} if rows else {}
     closed_ids = set(db.scalars(select(NumberCardClosure.event_id).where(NumberCardClosure.event_id.in_([r.id for r in rows])))) if rows else set()
     return {"count": len(rows), "progress": order_completion_data(db, work_date), "items": [{"id": r.id, "closed": r.id in closed_ids, "employee": _employee_dict(employees[r.tg_id]) if r.tg_id in employees else {"full_name": r.full_name, "display_name": r.full_name},
-        "phone": brigadier_phone8(r.phone), "source": r.source, "surname": r.surname,
+        "tg_id": r.tg_id, "phone": brigadier_phone8(r.phone), "source": r.source, "surname": r.surname,
         "sent_at": (r.sent_at.replace(tzinfo=timezone.utc) if r.sent_at.tzinfo is None else r.sent_at).isoformat()} for r in rows]}
 
 
@@ -3833,3 +3938,45 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     '<strong>${esc(d.label)}</strong><small>${d.count} заказов</small>',
     '<strong style="display:block;white-space:nowrap">${esc(shortCalendarDay(d.date))}</strong>${["Сегодня","Завтра"].includes(d.label)?`<small style="display:block;line-height:1.35;margin-top:4px">${esc(d.label)}</small>`:""}<small style="display:block;white-space:nowrap;line-height:1.35;margin-top:4px">${d.count} заказов</small>',
 )
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    '<small>📞 ${esc(x.phone)} · ${x.closed?"✅ Заказ закрыт":"Ожидается закрытие"}</small>',
+    '<small>📞 ${esc(x.phone)} · ${x.closed?"✅ Заказ закрыт":"Ожидается закрытие"}</small><button class="secondary small" data-number-reassign="${x.id}" style="margin-top:10px">🔄 Заменить бригадира</button>',1,
+).replace(
+    "   qsa('[data-number-delete]',body).forEach",
+    "   qsa('[data-number-reassign]',body).forEach(b=>b.onclick=()=>openNumberReassignment(r.items,Number(b.dataset.numberReassign),day));\n   qsa('[data-number-delete]',body).forEach",1,
+).replace('</script>\n</body>',r'''
+async function openNumberReassignment(items,id,day){
+ const selected=items.find(x=>x.id===id);if(!selected)return;
+ try{
+  const r=await api('/api/number-reassign/brigadiers');
+  const own=items.filter(x=>x.tg_id===selected.tg_id);
+  const candidates=r.items.filter(x=>x.tg_id!==selected.tg_id);
+  showModal('🔄 Заменить бригадира',`<p>${esc(employeeListName(selected.employee))} · ${esc(day)}</p><p>Выберите заказы для передачи:</p>${own.map(x=>`<label style="display:flex;gap:12px;padding:12px"><input type="checkbox" data-transfer-id="${x.id}" ${x.id===id?'checked':''}>${x.source==='gbu'?'ГБУ':'Частный'} · ${esc(x.surname)}</label>`).join('')}<label>Новый бригадир<select id="transferTarget" style="width:100%;margin:12px 0"><option value="">Выберите бригадира</option>${candidates.map(x=>`<option value="${x.tg_id}">${esc(employeeListName(x))}</option>`).join('')}</select></label><label style="display:flex;gap:12px;padding:12px 0"><input type="checkbox" id="transferContact">Бригада та же — сохранить подтверждённую связь</label><p class="muted">Фото и отчёты сохранятся. Касса не переносится. Отметка связи нового бригадира действует на все его заказы за этот день.</p><button class="primary" id="transferSubmit" style="margin-top:16px">Передать выбранные заказы</button><p id="transferStatus"></p>`);
+  const submit=qs('#transferSubmit'),status=qs('#transferStatus');
+  submit.onclick=async()=>{
+   const ids=qsa('[data-transfer-id]:checked').map(x=>Number(x.dataset.transferId));
+   const target=Number(qs('#transferTarget').value);
+   if(!ids.length||!target){toast('Выберите заказы и нового бригадира');return}
+   submit.disabled=true;
+   try{
+    const job=await api('/api/number-reassign',{method:'POST',body:JSON.stringify({event_ids:ids,old_tg_id:selected.tg_id,new_tg_id:target,keep_contact:qs('#transferContact').checked})});
+    status.textContent='Замена сохранена. Бот обрабатывает её…';
+    for(let i=0;i<30;i++){
+     await new Promise(resolve=>setTimeout(resolve,2000));
+     if(qs('#transferStatus')!==status)return;
+     const result=await api('/api/number-reassign/'+job.token);
+     if(result.status==='failed')throw new Error(result.error);
+     if(result.status==='done'){
+      toast('Бригадир заменён');
+      state.bootstrap=await api(`/api/bootstrap?work_date=${state.selectedDate}`);renderSummary();
+      await openNumberCards();return;
+     }
+    }
+    status.textContent='Замена в очереди. Повторно нажимать не нужно. Обновите список позже.';
+   }catch(e){status.textContent=e.message;submit.disabled=false}
+  };
+ }catch(e){toast(e.message,5000)}
+}
+</script>
+</body>''',1)
