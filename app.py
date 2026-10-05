@@ -2842,7 +2842,7 @@ def readiness_chat_messages(summary, settings, kind, work_date):
 
 
 @app.post("/api/readiness/chat/{kind}")
-async def send_readiness_chat_action(kind: Literal["summary", "reminders", "roshcha"],
+async def send_readiness_chat_action(kind: Literal["summary", "reminders", "roshcha", "avral"],
         db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
     now = datetime.utcnow()
     config = db.execute(select(ReadinessChatConfig).where(ReadinessChatConfig.id == 1).with_for_update()).scalar_one_or_none()
@@ -2854,13 +2854,15 @@ async def send_readiness_chat_action(kind: Literal["summary", "reminders", "rosh
         raise HTTPException(429, "Отправка уже запускалась. Повторите через 30 секунд.")
     settings = json.loads(config.payload)
     day = datetime.now(ZoneInfo("Europe/Moscow")).date() + timedelta(days=1)
-    if kind == "roshcha":
+    if kind in ("roshcha", "avral"):
         required = {"brigadier", "main", "cashless", "reserve"}
         configured = {g["group_code"] for g in settings["groups"]}
         missing = required - configured
         if missing:
             raise HTTPException(409, "Не подключены группы: " + ", ".join(GROUP_LABELS[c] for c in sorted(missing)))
-        messages = [(chat_id, ["❗️Кто не получил заказ-выходной❗️"])
+        broadcast_text = ("Завтра ❗️АВРАЛ❗️ОТПИСЫВАЕМСЯ О ГОТОВНОСТИ"
+                          if kind == "avral" else "❗️Кто не получил заказ-выходной❗️")
+        messages = [(chat_id, [broadcast_text])
                     for chat_id in sorted({int(g["chat_id"]) for g in settings["groups"]
                                            if g["group_code"] in required})]
     else:
@@ -3797,6 +3799,26 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
       }catch(e){toast(e.message,5000)}
       finally{setTimeout(()=>{button.disabled=false},30000)}
     };""",
+)
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    '<button class="primary small" id="readinessCountBtn">',
+    '<button class="secondary danger small" id="readinessAvralBtn" title="Напомнить о готовности на завтра во всех четырёх группах">❗️АВРАЛ❗️</button><button class="primary small" id="readinessCountBtn">',
+    1,
+).replace(
+    "qs('#readinessHistoryBtn').onclick=async event=>{",
+    """qs('#readinessAvralBtn').onclick=async event=>{
+      const button=event.currentTarget;
+      if(button.disabled)return;
+      button.disabled=true;
+      try{
+        const r=await api('/api/readiness/chat/avral',{method:'POST'});
+        toast(r.failed_chats ? `Отправлено в ${r.sent_chats} групп. Ошибок: ${r.failed_chats}` : `АВРАЛ: сообщение отправлено в ${r.sent_chats} группы`,5000);
+      }catch(e){toast(e.message,5000)}
+      finally{setTimeout(()=>{button.disabled=false},30000)}
+    };
+    qs('#readinessHistoryBtn').onclick=async event=>{""",
+    1,
 )
 
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
