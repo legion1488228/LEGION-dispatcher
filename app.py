@@ -325,6 +325,28 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_cash_start] + _cash_html + INLINE_INDEX_
 
 
 # Owner-only entry point inside the cash modal.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('${dayNumber(day.work_date)}</td>',
+    '<button type="button" class="secondary" style="padding:6px;min-width:32px" onclick="openCashDayCheck(\'${day.work_date}\')" aria-label="Проверить кассу за ${day.work_date}">${dayNumber(day.work_date)}</button></td>', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
+<script>
+async function openCashDayCheck(day){
+  showModal('Касса · '+fmtDate(day), '<button class="secondary" onclick="openCashTable()">← К таблице</button><div id="cashDayCheckBody" class="empty">Загрузка…</div>');
+  const body=qs('#cashDayCheckBody');
+  const active=()=>qs('#cashDayCheckBody')===body&&!qs('#modal').classList.contains('hidden');
+  async function refresh(){
+    if(!active())return;
+    try{
+      const r=await api(`/api/cash/day-check?work_date=${encodeURIComponent(day)}`);
+      if(!active())return;
+      body.className='';
+      body.innerHTML=`<div class="attention"><h4>Касса выставлена ${r.submitted}/${r.expected}</h4><p>Частные заказы кассовых бригадиров. На каждый заказ нужна отдельная запись.</p></div>${r.items.map((x,i)=>`<div class="employee-row"><div class="name"><b>${i+1}. ${esc(x.name)}</b><small>Записей в кассе: ${x.submitted}/${x.expected}</small></div><span aria-label="${x.complete?'Касса выставлена':'Ожидаем кассу'}" style="font-size:22px">${x.complete?'✅':'⬜'}</span></div>`).join('')||'<div class="empty">На этот день частных заказов у кассовых бригадиров нет</div>'}`;
+    }catch(e){if(active())body.textContent=e.message}
+    if(active())setTimeout(refresh,5000);
+  }
+  await refresh();
+}
+</script>
+</body>''',1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('showModal(\'💰 Касса\', `', 'showModal(\'💰 Касса\', `<button class="secondary" style="margin-bottom:12px" onclick="openPersonalTables()">📒 Мои таблицы</button>', 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace("</script>\n</body>", 'async function openPersonalTables(){\n if(!state.bootstrap?.is_owner){toast(\'Доступно только владельцу\');return}\n let month=new Date().toLocaleDateString(\'sv-SE\',{timeZone:\'Europe/Moscow\'}).slice(0,7),kind=\'earnings\',data=null,busy=false,request=0;\n showModal(\'📒 Мои таблицы\',`<p class="muted">Касса и «Марине» — из общей кассы. «Владу» — количество запрошенных сотрудников × 100 ₽ за день. «Марине»: − и + меняют сумму на 250 ₽. Остальные суммы можно редактировать. Сохранение после каждой правки.</p><label>Месяц<input type="month" id="personalMonth" value="${month}" style="width:100%;box-sizing:border-box"></label><div style="display:flex;gap:6px;overflow:auto;margin:12px 0"><button class="primary" data-personal-kind="earnings">Заработок</button><button class="secondary" data-personal-kind="kickbacks">Откаты</button></div><button class="secondary" id="personalAdd">＋ Столбец</button><div id="personalStatus" class="muted" role="status"></div><div id="personalGrid" style="overflow:auto;margin-top:12px;max-height:60vh"></div>`);\n const grid=qs(\'#personalGrid\'),status=qs(\'#personalStatus\'),session=cashModalGeneration;\n const active=()=>session===cashModalGeneration && qs(\'#personalGrid\')===grid;\n const money=cents=>new Intl.NumberFormat(\'ru-RU\',{maximumFractionDigits:2}).format(cents/100);\n function lock(value){busy=value;qsa(\'[data-personal-kind],#personalMonth,#personalAdd\').forEach(e=>e.disabled=value)}\n function render(){\n  const left=grid.scrollLeft,top=grid.scrollTop;\n  const totalRow=(title,values)=>`<tr style="color:var(--gold);background:#211d14"><th>${title}</th>${values.map(v=>`<td>${money(v)}</td>`).join(\'\')}<td><b>${money(values.reduce((a,b)=>a+b,0))}</b></td></tr>`;\n  let rows=\'\';\n  for(let day=1;day<=data.days;day++){\n   const values=data.columns.map((_,col)=>data.cells[`${day}:${col}`]||0);\n   rows+=`<tr><th>${day}</th>${values.map((v,col)=>kind===\'kickbacks\'&&col===0?`<td><div style="display:flex;align-items:center;gap:6px;white-space:nowrap"><button class="secondary" data-marina-day="${day}" data-marina-delta="-250" aria-label="Убавить 250 рублей за ${day} число">−</button><span style="min-width:70px;text-align:center">${money(v)}</span><button class="secondary" data-marina-day="${day}" data-marina-delta="250" aria-label="Прибавить 250 рублей за ${day} число">+</button></div></td>`:`<td><button class="contact-btn" style="min-width:80px" ${data.automatic_columns.includes(col)?\'disabled title="Из общей кассы"\':\'\'} data-personal-cell="${day}:${col}" aria-label="${day}, ${esc(data.columns[col])}">${Object.hasOwn(data.cells,`${day}:${col}`)?money(v):\'—\'}</button></td>`).join(\'\')}<td><b>${money(values.reduce((a,b)=>a+b,0))}</b></td></tr>`;\n   if(day===15) rows+=totalRow(\'Итого 1–15\',data.first);\n  }\n  rows+=totalRow(\'Итого 16–\'+data.days,data.second)+totalRow(\'За месяц\',data.total);\n  grid.innerHTML=`<table style="border-collapse:separate;border-spacing:8px;min-width:100%;text-align:right"><thead><tr><th>День</th>${data.columns.map((name,col)=>`<th><button class="secondary" style="white-space:nowrap" ${data.automatic_columns.includes(col)?\'disabled\':\'\'} data-personal-col="${col}">${esc(name)} ${data.automatic_columns.includes(col)?\'· авто\':\'✍️\'}</button></th>`).join(\'\')}<th>Итого ₽</th></tr></thead><tbody>${rows}</tbody></table>`;\n  grid.scrollLeft=left;grid.scrollTop=top;\n  qsa(\'[data-marina-day]\',grid).forEach(btn=>btn.onclick=()=>{\n   if(busy)return;\n   save({action:\'adjust\',day:Number(btn.dataset.marinaDay),column:0,value:btn.dataset.marinaDelta});\n  });\n  qsa(\'[data-personal-cell]\',grid).forEach(btn=>btn.onclick=()=>{\n   if(busy)return;const [day,column]=btn.dataset.personalCell.split(\':\').map(Number),key=`${day}:${column}`;\n   const value=prompt(`${data.columns[column]} · ${day}.${month.slice(5)}\\nСумма ₽ (пусто — очистить)`,Object.hasOwn(data.cells,key)?String(data.cells[key]/100):\'\');\n   if(value!==null) save({action:\'cell\',day,column,value});\n  });\n  qsa(\'[data-personal-col]\',grid).forEach(btn=>btn.onclick=()=>{\n   if(busy)return;const column=Number(btn.dataset.personalCol),value=prompt(\'Название столбца\',data.columns[column]);\n   if(value!==null)save({action:\'rename\',column,value});\n  });\n }\n async function load(){\n  const id=++request;lock(true);grid.innerHTML=\'<div class="empty">Загрузка…</div>\';status.textContent=\'\';\n  try{const result=await api(`/api/personal-tables/${kind}/${month}`);if(!active()||id!==request)return;data=result;render()}\n  catch(e){if(active()&&id===request){data=null;grid.innerHTML=\'\';status.textContent=e.message}}\n  finally{if(active()&&id===request)lock(false)}\n }\n async function save(change){\n  if(busy||!data||!active())return;++request;lock(true);status.textContent=\'Сохранение…\';\n  try{const result=await api(`/api/personal-tables/${kind}/${month}`,{method:\'PATCH\',body:JSON.stringify({...change,version:data.version})});if(!active())return;data=result;render();status.textContent=\'✓ Сохранено\'}\n  catch(e){if(active())status.textContent=\'Не сохранено: \'+e.message}\n  finally{if(active())lock(false)}\n }\n qs(\'#personalAdd\').onclick=()=>{if(busy||!data)return;const value=prompt(\'Название нового столбца\');if(value!==null)save({action:\'add\',value})};\n qs(\'#personalMonth\').onchange=e=>{if(!e.target.value)return;month=e.target.value;load()};\n qsa(\'[data-personal-kind]\').forEach(btn=>btn.onclick=()=>{if(busy)return;kind=btn.dataset.personalKind;qsa(\'[data-personal-kind]\').forEach(x=>x.className=x===btn?\'primary\':\'secondary\');load()});\n await load();\n const timer=setInterval(async()=>{\n  if(!active()){clearInterval(timer);return}\n  if(busy||!data)return;\n  const id=request,loadedKind=kind,loadedMonth=month;\n  try{const result=await api(`/api/personal-tables/${loadedKind}/${loadedMonth}`);\n   if(active()&&!busy&&id===request&&kind===loadedKind&&month===loadedMonth&&data.version===result.version){data=result;render()}\n  }catch(e){}\n },15000);\n}\n\n' + "\n</script>\n</body>", 1)
 
@@ -2195,6 +2217,33 @@ def owner_cash_day(work_date: date, db: Session = Depends(get_db), user: Telegra
     start, end = _period_bounds(work_date)
     period_rows = db.execute(select(CashEntry).where(CashEntry.work_date >= start, CashEntry.work_date <= end, CashEntry.brigadier_tg_id.notin_(_cash_excluded_ids(db)))).scalars().all()
     return {"work_date": work_date.isoformat(), "rows": [_cash_row_dict(x, db) for x in rows], "day": {"commission_rub": sum(x.commission_rub or 0 for x in rows), "kickback_rub": sum(x.kickback_rub or 0 for x in rows), "cash_rub": sum(x.commission_rub or 0 for x in rows), "total_rub": sum(x.commission_rub or 0 for x in rows)}, "period": {"start": start.isoformat(), "end": end.isoformat(), "commission_rub": sum(x.commission_rub or 0 for x in period_rows), "kickback_rub": sum(x.kickback_rub or 0 for x in period_rows), "cash_rub": sum(x.commission_rub or 0 for x in period_rows), "total_rub": sum(x.commission_rub or 0 for x in period_rows), "entries": len(period_rows)}}
+
+
+@app.get("/api/cash/day-check")
+def owner_cash_day_check(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    _require_owner(db, user)
+    cashiers = db.scalars(select(Employee).where(
+        Employee.group_code == 'brigadier', Employee.is_cashier.is_(True),
+        _visible_employee())).all()
+    cashiers = {int(e.tg_id): e for e in cashiers if e.tg_id and not _cashier_excluded(db, e)}
+    expected = defaultdict(int)
+    for card in db.scalars(select(NumberCardEvent).where(
+            NumberCardEvent.work_date == work_date, NumberCardEvent.source == 'private',
+            _visible_number_card())):
+        if int(card.tg_id) in cashiers:
+            expected[int(card.tg_id)] += 1
+    submitted = defaultdict(int)
+    for entry in db.scalars(select(CashEntry).where(CashEntry.work_date == work_date)):
+        submitted[int(entry.brigadier_tg_id)] += 1
+    items = []
+    for tg_id, count in expected.items():
+        received = submitted[tg_id]
+        items.append({'tg_id': tg_id, 'name': _cash_brigadier_label(db, tg_id, cashiers[tg_id].full_name),
+                      'expected': count, 'submitted': received, 'complete': received >= count})
+    items.sort(key=lambda x: (x['name'].casefold(), x['tg_id']))
+    return {'work_date': work_date.isoformat(), 'items': items,
+            'expected': sum(x['expected'] for x in items),
+            'submitted': sum(min(x['submitted'], x['expected']) for x in items)}
 
 
 @app.get("/api/cash/ledger")
