@@ -339,7 +339,7 @@ async function openCashDayCheck(day){
       const r=await api(`/api/cash/day-check?work_date=${encodeURIComponent(day)}`);
       if(!active())return;
       body.className='';
-      body.innerHTML=`<div class="attention"><h4>Касса выставлена ${r.submitted}/${r.expected}</h4><p>Частные заказы кассовых бригадиров. На каждый заказ нужна отдельная запись.</p></div>${r.items.map((x,i)=>`<div class="employee-row"><div class="name"><b>${i+1}. ${esc(x.name)}</b><small>Записей в кассе: ${x.submitted}/${x.expected}</small></div><span aria-label="${x.complete?'Касса выставлена':'Ожидаем кассу'}" style="font-size:22px">${x.complete?'✅':'⬜'}</span></div>`).join('')||'<div class="empty">На этот день частных заказов у кассовых бригадиров нет</div>'}`;
+      body.innerHTML=`<div class="attention"><h4>Касса выставлена ${r.submitted}/${r.expected}</h4><p>Частные заказы кассовых бригадиров. На каждый заказ нужна отдельная запись.</p></div>${r.items.map((x,i)=>`<div class="employee-row"><div class="name"><b>${i+1}. ${esc(x.name)}</b><small>Записей в кассе: ${x.submitted}/${x.expected} <span style="font-size:11px;margin-left:6px;color:var(--muted)">${(x.amounts||[]).map(amount=>esc(String(amount))).join('; ')}</span></small></div><span aria-label="${x.complete?'Касса выставлена':'Ожидаем кассу'}" style="font-size:22px">${x.complete?'✅':'⬜'}</span></div>`).join('')||'<div class="empty">На этот день частных заказов у кассовых бригадиров нет</div>'}`;
     }catch(e){if(active())body.textContent=e.message}
     if(active())setTimeout(refresh,5000);
   }
@@ -2233,13 +2233,16 @@ def owner_cash_day_check(work_date: date, db: Session = Depends(get_db), user: T
         if int(card.tg_id) in cashiers:
             expected[int(card.tg_id)] += 1
     submitted = defaultdict(int)
-    for entry in db.scalars(select(CashEntry).where(CashEntry.work_date == work_date)):
+    amounts = defaultdict(list)
+    for entry in db.scalars(select(CashEntry).where(CashEntry.work_date == work_date).order_by(CashEntry.id)):
         submitted[int(entry.brigadier_tg_id)] += 1
+        amounts[int(entry.brigadier_tg_id)].append(int(entry.commission_rub or 0))
     items = []
     for tg_id, count in expected.items():
         received = submitted[tg_id]
         items.append({'tg_id': tg_id, 'name': _cash_brigadier_label(db, tg_id, cashiers[tg_id].full_name),
-                      'expected': count, 'submitted': received, 'complete': received >= count})
+                      'expected': count, 'submitted': received, 'amounts': amounts[tg_id],
+                      'complete': received >= count})
     items.sort(key=lambda x: (x['name'].casefold(), x['tg_id']))
     return {'work_date': work_date.isoformat(), 'items': items,
             'expected': sum(x['expected'] for x in items),
