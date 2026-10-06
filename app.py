@@ -4063,12 +4063,16 @@ async function openOrderCountPeriod(){
 
 _number_list_start = INLINE_INDEX_HTML.index('async function openNumberCards(){')
 _number_list_end = INLINE_INDEX_HTML.index('\n}', _number_list_start) + 2
-INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_number_list_start] + r'''function numberCardDetailsHtml(x){
+INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_number_list_start] + r'''function numberCardDetailsHtml(x,index){
  const sent=new Date(x.sent_at).toLocaleTimeString('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'});
- return `<small class="number-card-line">${x.source==='gbu'?'ГБУ':'Частный'} · ${esc(x.surname)} · ${esc(sent)}</small>
-   <small class="number-card-line">📞 ${esc(x.phone)}</small>
+ const name=employeeListName(x.employee).replace(/([0-9—])\s*см$/i,'$1');
+ const source=x.source==='gbu'?'gbu':'private';
+ return `<b class="number-card-name">${index+1}. ${esc(name)}</b>
+   <span class="number-card-category number-card-${source}">${source==='gbu'?'ГБУ ⬛️':'Частный'}</span>
+   <small class="number-card-line number-card-sent">${esc(sent)}</small>
    <small class="number-card-line number-card-status">${x.closed?'✅ Заказ закрыт':'Ожидается закрытие'}</small>
-   ${x.closed?`<small class="number-card-line">${x.contact_time?`Связь бригады в ${esc(x.contact_time)}`:'Время связи не указано'}</small>`:''}`;
+   <strong class="number-card-surname">${esc(String(x.surname||'').toLocaleUpperCase('ru-RU'))}</strong>
+   ${x.closed?`<small class="number-card-line number-card-contact">${x.contact_time?`Связь бригады в <strong class="number-card-time">${esc(x.contact_time)}</strong>`:'Время связи не указано'}</small>`:''}`;
 }
 async function openNumberCards(){
  const day=state.selectedDate;
@@ -4083,7 +4087,7 @@ async function openNumberCards(){
   try{
    const r=await api(`/api/number-cards?work_date=${day}`);if(!active()||request!==revision||mutating)return;
    const scroll=qs('#modal').scrollTop;
-   body.className='';body.innerHTML=`<div class="attention"><h4>Номера: ${r.count}/${r.progress.expected}</h4><p>За ${esc(day)}. Кто выставил номер через бота.</p>${["private","gbu"].map(source=>{const p=r.progress.sources[source];return `<p><b>${source==="gbu"?"ГБУ":"Частные"}</b> · Номера ${p.cards}/${p.expected} · Закрыто ${p.closed}/${p.expected}${p.complete?" ✅":""}${p.missing_numbers?` · Не хватает номеров: ${p.missing_numbers}`:""}${p.extra_numbers?` · ⚠️ Лишних номеров: ${p.extra_numbers}`:""}</p>`}).join("")}</div>${r.items.map((x,i)=>`<div class="employee-row"><div class="name"><b>${i+1}. ${esc(employeeListName(x.employee))}</b>${numberCardDetailsHtml(x)}</div>${state.bootstrap?.is_owner?`<button type="button" class="secondary danger" data-number-delete="${x.id}" aria-label="Удалить запись" style="min-width:44px;min-height:44px">🗑</button>`:''}</div>`).join('')||'<div class="empty">Номера пока не отправляли</div>'}`;
+   body.className='';body.innerHTML=`<div class="attention"><h4>Номера: ${r.count}/${r.progress.expected}</h4><p>За ${esc(day)}. Кто выставил номер через бота.</p>${["private","gbu"].map(source=>{const p=r.progress.sources[source];return `<p><b class="number-card-${source}">${source==="gbu"?"ГБУ":"Частные"}</b> · Номера ${p.cards}/${p.expected} · Закрыто ${p.closed}/${p.expected}${p.complete?" ✅":""}${p.missing_numbers?` · Не хватает номеров: ${p.missing_numbers}`:""}${p.extra_numbers?` · ⚠️ Лишних номеров: ${p.extra_numbers}`:""}</p>`}).join("")}</div>${r.items.map((x,i)=>`<div class="employee-row number-card-row"><div class="name number-card-details">${numberCardDetailsHtml(x,i)}</div>${state.bootstrap?.is_owner?`<button type="button" class="secondary danger" data-number-delete="${x.id}" aria-label="Удалить запись" style="min-width:44px;min-height:44px">🗑</button>`:''}</div>`).join('')||'<div class="empty">Номера пока не отправляли</div>'}`;
    qs('#modal').scrollTop=scroll;
    if(state.selectedDate===day&&state.bootstrap?.summary){
     state.bootstrap.summary.number_cards_count=r.count;state.bootstrap.summary.order_completion=r.progress;renderSummary();
@@ -4215,8 +4219,19 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
 .metric.order-total-metric{padding-left:4px;padding-right:4px}
 .day-comment-btn{margin-top:10px;max-width:100%;min-height:30px;padding:5px 3px;border:1px solid var(--gold2);border-radius:12px;background:var(--panel2);color:var(--gold);font-size:10px;line-height:1.2;white-space:nowrap;cursor:pointer}
 .day-comment-btn.has-comment{background:#302719;border-color:var(--gold)}
-.employee-row .name small.number-card-line{display:block;line-height:1.4;margin-top:4px;overflow-wrap:anywhere}
-.employee-row .name small.number-card-status{margin-top:7px;color:var(--text)}
+#numberCardsBody .number-card-row{padding:16px 0;gap:10px}
+#numberCardsBody .number-card-details{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:10px;row-gap:6px;align-items:start}
+#numberCardsBody .number-card-name{grid-column:1;grid-row:1;white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere;line-height:1.4}
+#numberCardsBody .number-card-category{grid-column:2;grid-row:1;justify-self:end;padding:3px 6px;border-radius:6px;background:#202026;font-size:10px;line-height:1.4;white-space:nowrap}
+#numberCardsBody .number-card-private{color:var(--green);font-weight:800}
+#numberCardsBody .number-card-gbu{color:#ffd45c;font-weight:800}
+#numberCardsBody .number-card-line{display:block;margin:0;line-height:1.4;overflow-wrap:anywhere}
+#numberCardsBody .number-card-sent{grid-column:1;grid-row:2}
+#numberCardsBody .number-card-status{grid-column:1;grid-row:3;margin-top:7px;color:var(--text)}
+#numberCardsBody .number-card-surname{grid-column:2;grid-row:3;justify-self:end;max-width:104px;margin-top:7px;color:#fff;font-size:12px;font-weight:800;line-height:1.4;text-align:right;overflow-wrap:anywhere}
+#numberCardsBody .number-card-contact{grid-column:1 / -1;grid-row:4}
+#numberCardsBody .number-card-time{color:#ff5c5c;font-size:12px;font-weight:800;white-space:nowrap}
+@media(max-width:380px){#numberCardsBody .number-card-details{column-gap:6px}#numberCardsBody .number-card-surname{max-width:88px;font-size:11px}}
 .day-comment-text{display:block;width:100%;min-height:120px;margin-top:8px;padding:12px;resize:vertical;border:1px solid var(--line);border-radius:12px;background:var(--panel2);color:var(--text);font-size:16px}
 </style>
 <script>
