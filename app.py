@@ -3858,19 +3858,29 @@ def _organize_day_dashboard(html):
     html = html.replace('  state.bootstrap = data;',
         '  if(request!==dayRequest)return;\n  state.bootstrap = data;\n  qs(\'#readinessView\').style.visibility=\'visible\';', 1)
     html = html.replace('async function loadReadiness(){\n  const r=await api(`/api/readiness/summary?work_date=${state.selectedDate}`);',
-        'async function loadReadiness(){\n  const day=state.selectedDate;\n  const r=await api(`/api/readiness/summary?work_date=${day}`);\n  if(state.selectedDate!==day||r.work_date!==day)return;\n  qs(\'#readinessDayLabel\').textContent=fmtDate(day)+\' · Срез в 15:30\';', 1)
+        'async function loadReadiness(){\n  const selectedDay=state.selectedDate, day=nextReadinessDay(selectedDay);\n  const r=await api(`/api/readiness/summary?work_date=${day}`);\n  if(state.selectedDate!==selectedDay||r.work_date!==day)return;\n  qs(\'#readinessDayLabel\').textContent=fmtDate(day)+\' · Срез в 15:30\';', 1)
+    html = html.replace("openReadinessGroupedList('ready');", "openReadinessGroupedList('ready',day);", 1)
+    html = html.replace("openReadinessGroupedList('no_response');", "openReadinessGroupedList('no_response',day);", 1)
+    html = html.replace('openReadinessPeople(g.label||code,label,people,code,status,state.selectedDate);',
+                        'openReadinessPeople(g.label||code,label,people,code,status,day);', 1)
+    html = html.replace('/api/readiness/history?work_date=${state.selectedDate}',
+                        '/api/readiness/history?work_date=${nextReadinessDay()}', 1)
     html = re.sub(r'    <button id="brigadesContactCount"[^\n]+\n', '', html, count=1)
     html = html.replace("  qs('#brigadesContactCount').onclick=openContactBrigades;", '', 1)
     html = html.replace('count.textContent=String(ids.size);',
         "count.textContent=String(ids.size)+'/'+state.bootstrap.summary.orders_total;", 1)
     start=html.index('function renderSummary() {')
     end=html.index('async function openContactBrigades()', start)
-    html=html[:start]+r'''function renderSummary() {
+    html=html[:start]+r'''function nextReadinessDay(day=state.selectedDate) {
+  return new Date(Date.parse(day+'T12:00:00Z')+86400000).toISOString().slice(0,10);
+}
+function renderSummary() {
   const s=state.bootstrap.summary, day=state.selectedDate;
   const future=day>state.bootstrap.today;
   const tomorrow=new Date(Date.parse(state.bootstrap.today+'T12:00:00Z')+86400000).toISOString().slice(0,10);
   const closingTitle=day===tomorrow?'Закрытие заказов на завтра':day===state.bootstrap.today?'Закрытие заказов на сегодня':'Закрытие заказов';
-  qs('#readinessTitle').textContent='Готовность сотрудников'+(day===tomorrow?' на завтра':day===state.bootstrap.today?' на сегодня':'');
+  qs('#readinessTitle').textContent=day===state.bootstrap.today?'Готовность сотрудников на завтра':'Готовность сотрудников на следующий день';
+  qs('#readinessDayLabel').textContent=fmtDate(nextReadinessDay(day))+' · Срез в 15:30';
   qs('#selectedDayHeader').innerHTML=`<h2>${esc(fmtDate(day))}</h2><label class="muted">Выбрать дату <input type="date" id="dashboardDate" value="${day}" style="max-width:160px"></label>`;
   qs('#dashboardDate').onchange=e=>{if(e.target.value)loadBootstrap(e.target.value).catch(e=>toast(e.message))};
   qs('#summary').innerHTML=`
