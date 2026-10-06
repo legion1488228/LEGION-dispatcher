@@ -3418,7 +3418,7 @@ def save_personal_cash_day(work_date: date, change: PersonalCashDayInput,
 
 class PersonalTableChange(BaseModel):
     version: int = Field(ge=0)
-    action: Literal["cell", "rename", "add", "adjust"]
+    action: Literal["cell", "rename", "add", "adjust", "manual_kickback"]
     day: int = Field(default=1, ge=1, le=31)
     column: int = Field(default=0, ge=0, le=39)
     value: str = Field(default="", max_length=100)
@@ -3528,11 +3528,21 @@ def personal_table_edit(kind: Literal["earnings", "cash", "kickbacks"], month: s
         raise HTTPException(409, "Таблица изменена в другом окне. Откройте её заново и повторите правку.")
     data = _personal_table_result(row, kind, month)
     columns, cells = data["columns"], data["cells"]
-    if change.action not in ("add", "adjust") and change.column in data["automatic_columns"]:
+    if change.action not in ("add", "adjust", "manual_kickback") and change.column in data["automatic_columns"]:
         raise HTTPException(422, "Этот столбец рассчитывается автоматически")
     if change.action != "add" and change.column >= len(columns):
         raise HTTPException(422, "Столбец не найден")
-    if change.action == "adjust":
+    if change.action == "manual_kickback":
+        if kind != "kickbacks" or change.column != 0 or change.day > days:
+            raise HTTPException(422, "Выберите день отката")
+        try:
+            amount = Decimal(change.value.strip().replace(" ", "").replace("\u00a0", "").replace(",", ".") or "0")
+            if not amount.is_finite() or abs(amount) > Decimal("1000000000") or amount != amount.quantize(Decimal("0.01")):
+                raise InvalidOperation
+        except InvalidOperation:
+            raise HTTPException(422, "Введите сумму с точностью до копеек")
+        data["marina_adjustments"][str(change.day)] = int(amount * 100)
+    elif change.action == "adjust":
         if kind != "kickbacks" or change.column != 0 or change.value not in ("250", "-250") or change.day > days:
             raise HTTPException(422, "Поправка Марине: только +250 или −250 ₽ за выбранный день")
         key = str(change.day)
@@ -4873,3 +4883,40 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     '''showModal('💰 Касса', `<button class="secondary" style="margin-bottom:12px" onclick="openPersonalTables()">📒 Мои таблицы</button>''',
     '''showModal('📒 Мои таблицы', `<button class="secondary" style="margin-bottom:12px" onclick="rememberCashTablePosition();openPersonalTables(earningsReturnState)">← Назад к заработку</button><h3>💰 Касса · расширенная</h3>''', 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('← К моим таблицам', '← К заработку')
+
+# Open the daily automatic/manual breakdown instead of the +/- controls.
+_kickback_start = INLINE_INDEX_HTML.index("kind==='kickbacks'&&col===0?`<td><div")
+_kickback_end = INLINE_INDEX_HTML.index(':`<td><button class="contact-btn"', _kickback_start)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_kickback_start] + """kind==='kickbacks'&&col===0?`<td><button class="contact-btn" style="min-width:80px" data-kickback-day="${day}" aria-label="Откат за ${day} число">${money(v)}</button></td>`""" + INLINE_INDEX_HTML[_kickback_end:]
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "  qsa('[data-marina-day]',grid).forEach", """  qsa('[data-kickback-day]',grid).forEach(btn=>btn.onclick=()=>{
+   if(busy)return;
+   openKickbackDay(month,Number(btn.dataset.kickbackDay),{month,kind,left:grid.scrollLeft,top:grid.scrollTop,modalTop:qs('#modal').scrollTop});
+  });
+  qsa('[data-marina-day]',grid).forEach""", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('«Марине»: − и + меняют сумму на 250 ₽.', '«Марине»: нажмите сумму за день, чтобы увидеть откат из кассы и добавить ручную сумму.')
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
+<script>
+async function openKickbackDay(month,day,resume){
+ showModal('Откат · '+fmtDate(`${month}-${String(day).padStart(2,'0')}`),'<button class="secondary" id="kickbackBack">← К откатам</button><div id="kickbackDayBody">Загрузка…</div>');
+ const body=qs('#kickbackDayBody'),active=()=>qs('#kickbackDayBody')===body&&!qs('#modal').classList.contains('hidden');
+ let busy=false,dirty=false;
+ qs('#kickbackBack').onclick=()=>{if(!busy&&(!dirty||confirm('Выйти без сохранения изменений?')))openPersonalTables(resume)};
+ const money=c=>new Intl.NumberFormat('ru-RU',{maximumFractionDigits:2}).format(c/100);
+ try{
+  const data=await api(`/api/personal-tables/kickbacks/${month}`);if(!active())return;
+  const manual=Number(data.marina_adjustments[String(day)]||0),auto=Number(data.cells[`${day}:0`]||0)-manual;
+  body.innerHTML=`<form id="kickbackForm"><h3 style="text-align:right">Итого: <span id="kickbackTotal">${money(auto+manual)} ₽</span></h3><p>Авто (из кассы): <b>${money(auto)} ₽</b></p><label>Ручное, ₽<input id="kickbackManual" type="text" inputmode="decimal" value="${manual/100}" style="width:100%;box-sizing:border-box;font-size:16px"></label><p class="muted">Итог = авто + ручное. Ручная сумма сохраняется отдельно от кассы.</p><button class="primary" type="submit">Сохранить</button><p id="kickbackStatus" role="status"></p></form>`;
+  const input=qs('#kickbackManual'),status=qs('#kickbackStatus');
+  function cents(){const raw=input.value.trim().replace(/\s/g,'').replace(',','.')||'0';if(!/^-?\d+(\.\d{1,2})?$/.test(raw)||Math.abs(Number(raw))>1000000000)throw Error('Введите сумму с точностью до копеек');return Math.round(Number(raw)*100)}
+  input.oninput=()=>{dirty=true;try{qs('#kickbackTotal').textContent=money(auto+cents())+' ₽';status.textContent='Не сохранено'}catch(e){status.textContent=e.message}};
+  qs('#kickbackForm').onsubmit=async e=>{e.preventDefault();if(busy)return;
+   try{const value=String(cents()/100);busy=true;qsa('input,button',body).forEach(x=>x.disabled=true);
+    await api(`/api/personal-tables/kickbacks/${month}`,{method:'PATCH',body:JSON.stringify({version:data.version,action:'manual_kickback',day,column:0,value})});
+    if(active()){dirty=false;toast('Откат сохранён');await openPersonalTables(resume)}
+   }catch(err){if(active())status.textContent=err.message}
+   finally{busy=false;if(active())qsa('input,button',body).forEach(x=>x.disabled=false)}
+  };
+ }catch(e){if(active())body.textContent=e.message}
+}
+</script></body>''',1)
