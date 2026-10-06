@@ -3335,6 +3335,87 @@ class PersonalMonthlyTable(Base):
     version = Column(Integer, nullable=False, default=1)
     __table_args__ = (UniqueConstraint("owner_id", "month", "kind", name="uq_personal_month_table"),)
 
+class PersonalCashDay(Base):
+    __tablename__ = 'personal_cash_days'
+    owner_id = Column(BigInteger, primary_key=True)
+    work_date = Column(Date, primary_key=True)
+    payload = Column(String, nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+
+
+class PersonalCashDayInput(BaseModel):
+    version: int = Field(ge=0, strict=True)
+    amounts: dict[str, int]
+    own: int = Field(ge=0, le=100000000000, strict=True)
+    legacy: int = Field(ge=-100000000000, le=100000000000, strict=True)
+
+
+def personal_cash_day_data(db, owner_id, work_date):
+    saved = db.get(PersonalCashDay, (owner_id, work_date))
+    month = work_date.strftime('%Y-%m')
+    table = db.scalar(select(PersonalMonthlyTable).where(PersonalMonthlyTable.owner_id == owner_id,
+        PersonalMonthlyTable.month == month, PersonalMonthlyTable.kind == 'earnings'))
+    old = json.loads(table.payload).get('cells', {}).get(f'{work_date.day}:2', 0) if table else 0
+    values = json.loads(saved.payload) if saved else {'amounts': {}, 'own': 0, 'legacy': old}
+    employees = {e.tg_id: e for e in db.scalars(select(Employee).where(_visible_employee()))}
+    items = []
+    for card in db.scalars(select(NumberCardEvent).where(NumberCardEvent.work_date == work_date,
+            NumberCardEvent.source == 'private', _visible_number_card()).order_by(NumberCardEvent.id)):
+        employee = employees.get(card.tg_id)
+        if not employee or employee.group_code != 'brigadier' or employee.is_cashier:
+            continue
+        items.append({'key': str(card.id), 'name': _employee_dict(employee)['display_name'], 'surname': card.surname})
+    active = {x['key'] for x in items}
+    labels = values.get('labels', {})
+    for key in values.get('amounts', {}):
+        if key not in active:
+            items.append({'key': key, 'name': labels.get(key, 'Ранее сохранённый заказ'),
+                          'surname': 'Заказ изменён или удалён — проверьте сумму'})
+    return {**values, 'items': items, 'version': saved.version if saved else 0,
+            'total': sum(values.get('amounts', {}).values()) + values.get('own', 0) + values.get('legacy', 0)}
+
+
+@app.get('/api/personal-cash-day/{work_date}')
+def get_personal_cash_day(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    _require_owner(db, user)
+    return personal_cash_day_data(db, user.id, work_date)
+
+
+@app.put('/api/personal-cash-day/{work_date}')
+def save_personal_cash_day(work_date: date, change: PersonalCashDayInput,
+                          db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    _require_owner(db, user)
+    current = personal_cash_day_data(db, user.id, work_date)
+    if current['version'] != change.version:
+        raise HTTPException(409, 'Данные изменены. Откройте день заново.')
+    allowed = {x['key'] for x in current['items']}
+    if set(change.amounts) != allowed or any(type(v) is not int or not 0 <= v <= 100000000000 for v in change.amounts.values()):
+        raise HTTPException(422, 'Список заказов изменился или сумма некорректна. Откройте день заново.')
+    payload = json.dumps({'amounts': change.amounts, 'own': change.own, 'legacy': change.legacy,
+        'labels': {x['key']: x['name'] for x in current['items']}}, ensure_ascii=False)
+    if change.version:
+        result = db.execute(update(PersonalCashDay).where(PersonalCashDay.owner_id == user.id,
+            PersonalCashDay.work_date == work_date, PersonalCashDay.version == change.version)
+            .values(payload=payload, version=change.version + 1))
+        if result.rowcount != 1:
+            db.rollback()
+            raise HTTPException(409, 'Данные изменены. Откройте день заново.')
+    else:
+        db.add(PersonalCashDay(owner_id=user.id, work_date=work_date, payload=payload, version=1))
+    month = work_date.strftime('%Y-%m')
+    table = db.scalar(select(PersonalMonthlyTable).where(PersonalMonthlyTable.owner_id == user.id,
+        PersonalMonthlyTable.month == month, PersonalMonthlyTable.kind == 'earnings'))
+    if table is None:
+        db.add(PersonalMonthlyTable(owner_id=user.id, month=month, kind='earnings', version=1,
+            payload=json.dumps({'columns': list(PERSONAL_TABLE_COLUMNS['earnings']), 'cells': {}})))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, 'Данные изменены. Откройте день заново.')
+    return personal_cash_day_data(db, user.id, work_date)
+
+
 class PersonalTableChange(BaseModel):
     version: int = Field(ge=0)
     action: Literal["cell", "rename", "add", "adjust"]
@@ -3408,6 +3489,14 @@ def _personal_table_result(row, kind: str, month: str, db=None) -> dict:
                 key = f"{day}:0"
                 data["cells"][key] = data["cells"].get(key, 0) + delta
     if kind == 'earnings':
+        if db is not None and row is not None:
+            start = date.fromisoformat(month + '-01')
+            for detail in db.scalars(select(PersonalCashDay).where(
+                    PersonalCashDay.owner_id == row.owner_id,
+                    PersonalCashDay.work_date >= start,
+                    PersonalCashDay.work_date <= start.replace(day=days))):
+                values = json.loads(detail.payload)
+                data['cells'][f'{detail.work_date.day}:2'] = sum(values.get('amounts', {}).values()) + values.get('own', 0) + values.get('legacy', 0)
         data['net_after_vlad'] = _earnings_after_vlad(data, days, month, db)
     sums = lambda first, last: [sum(data["cells"].get(f"{day}:{col}", 0) for day in range(first, last + 1)) for col in range(len(data["columns"]))]
     return {**data, "automatic_columns": automatic, "month": month, "kind": kind, "days": days, "version": row.version if row else 0,
@@ -3430,6 +3519,9 @@ def personal_table_edit(kind: Literal["earnings", "cash", "kickbacks"], month: s
     from decimal import Decimal, InvalidOperation
     _require_owner(db, user)
     days = _personal_month_days(month)
+    if kind == 'earnings' and change.action == 'cell' and change.column == 2 and change.day <= days:
+        if db.get(PersonalCashDay, (user.id, date.fromisoformat(month + '-01').replace(day=change.day))):
+            raise HTTPException(409, 'Редактируйте наличку в списке заказов за день.')
     row = db.execute(select(PersonalMonthlyTable).where(PersonalMonthlyTable.owner_id == user.id,
         PersonalMonthlyTable.month == month, PersonalMonthlyTable.kind == kind).with_for_update()).scalar_one_or_none()
     if change.version != (row.version if row else 0):
@@ -4713,3 +4805,43 @@ _personal_html = _personal_html.replace("const value=prompt(`${data.columns[colu
 _personal_html = _personal_html.replace('grid.scrollLeft=left;grid.scrollTop=top;', "grid.scrollLeft=left;grid.scrollTop=top;qs('#modal').scrollTop=modalTop;", 1)
 _personal_html = _personal_html.replace(' await load();', " qsa('[data-personal-kind]').forEach(btn=>btn.className=btn.dataset.personalKind===kind?'primary':'secondary');\n await load();", 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_personal_start]+_personal_html+INLINE_INDEX_HTML[_personal_end:]
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "if(kind==='earnings'&&column===0){openCashDayCheck",
+    "if(kind==='earnings'&&column===2){openPersonalCashDay(`${month}-${String(day).padStart(2,'0')}`);return}\n   if(kind==='earnings'&&column===0){openCashDayCheck", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
+<script>
+async function openPersonalCashDay(day){
+ const grid=qs('#personalGrid'),modal=qs('#modal');
+ const resume={month:qs('#personalMonth').value,kind:'earnings',left:grid.scrollLeft,top:grid.scrollTop,modalTop:modal.scrollTop};
+ showModal('Наличка · '+fmtDate(day),'<button class="secondary" id="privateCashBack">← К моим таблицам</button><div id="privateCashBody">Загрузка…</div>');
+ const body=qs('#privateCashBody'),active=()=>qs('#privateCashBody')===body&&!qs('#modal').classList.contains('hidden');
+ let busy=false,dirty=false;
+ qs('#privateCashBack').onclick=()=>{if(!busy&&(!dirty||confirm('Выйти без сохранения изменений?')))openPersonalTables(resume)};
+ try{
+  const data=await api('/api/personal-cash-day/'+day);if(!active())return;
+  const money=c=>new Intl.NumberFormat('ru-RU',{maximumFractionDigits:2}).format(c/100);
+  const field=(key,title,value,subtitle='')=>`<div class="employee-row"><div class="name"><b>${esc(title)}</b><small>${esc(subtitle)}</small></div><input data-private-cash="${esc(key)}" inputmode="decimal" aria-label="${esc(title)} — сумма в рублях" value="${value===undefined?'':esc(String(value/100))}" style="width:100px;max-width:35%;font-size:16px;padding:10px;border-radius:10px;background:var(--panel2);color:var(--text);border:1px solid var(--line)"></div>`;
+  body.innerHTML=`<div class="attention" style="margin-top:12px"><h4 style="text-align:right">Итого: <span id="privateCashTotal" style="color:var(--green,#53c68c)">${money(data.total)} ₽</span></h4><p>Частные заказы бригадиров без кассы. Укажите комиссию за каждый заказ.</p></div><form id="privateCashForm">${data.items.map((x,i)=>field(x.key,`${i+1}. ${x.name}`,data.amounts[x.key],x.surname||'Частный заказ')).join('')||'<p class="muted">Таких заказов за этот день нет.</p>'}${field('own','Мой выход',data.own,'Мой заработок за день')}${data.legacy?field('legacy','Ранее внесённая сумма',data.legacy,'Прежняя наличка сохранена. Уменьшите её, если распределяете эту сумму по заказам.'):''}<p id="privateCashStatus" class="muted"></p><button class="primary" type="submit">Сохранить</button></form>`;
+  function values(){
+   const out={amounts:{},own:0,legacy:0,version:data.version};
+   qsa('[data-private-cash]',body).forEach(input=>{
+    const raw=input.value.trim().replace(/\s/g,'').replace(',','.');
+    if(raw&&!/^-?\d+(\.\d{1,2})?$/.test(raw))throw Error('Введите сумму с точностью до копеек');
+    const cents=Math.round(Number(raw||0)*100),key=input.dataset.privateCash;
+    if(!Number.isSafeInteger(cents)||Math.abs(cents)>100000000000||(key!=='legacy'&&cents<0))throw Error('Проверьте сумму');
+    if(key==='own'||key==='legacy')out[key]=cents;else out.amounts[key]=cents;
+   });return out;
+  }
+  qsa('[data-private-cash]',body).forEach(input=>input.oninput=()=>{dirty=true;try{const v=values();qs('#privateCashTotal').textContent=money(Object.values(v.amounts).reduce((a,b)=>a+b,0)+v.own+v.legacy)+' ₽';qs('#privateCashStatus').textContent='Не сохранено'}catch(e){qs('#privateCashStatus').textContent=e.message}});
+  qs('#privateCashForm').onsubmit=async e=>{
+   e.preventDefault();if(busy)return;
+   try{const payload=values();busy=true;qsa('input,button',body).forEach(x=>x.disabled=true);
+    await api('/api/personal-cash-day/'+day,{method:'PUT',body:JSON.stringify(payload)});
+    if(active()){dirty=false;toast('Наличка сохранена');await openPersonalTables(resume)}
+   }catch(err){if(active())qs('#privateCashStatus').textContent=err.message}
+   finally{busy=false;if(active())qsa('input,button',body).forEach(x=>x.disabled=false)}
+  };
+ }catch(e){if(active())body.textContent=e.message}
+}
+</script></body>''',1)
