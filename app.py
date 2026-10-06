@@ -3494,6 +3494,69 @@ class OrderPhotoControl(Base):
     second_received = Column(Boolean, nullable=False, default=False)
 
 
+class OrderPhotoOverride(Base):
+    __tablename__ = 'order_photo_overrides'
+    event_id = Column(Integer, primary_key=True)
+    # NULL follows the bot; explicit True/False is an owner's correction.
+    first_received = Column(Boolean, nullable=True)
+    second_received = Column(Boolean, nullable=True)
+    updated_by_tg_id = Column(BigInteger, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class OrderPhotoOverrideInput(BaseModel):
+    stage: Literal[1, 2]
+    received: bool | None = Field(..., strict=True)
+
+
+def effective_order_photo(db: Session, card):
+    key = f'card:{card.chat_id}:{card.message_id}'
+    control = db.get(OrderPhotoControl, key)
+    photo = db.get(PhotoReportEvent, key)
+    override = db.get(OrderPhotoOverride, card.id)
+    first = bool(control.first_received if control else photo and photo.active)
+    second = bool(control and control.second_received) if card.source == 'gbu' else False
+    manual_first = override.first_received if override else None
+    manual_second = override.second_received if override and card.source == 'gbu' else None
+    return {'first_received': first if manual_first is None else manual_first,
+            'second_received': second if manual_second is None else manual_second,
+            'first_manual': manual_first is not None, 'second_manual': manual_second is not None,
+            'photo_time': control.photo_time if control else None}
+
+
+@app.patch('/api/photo-control/{event_id}')
+def set_photo_override(event_id: int, data: OrderPhotoOverrideInput,
+        db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    if not _is_owner(db, user.id):
+        raise HTTPException(403, 'Ручные отметки фото доступны только владельцу')
+    card = db.scalar(select(NumberCardEvent).where(NumberCardEvent.id == event_id,
+        _visible_number_card()).with_for_update())
+    if card is None:
+        raise HTTPException(404, 'Заказ не найден или удалён')
+    if card.source not in ('private', 'gbu') or (data.stage == 2 and card.source != 'gbu'):
+        raise HTTPException(400, 'У частного заказа одна отметка фото')
+    job = db.get(NumberReassignment, event_id)
+    if job and job.status == 'pending':
+        raise HTTPException(409, 'Дождитесь завершения замены бригадира')
+    override = db.get(OrderPhotoOverride, event_id)
+    if override is None:
+        override = OrderPhotoOverride(event_id=event_id, updated_by_tg_id=user.id)
+        db.add(override)
+    field = 'first_received' if data.stage == 1 else 'second_received'
+    previous = getattr(override, field)
+    setattr(override, field, data.received)
+    override.updated_by_tg_id = user.id
+    override.updated_at = datetime.utcnow()
+    db.add(ImportLog(kind='photo_override', created_by_tg_id=user.id,
+        raw_text='Ручная отметка фото', result_json=json.dumps({
+            'event_id': event_id, 'work_date': card.work_date.isoformat(),
+            'source': card.source, 'stage': data.stage, 'previous': previous,
+            'received': data.received})))
+    db.commit()
+    return {'ok': True, 'id': card.id, **effective_order_photo(db, card),
+            'counts': photo_report_counts(db, card.work_date)}
+
+
 class OrderContactSchedule(Base):
     __tablename__ = 'order_contact_schedule'
     report_key = Column(String(180), primary_key=True)
@@ -3564,19 +3627,15 @@ def list_photo_control(work_date:date, source:Literal['private','gbu'],
     employees={e.tg_id:e for e in db.scalars(select(Employee).where(Employee.tg_id.in_([c.tg_id for c in cards])))} if cards else {}
     result=[]
     for card in cards:
-        key=f'card:{card.chat_id}:{card.message_id}'
-        row=db.get(OrderPhotoControl,key)
-        photo=db.get(PhotoReportEvent,key)
         result.append({'id':card.id,'employee':_employee_dict(employees[card.tg_id]) if card.tg_id in employees else {'full_name':card.full_name},
-            'surname':card.surname,'photo_time':row.photo_time if row else None,
-            'first_received':bool(row.first_received if row else photo and photo.active),
-            'second_received':bool(row and row.second_received)})
+            'surname':card.surname, **effective_order_photo(db, card)})
     def sort_key(item):
         clock=item['photo_time']
         minutes=sum(int(v)*m for v,m in zip(clock.split(':'),(60,1))) if clock else 1440
         return minutes,item['id']
     result.sort(key=sort_key)
-    return {'work_date':work_date.isoformat(),'source':source,'items':result}
+    return {'work_date':work_date.isoformat(),'source':source,'items':result,
+            'can_edit': _is_owner(db, user.id)}
 
 
 @app.post('/api/bot/photo-reports', dependencies=[Depends(_bot_key)])
@@ -3594,10 +3653,13 @@ def bot_photo_report(data: PhotoReportInput, db: Session = Depends(get_db)):
 
 
 def photo_report_counts(db: Session, work_date: date):
-    counts = dict(db.execute(select(PhotoReportEvent.source, func.count(PhotoReportEvent.report_key))
-        .where(PhotoReportEvent.work_date == work_date, PhotoReportEvent.active.is_(True))
-        .group_by(PhotoReportEvent.source)).all())
-    return {source: int(counts.get(source, 0)) for source in ('private', 'gbu')}
+    counts = {'private': 0, 'gbu': 0}
+    cards = db.scalars(select(NumberCardEvent).where(
+        NumberCardEvent.work_date == work_date, _visible_number_card())).all()
+    for card in cards:
+        if card.source in counts and effective_order_photo(db, card)['first_received']:
+            counts[card.source] += 1
+    return counts
 
 
 def _visible_number_card():
@@ -3638,6 +3700,13 @@ def bot_order_completion(work_date: date, db: Session = Depends(get_db)):
     ).order_by(NumberCardEvent.id)).all()
     result['number_cards'] = [{'chat_id': row.chat_id, 'message_id': row.message_id,
                                'tg_id': row.tg_id, 'source': row.source} for row in rows]
+    overrides = {o.event_id: o for o in db.scalars(select(OrderPhotoOverride).where(
+        OrderPhotoOverride.event_id.in_([r.id for r in rows])))} if rows else {}
+    result['photo_overrides'] = {
+        f'card:{r.chat_id}:{r.message_id}': {
+            'first_received': overrides[r.id].first_received,
+            'second_received': overrides[r.id].second_received if r.source == 'gbu' else None}
+        for r in rows if r.id in overrides}
     return result
 
 
@@ -4006,19 +4075,51 @@ function renderSummary() {
 INLINE_INDEX_HTML = _organize_day_dashboard(INLINE_INDEX_HTML)
 
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>',r'''
+<style>
+html,body,button,input,select,textarea,a,label { touch-action:manipulation; }
+.photo-mark { display:flex; flex-direction:column; align-items:center; gap:3px; }
+.photo-mark-toggle { min-width:44px; min-height:44px; padding:5px; font-size:23px; }
+.photo-mark-label { font-size:11px; color:var(--muted); }
+.photo-mark-auto { border:0; background:none; color:var(--blue); padding:7px 4px; font-size:11px; }
+</style>
 <script>
 function openPhotoControl(source,day){
- showModal(source==='gbu'?'Фото · ГБУ':'Фото · частные',`<p class="muted">${esc(fmtDate(day))} · По времени фото</p><p class="muted">${source==='gbu'?'Отдельная отметка за первое и второе фото':'Отметка после отправки фото'}</p><div id="photoControlList">Загрузка…</div>`);
+ showModal(source==='gbu'?'Фото · ГБУ':'Фото · частные',`<p class="muted">${esc(fmtDate(day))} · По времени фото</p><p class="muted" id="photoControlHint">${source==='gbu'?'Отдельная отметка за первое и второе фото':'Отметка после отправки фото'}</p><div id="photoControlList">Загрузка…</div>`);
  const body=qs('#photoControlList');
  const active=()=>qs('#photoControlList')===body&&!qs('#modal').classList.contains('hidden');
+ let items=[],canEdit=false,saving=false,revision=0,timer=null;
+ function mark(x,stage){
+  const received=stage===1?x.first_received:x.second_received,manual=stage===1?x.first_manual:x.second_manual;
+  const label=`${stage===1?'Первое':'Второе'} фото: ${received?'получено':'ожидается'}`;
+  return `<div class="photo-mark">${source==='gbu'?`<small class="photo-mark-label">${stage}-е фото</small>`:''}${canEdit?`<button type="button" class="secondary photo-mark-toggle" data-photo-id="${x.id}" data-photo-stage="${stage}" aria-pressed="${received}" aria-label="${label}. ${received?'Снять':'Поставить'} отметку">${received?'✅':'⬜'}</button>`:`<span style="font-size:23px" aria-label="${label}">${received?'✅':'⬜'}</span>`}${manual?`<small class="photo-mark-label">Вручную</small>${canEdit?`<button type="button" class="photo-mark-auto" data-photo-id="${x.id}" data-photo-stage="${stage}" data-photo-auto="1" aria-label="Вернуть автоматическую отметку ${stage}-го фото">Авто</button>`:''}`:''}</div>`;
+ }
+ body.onclick=async event=>{
+  const button=event.target.closest('button[data-photo-id]');
+  if(!button||!body.contains(button)||saving||!canEdit)return;
+  const item=items.find(x=>x.id===Number(button.dataset.photoId));if(!item)return;
+  const stage=Number(button.dataset.photoStage);
+  const received=button.dataset.photoAuto?null:!(stage===1?item.first_received:item.second_received);
+  saving=true;revision++;clearTimeout(timer);
+  qsa('button',body).forEach(b=>b.disabled=true);
+  try{
+   const r=await api(`/api/photo-control/${item.id}`,{method:'PATCH',body:JSON.stringify({stage,received})});
+   if(state.selectedDate===day&&state.bootstrap?.summary){state.bootstrap.summary.photo_reports=r.counts;renderSummary()}
+   if(active())toast(received===null?'Автоматическая отметка восстановлена':received?'Фото отмечено':'Отметка снята');
+  }catch(e){if(active())toast(e.message,5000)}
+  finally{saving=false;if(active())await refresh()}
+ };
  async function refresh(){
-  if(!active())return;
+  clearTimeout(timer);
+  if(!active()||saving)return;
+  const request=++revision;
   try{
    const r=await api(`/api/photo-control?work_date=${encodeURIComponent(day)}&source=${source}`);
-   if(!active())return;
-   body.innerHTML=r.items.length?`<div class="list">${r.items.map((x,i)=>`<div class="employee-row" style="gap:12px"><div style="min-width:0;flex:1"><b>${i+1}. ${esc(employeeListName(x.employee))}</b><div class="muted">${esc(x.surname)}</div><div>${esc(x.photo_time||'Время не указано')}</div></div><div style="white-space:nowrap;font-size:22px" aria-label="Первое фото: ${x.first_received?'получено':'ожидается'}${source==='gbu'?'; второе фото: '+(x.second_received?'получено':'ожидается'):''}">${x.first_received?'✅':'⬜'}${source==='gbu'?' '+(x.second_received?'✅':'⬜'):''}</div></div>`).join('')}</div>`:'Номера по заказам на эту дату ещё не выставлены.';
-  }catch(e){if(active())body.textContent=e.message}
-  if(active())setTimeout(refresh,5000);
+   if(!active()||request!==revision||saving)return;
+   items=r.items;canEdit=!!r.can_edit;
+   qs('#photoControlHint').textContent=canEdit?'Нажмите на квадратик, чтобы поставить или снять отметку. «Авто» возвращает отметку бота.':source==='gbu'?'Отдельная отметка за первое и второе фото':'Отметка после отправки фото';
+   body.innerHTML=items.length?`<div class="list">${items.map((x,i)=>`<div class="employee-row" style="gap:12px"><div style="min-width:0;flex:1"><b>${i+1}. ${esc(employeeListName(x.employee))}</b><div class="muted">${esc(x.surname)}</div><div>${esc(x.photo_time||'Время не указано')}</div></div><div style="display:flex;gap:4px;flex-shrink:0">${mark(x,1)}${source==='gbu'?mark(x,2):''}</div></div>`).join('')}</div>`:'Номера по заказам на эту дату ещё не выставлены.';
+  }catch(e){if(active()&&request===revision&&!saving)body.textContent=e.message}
+  if(active()&&!saving&&request===revision)timer=setTimeout(refresh,5000);
  }
  refresh();
 }
@@ -4152,8 +4253,8 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
 )
 
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
-    '<small>📞 ${esc(x.phone)} · ${x.closed?"✅ Заказ закрыт":"Ожидается закрытие"}</small>',
-    '<small>📞 ${esc(x.phone)} · ${x.closed?"✅ Заказ закрыт":"Ожидается закрытие"}</small><button class="secondary small" data-number-reassign="${x.id}" style="margin-top:10px">🔄 Заменить бригадира</button>',1,
+    '''${state.bootstrap?.is_owner?`<button type="button" class="secondary danger" data-number-delete="${x.id}" aria-label="Удалить запись" style="min-width:44px;min-height:44px">🗑</button>`:''}''',
+    '''<div style="display:flex;flex-direction:column;gap:8px;flex-shrink:0"><button type="button" class="secondary" data-number-reassign="${x.id}" aria-label="Заменить бригадира" title="Заменить бригадира" style="width:44px;height:44px;padding:6px;font-size:22px">🔄</button>${state.bootstrap?.is_owner?`<button type="button" class="secondary danger" data-number-delete="${x.id}" aria-label="Удалить запись" style="width:44px;height:44px;padding:6px;font-size:22px">🗑</button>`:''}</div>''',1,
 ).replace(
     "   qsa('[data-number-delete]',body).forEach",
     "   qsa('[data-number-reassign]',body).forEach(b=>b.onclick=()=>openNumberReassignment(r.items,Number(b.dataset.numberReassign),day));\n   qsa('[data-number-delete]',body).forEach",1,
