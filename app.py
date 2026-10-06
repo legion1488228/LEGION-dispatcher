@@ -3454,9 +3454,10 @@ def _personal_table_result(row, kind: str, month: str, db=None) -> dict:
     # Project legacy columns without deleting stored history during a read.
     keep = [i for i, name in enumerate(data["columns"])
             if not (kind == "kickbacks" and name.strip().casefold() == "заказы")]
+    gbu_details = data.get("gbu_details", {})
     adjustments = data.get("marina_adjustments", {})
     old_cells = data["cells"]
-    data = {"marina_adjustments": adjustments, "columns": [data["columns"][i] for i in keep],
+    data = {"gbu_details": gbu_details, "marina_adjustments": adjustments, "columns": [data["columns"][i] for i in keep],
             "cells": {f"{day}:{col}": old_cells[f"{day}:{old}"]
                       for col, old in enumerate(keep) for day in range(1, days + 1)
                       if f"{day}:{old}" in old_cells}}
@@ -3489,6 +3490,13 @@ def _personal_table_result(row, kind: str, month: str, db=None) -> dict:
                 key = f"{day}:0"
                 data["cells"][key] = data["cells"].get(key, 0) + delta
     if kind == 'earnings':
+        if db is not None:
+            for day in range(1, days + 1):
+                key = f'{day}:1'
+                if str(day) in gbu_details or key not in data['cells']:
+                    detail = gbu_earnings_day(db, date.fromisoformat(month + '-01').replace(day=day), gbu_details.get(str(day)))
+                    if detail['items'] or str(day) in gbu_details:
+                        data['cells'][key] = detail['total']
         if db is not None and row is not None:
             start = date.fromisoformat(month + '-01')
             for detail in db.scalars(select(PersonalCashDay).where(
@@ -3577,7 +3585,7 @@ def personal_table_edit(kind: Literal["earnings", "cash", "kickbacks"], month: s
     if row is None:
         row = PersonalMonthlyTable(owner_id=user.id, month=month, kind=kind, version=0)
         db.add(row)
-    row.payload = json.dumps({"columns": columns, "cells": cells, "marina_adjustments": data["marina_adjustments"]}, ensure_ascii=False)
+    row.payload = json.dumps({"columns": columns, "cells": cells, "marina_adjustments": data["marina_adjustments"], "gbu_details": data.get("gbu_details", {})}, ensure_ascii=False)
     row.version += 1
     try:
         db.commit()
@@ -4916,6 +4924,133 @@ async function openKickbackDay(month,day,resume){
     if(active()){dirty=false;toast('Откат сохранён');await openPersonalTables(resume)}
    }catch(err){if(active())status.textContent=err.message}
    finally{busy=false;if(active())qsa('input,button',body).forEach(x=>x.disabled=false)}
+  };
+ }catch(e){if(active())body.textContent=e.message}
+}
+</script></body>''',1)
+
+GBU_EARNINGS_RATES = {'standard:4': 200000, 'standard:6': 280000, 'elite:4': 340000, 'elite:6': 480000}
+GBU_VLAD_RATES = {'standard:4': 150000, 'standard:6': 230000, 'elite:4': 300000, 'elite:6': 440000}
+
+def gbu_earnings_rate(name, metro, category, team_size):
+    label = re.sub(r'\s+', ' ', f'{name or ""} {metro or ""}'.casefold())
+    special = bool(re.search(r'\b(влад|владислав)\b', label) and 'рязанск' in label)
+    return (GBU_VLAD_RATES if special else GBU_EARNINGS_RATES).get(f'{category}:{team_size}'), special
+
+
+def gbu_earnings_day(db, work_date, saved=None):
+    saved = saved or {}
+    orders = list(db.scalars(select(Order).where(Order.work_date == work_date, Order.source == 'gbu', Order.status != 'cancelled')))
+    employees = {e.id: e for e in db.scalars(select(Employee).where(_visible_employee()))}
+    by_tg = {e.tg_id: e for e in employees.values() if e.tg_id}
+    assigned = {a.order_id: employees.get(a.employee_id) for a in db.scalars(select(Assignment).where(
+        Assignment.order_id.in_([o.id for o in orders]), Assignment.role == 'brigadier'))}
+    cards = list(db.scalars(select(NumberCardEvent).where(NumberCardEvent.work_date == work_date,
+        NumberCardEvent.source == 'gbu', _visible_number_card()).order_by(NumberCardEvent.id)))
+    def surname(value):
+        return re.sub(r'[^а-яa-z]', '', (value or '').casefold().replace('ё','е').split()[0]) if (value or '').strip() else ''
+    matched = set(); rows = []
+    for card in cards:
+        candidates = [o for o in orders if surname(card.surname) and surname(o.deceased_name) == surname(card.surname)]
+        order = candidates[0] if len(candidates) == 1 else None
+        if order and order.id in matched: order = None
+        if order: matched.add(order.id)
+        key = f'card:{card.id}'
+        if order and key not in saved: key = f'order:{order.id}'
+        rows.append((key, by_tg.get(card.tg_id), card.full_name, order))
+    for order in orders:
+        if order.id not in matched and assigned.get(order.id):
+            emp = assigned[order.id]
+            # An unmatched card for this foreman may be this order; avoid double-counting.
+            if any(row_emp and row_emp.tg_id == emp.tg_id and row_order is None
+                   for _, row_emp, _, row_order in rows): continue
+            rows.append((f'order:{order.id}', emp, emp.full_name, order))
+    items = []
+    for key, emp, name, order in rows:
+        detail = saved.get(key, {})
+        category = detail.get('category') or (order.category if order else None)
+        team = detail.get('team_size') or (order.team_size if order else None)
+        metro = getattr(emp, 'metro', '') or ''
+        rate, special = gbu_earnings_rate(name, metro, category, team)
+        manual = detail.get('amount')
+        items.append({'key': key, 'name': _employee_dict(emp)['display_name'] if emp else name,
+            'category': category, 'team_size': team, 'auto': rate, 'special': special,
+            'manual': manual, 'amount': manual if manual is not None else rate})
+    return {'items': items, 'total': sum(x['amount'] or 0 for x in items),
+        'missing': sum(x['amount'] is None for x in items)}
+
+
+class GbuEarningsItemInput(BaseModel):
+    category: Literal['standard','elite']
+    team_size: Literal[4,6]
+    amount: int | None = Field(default=None, ge=0, le=100000000000, strict=True)
+
+class GbuEarningsInput(BaseModel):
+    version: int = Field(ge=0, strict=True)
+    items: dict[str, GbuEarningsItemInput]
+
+@app.get('/api/gbu-earnings/{work_date}')
+def get_gbu_earnings(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    _require_owner(db, user)
+    row = db.scalar(select(PersonalMonthlyTable).where(PersonalMonthlyTable.owner_id == user.id,
+        PersonalMonthlyTable.kind == 'earnings', PersonalMonthlyTable.month == work_date.strftime('%Y-%m')))
+    payload = json.loads(row.payload) if row else {}
+    result = gbu_earnings_day(db, work_date, payload.get('gbu_details', {}).get(str(work_date.day)))
+    return {**result, 'version': row.version if row else 0,
+        'previous': payload.get('cells', {}).get(f'{work_date.day}:1') if str(work_date.day) not in payload.get('gbu_details', {}) else None}
+
+@app.put('/api/gbu-earnings/{work_date}')
+def save_gbu_earnings(work_date: date, change: GbuEarningsInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    _require_owner(db, user)
+    month = work_date.strftime('%Y-%m')
+    row = db.scalar(select(PersonalMonthlyTable).where(PersonalMonthlyTable.owner_id == user.id,
+        PersonalMonthlyTable.kind == 'earnings', PersonalMonthlyTable.month == month).with_for_update())
+    if change.version != (row.version if row else 0):
+        raise HTTPException(409, 'Таблица изменена. Откройте день заново.')
+    payload = json.loads(row.payload) if row else {'columns': list(PERSONAL_TABLE_COLUMNS['earnings']), 'cells': {}}
+    current = gbu_earnings_day(db, work_date, payload.get('gbu_details', {}).get(str(work_date.day)))
+    if set(change.items) != {x['key'] for x in current['items']}:
+        raise HTTPException(409, 'Список заказов изменился. Откройте день заново.')
+    payload.setdefault('gbu_details', {})[str(work_date.day)] = {k:v.model_dump() for k,v in change.items.items()}
+    if row is None:
+        row = PersonalMonthlyTable(owner_id=user.id, month=month, kind='earnings', version=0)
+        db.add(row)
+    row.payload = json.dumps(payload, ensure_ascii=False); row.version += 1
+    try: db.commit()
+    except IntegrityError:
+        db.rollback(); raise HTTPException(409, 'Таблица изменена. Откройте день заново.')
+    return get_gbu_earnings(work_date, db, user)
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "if(kind==='earnings'&&column===2){openPersonalCashDay",
+    "if(kind==='earnings'&&column===1){openGbuEarningsDay(`${month}-${String(day).padStart(2,'0')}`,{month,kind,left:grid.scrollLeft,top:grid.scrollTop,modalTop:qs('#modal').scrollTop});return}\n   if(kind==='earnings'&&column===2){openPersonalCashDay", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
+<script>
+async function openGbuEarningsDay(day,resume){
+ showModal('ГБУ · '+fmtDate(day),'<button class="secondary" id="gbuEarnBack">← К заработку</button><div id="gbuEarnBody">Загрузка…</div>');
+ const body=qs('#gbuEarnBody'),active=()=>qs('#gbuEarnBody')===body&&!qs('#modal').classList.contains('hidden');
+ let busy=false,dirty=false;
+ qs('#gbuEarnBack').onclick=()=>{if(!busy&&(!dirty||confirm('Выйти без сохранения изменений?')))openPersonalTables(resume)};
+ const money=c=>new Intl.NumberFormat('ru-RU',{maximumFractionDigits:2}).format(c/100);
+ try{
+  const data=await api('/api/gbu-earnings/'+day);if(!active())return;
+  const rates={'standard:4':200000,'standard:6':280000,'elite:4':340000,'elite:6':480000};
+  const vlad={'standard:4':150000,'standard:6':230000,'elite:4':300000,'elite:6':440000};
+  const drafts=data.items.map(x=>({...x,type:rates[x.category+':'+x.team_size]!==undefined?x.category+':'+x.team_size:'',manual:x.manual===null?null:String(x.manual/100)}));
+  body.innerHTML=`<form id="gbuEarnForm"><h3 style="text-align:right">Итого: <span id="gbuEarnTotal"></span></h3>${data.previous!==null?`<p class="muted">Ранее в таблице: ${money(data.previous)} ₽. После сохранения эту сумму заменит итог по заказам.</p>`:''}<p class="muted">Каждый заказ — отдельная строка. Если данных нет, выберите категорию и состав.</p>${drafts.map((x,i)=>`<div style="padding:16px 0;border-bottom:1px solid #333"><b>${i+1}. ${esc(x.name)}</b><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"><select data-gbu-type="${i}" style="font-size:16px"><option value="">Выберите категорию и состав</option>${Object.keys(rates).map(key=>`<option value="${key}" ${x.type===key?'selected':''}>${key.startsWith('elite')?'Элит':'Стандарт'} · ${key.endsWith('6')?'6':'4'} чел.</option>`).join('')}</select><label>Сумма, ₽ <input data-gbu-money="${i}" inputmode="decimal" style="width:120px;font-size:16px" value="${x.manual===null?'':esc(x.manual)}" placeholder="Авто"></label><button type="button" class="secondary" data-gbu-auto="${i}">Авто</button></div><small class="muted" data-gbu-hint="${i}"></small></div>`).join('')||'<p>Заказы ГБУ за этот день не найдены.</p>'}<p id="gbuEarnStatus" role="status"></p><button class="primary" type="submit" ${drafts.length?'':'disabled'}>Сохранить</button></form>`;
+  function amount(x){if(x.manual===null)return (x.special?vlad:rates)[x.type]??null;const raw=x.manual.trim().replace(/\s/g,'').replace(',','.');if(!/^\d+(\.\d{1,2})?$/.test(raw)||Number(raw)>1000000000)throw Error('Введите сумму с точностью до копеек');return Math.round(Number(raw)*100)}
+  function renderTotal(){let sum=0,missing=0;drafts.forEach((x,i)=>{const n=amount(x);if(n===null)missing++;else sum+=n;const auto=(x.special?vlad:rates)[x.type];qs(`[data-gbu-hint="${i}"]`,body).textContent=auto===undefined?'Для расчёта выберите категорию и состав':`${x.type.startsWith('elite')?'Элит':'Стандарт'} ${x.type.slice(-1)} чел. — ${money(auto)} ₽${x.special?' · ставка Влада Рязанского':''}${x.manual!==null?' · сумма изменена вручную':''}`;const input=qs(`[data-gbu-money="${i}"]`,body);input.placeholder=auto===undefined?'Не рассчитано':money(auto)});qs('#gbuEarnTotal').textContent=money(sum)+' ₽'+(missing?' · не рассчитано: '+missing:'')}
+  qsa('[data-gbu-type]',body).forEach(el=>el.onchange=()=>{dirty=true;drafts[Number(el.dataset.gbuType)].type=el.value;renderTotal()});
+  qsa('[data-gbu-money]',body).forEach(el=>el.oninput=()=>{dirty=true;drafts[Number(el.dataset.gbuMoney)].manual=el.value.trim()===''?null:el.value;try{renderTotal();qs('#gbuEarnStatus').textContent='Не сохранено'}catch(e){qs('#gbuEarnStatus').textContent=e.message}});
+  qsa('[data-gbu-auto]',body).forEach(el=>el.onclick=()=>{dirty=true;const i=Number(el.dataset.gbuAuto);drafts[i].manual=null;qs(`[data-gbu-money="${i}"]`,body).value='';renderTotal()});
+  renderTotal();
+  qs('#gbuEarnForm').onsubmit=async e=>{e.preventDefault();if(busy)return;
+   try{const items={};drafts.forEach(x=>{if(!x.type)throw Error('Укажите категорию и состав каждого заказа');items[x.key]={category:x.type.split(':')[0],team_size:Number(x.type.split(':')[1]),amount:x.manual===null?null:amount(x)}});
+    busy=true;qsa('input,select,button',body).forEach(x=>x.disabled=true);
+    await api('/api/gbu-earnings/'+day,{method:'PUT',body:JSON.stringify({version:data.version,items})});
+    if(active()){dirty=false;toast('ГБУ сохранено');await openPersonalTables(resume)}
+   }catch(err){if(active())qs('#gbuEarnStatus').textContent=err.message}
+   finally{busy=false;if(active())qsa('input,select,button',body).forEach(x=>x.disabled=false)}
   };
  }catch(e){if(active())body.textContent=e.message}
 }
