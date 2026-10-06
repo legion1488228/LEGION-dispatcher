@@ -3433,6 +3433,65 @@ class PhotoReportInput(BaseModel):
     active: bool = True
 
 
+class OrderPhotoControl(Base):
+    __tablename__ = 'order_photo_control'
+    report_key = Column(String(180), primary_key=True)
+    tg_id = Column(BigInteger, nullable=False)
+    photo_time = Column(String(5), nullable=True)
+    first_received = Column(Boolean, nullable=False, default=False)
+    second_received = Column(Boolean, nullable=False, default=False)
+
+
+class OrderPhotoControlInput(BaseModel):
+    report_key: str = Field(pattern=r'^card:-\d+:\d+$', max_length=180)
+    tg_id: int = Field(gt=0)
+    photo_time: str | None = Field(default=None, pattern=r'^([01]?\d|2[0-3]):[0-5]\d$')
+    first_received: bool = False
+    second_received: bool = False
+
+
+@app.post('/api/bot/photo-control', dependencies=[Depends(_bot_key)])
+def save_photo_control(data: list[OrderPhotoControlInput], db: Session=Depends(get_db)):
+    if len(data)>500: raise HTTPException(400, 'Слишком много записей')
+    for item in data:
+        _, chat, message = item.report_key.split(':')
+        card = db.scalar(select(NumberCardEvent).where(NumberCardEvent.chat_id==int(chat),
+            NumberCardEvent.message_id==int(message), _visible_number_card()))
+        if not card or card.tg_id != item.tg_id: continue
+        row=db.get(OrderPhotoControl,item.report_key)
+        if row is None:
+            row=OrderPhotoControl(report_key=item.report_key);db.add(row)
+        row.tg_id=item.tg_id
+        row.photo_time=item.photo_time
+        row.first_received=item.first_received
+        row.second_received=item.second_received
+    db.commit()
+    return {'ok':True}
+
+
+@app.get('/api/photo-control')
+def list_photo_control(work_date:date, source:Literal['private','gbu'],
+        db:Session=Depends(get_db), user:TelegramUser=Depends(require_admin)):
+    cards=db.scalars(select(NumberCardEvent).where(NumberCardEvent.work_date==work_date,
+        NumberCardEvent.source==source,_visible_number_card())).all()
+    employees={e.tg_id:e for e in db.scalars(select(Employee).where(Employee.tg_id.in_([c.tg_id for c in cards])))} if cards else {}
+    result=[]
+    for card in cards:
+        key=f'card:{card.chat_id}:{card.message_id}'
+        row=db.get(OrderPhotoControl,key)
+        photo=db.get(PhotoReportEvent,key)
+        result.append({'id':card.id,'employee':_employee_dict(employees[card.tg_id]) if card.tg_id in employees else {'full_name':card.full_name},
+            'surname':card.surname,'photo_time':row.photo_time if row else None,
+            'first_received':bool(row.first_received if row else photo and photo.active),
+            'second_received':bool(row and row.second_received)})
+    def sort_key(item):
+        clock=item['photo_time']
+        minutes=sum(int(v)*m for v,m in zip(clock.split(':'),(60,1))) if clock else 1440
+        return minutes,item['id']
+    result.sort(key=sort_key)
+    return {'work_date':work_date.isoformat(),'source':source,'items':result}
+
+
 @app.post('/api/bot/photo-reports', dependencies=[Depends(_bot_key)])
 def bot_photo_report(data: PhotoReportInput, db: Session = Depends(get_db)):
     row = db.get(PhotoReportEvent, data.report_key)
@@ -3834,9 +3893,11 @@ def _organize_day_dashboard(html):
   qs('#brigadeWork').innerHTML=`<h2>Контроль бригады утром</h2><p class="muted">${esc(fmtDate(day))}${future?' · В день заказа':''}</p>
     <div class="summary-grid" style="grid-template-columns:repeat(3,minmax(0,1fr))">
     <button id="brigadesContactCount" class="metric good"><b>${s.brigades_on_contact||0}/${s.orders_total}</b><span>Бригады на связи ›</span></button>
-    <div class="metric"><b>${s.photo_reports?.private||0}/${s.private_count}</b><span>Фото · частные</span></div>
-    <div class="metric"><b>${s.photo_reports?.gbu||0}/${s.gbu_count}</b><span>Фото · ГБУ</span></div></div>`;
+    <button class="metric" id="privatePhotoControl"><b>${s.photo_reports?.private||0}/${s.private_count}</b><span>Фото · частные ›</span></button>
+    <button class="metric" id="gbuPhotoControl"><b>${s.photo_reports?.gbu||0}/${s.gbu_count}</b><span>Фото · ГБУ ›</span></button></div>`;
   qs('#brigadesContactCount').onclick=openContactBrigades;
+  qs('#privatePhotoControl').onclick=()=>openPhotoControl('private',day);
+  qs('#gbuPhotoControl').onclick=()=>openPhotoControl('gbu',day);
   const sections=future?['orderPreparation','brigadeWork','employeeReadiness']:['brigadeWork','orderPreparation','employeeReadiness'];
   for(const id of sections)view.appendChild(qs('#'+id));
 }
@@ -3846,6 +3907,25 @@ def _organize_day_dashboard(html):
 
 
 INLINE_INDEX_HTML = _organize_day_dashboard(INLINE_INDEX_HTML)
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>',r'''
+<script>
+function openPhotoControl(source,day){
+ showModal(source==='gbu'?'Фото · ГБУ':'Фото · частные',`<p class="muted">${esc(fmtDate(day))} · По времени фото</p><p class="muted">${source==='gbu'?'Отдельная отметка за первое и второе фото':'Отметка после отправки фото'}</p><div id="photoControlList">Загрузка…</div>`);
+ const body=qs('#photoControlList');
+ const active=()=>qs('#photoControlList')===body&&!qs('#modal').classList.contains('hidden');
+ async function refresh(){
+  if(!active())return;
+  try{
+   const r=await api(`/api/photo-control?work_date=${encodeURIComponent(day)}&source=${source}`);
+   if(!active())return;
+   body.innerHTML=r.items.length?`<div class="list">${r.items.map((x,i)=>`<div class="employee-row" style="gap:12px"><div style="min-width:0;flex:1"><b>${i+1}. ${esc(employeeListName(x.employee))}</b><div class="muted">${esc(x.surname)}</div><div>${esc(x.photo_time||'Время не указано')}</div></div><div style="white-space:nowrap;font-size:22px" aria-label="Первое фото: ${x.first_received?'получено':'ожидается'}${source==='gbu'?'; второе фото: '+(x.second_received?'получено':'ожидается'):''}">${x.first_received?'✅':'⬜'}${source==='gbu'?' '+(x.second_received?'✅':'⬜'):''}</div></div>`).join('')}</div>`:'Номера по заказам на эту дату ещё не выставлены.';
+  }catch(e){if(active())body.textContent=e.message}
+  if(active())setTimeout(refresh,5000);
+ }
+ refresh();
+}
+</script></body>''',1)
 
 
 def _contact_bulk_delete_ui(html):
