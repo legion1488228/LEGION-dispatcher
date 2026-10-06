@@ -3494,12 +3494,19 @@ class OrderPhotoControl(Base):
     second_received = Column(Boolean, nullable=False, default=False)
 
 
+class OrderContactSchedule(Base):
+    __tablename__ = 'order_contact_schedule'
+    report_key = Column(String(180), primary_key=True)
+    contact_time = Column(String(5), nullable=True)
+
+
 class OrderPhotoControlInput(BaseModel):
     report_key: str = Field(pattern=r'^card:-\d+:\d+$', max_length=180)
     tg_id: int = Field(gt=0)
     photo_time: str | None = Field(default=None, pattern=r'^([01]?\d|2[0-3]):[0-5]\d$')
     first_received: bool = False
     second_received: bool = False
+    contact_time: str | None = Field(default=None, pattern=r'^([01]?\d|2[0-3]):[0-5]\d$')
 
 
 @app.post('/api/bot/photo-control', dependencies=[Depends(_bot_key)])
@@ -3517,8 +3524,36 @@ def save_photo_control(data: list[OrderPhotoControlInput], db: Session=Depends(g
         row.photo_time=item.photo_time
         row.first_received=item.first_received
         row.second_received=item.second_received
+        if item.contact_time:
+            schedule=db.get(OrderContactSchedule,item.report_key)
+            if schedule is None:
+                schedule=OrderContactSchedule(report_key=item.report_key);db.add(schedule)
+            schedule.contact_time=item.contact_time
     db.commit()
     return {'ok':True}
+
+
+@app.get('/api/brigade-contact-orders')
+def list_brigade_contact_orders(work_date:date, db:Session=Depends(get_db),
+        user:TelegramUser=Depends(require_admin)):
+    cards=db.scalars(select(NumberCardEvent).where(
+        NumberCardEvent.work_date==work_date,_visible_number_card())).all()
+    states=brigade_contact_states(db,work_date)
+    employees={e.tg_id:e for e in db.scalars(select(Employee).where(
+        Employee.tg_id.in_([c.tg_id for c in cards]),_visible_employee()))} if cards else {}
+    items=[]
+    for card in cards:
+        if card.tg_id in HIDDEN_TG_IDS: continue
+        schedule=db.get(OrderContactSchedule,f'card:{card.chat_id}:{card.message_id}')
+        items.append({'id':card.id,'employee':_employee_dict(employees[card.tg_id]) if card.tg_id in employees else {'full_name':card.full_name},
+            'source':card.source,'surname':card.surname,
+            'contact_time':schedule.contact_time if schedule else None,
+            'on_contact':bool(states.get(card.tg_id))})
+    def sort_key(item):
+        clock=item['contact_time']
+        return (sum(int(v)*m for v,m in zip(clock.split(':'),(60,1))) if clock else 1440,item['id'])
+    items.sort(key=sort_key)
+    return {'work_date':work_date.isoformat(),'items':items}
 
 
 @app.get('/api/photo-control')
@@ -3996,19 +4031,30 @@ def _contact_bulk_delete_ui(html):
     return html[:start] + r'''
 async function openContactBrigades(workDay){
   const day=typeof workDay==='string'?workDay:state.selectedDate;
-  try{
-    const r=await api(`/api/readiness/summary?work_date=${day}`);
+  showModal('Связь бригад','<div id="contactOrdersBody" class="empty">Загрузка…</div>');
+  const body=qs('#contactOrdersBody');
+  const active=()=>qs('#contactOrdersBody')===body&&!qs('#modal').classList.contains('hidden');
+  let deleteButton=null;
+  async function refresh(){
+   if(!active())return;
+   try{
+    const [r,orders]=await Promise.all([api(`/api/readiness/summary?work_date=${day}`),api(`/api/brigade-contact-orders?work_date=${day}`)]);
+    if(!active())return;
     const people=r.brigades_on_contact||[];
-    showModal('Связь бригад',`<div class="attention"><div style="display:flex;align-items:center;justify-content:space-between;gap:8px"><h4>Связь по заказам: ${r.totals.brigades_on_contact}/${r.totals.brigades_expected}</h4><button class="secondary small" id="addBrigadeContact">＋ Добавить</button></div><p>За ${esc(day)}. Бригадиров на связи: ${people.length}. Одна отметка учитывает все номера бригадира на эту дату.</p></div>${readinessPersonRows(people)}`);
+    body.className='';
+    body.innerHTML=`<div class="attention"><div style="display:flex;align-items:center;justify-content:space-between;gap:8px"><h4>Связь по заказам: ${r.totals.brigades_on_contact}/${r.totals.brigades_expected}</h4><button class="secondary small" id="addBrigadeContact">＋ Добавить</button></div><p>За ${esc(day)}. Каждый заказ — отдельной строкой, по времени связи.</p></div><div class="list">${orders.items.map((x,i)=>`<div class="employee-row"><div class="name"><b>${i+1}. ${esc(employeeListName(x.employee))}</b><small>${x.source==='gbu'?'ГБУ':'Частный'} · ${esc(x.surname||'')}</small></div><div style="display:flex;gap:8px;align-items:center;flex-shrink:0"><b>${esc(x.contact_time||'—')}</b><span aria-label="${x.on_contact?'На связи':'Ожидается связь'}">${x.on_contact?'✅':'⬜'}</span></div></div>`).join('')||'<div class="empty">Заказы пока не добавлены</div>'}</div>`;
     qs('#addBrigadeContact').onclick=()=>openAddBrigadeContact(day,people);
     if(state.bootstrap?.is_owner){
-      const button=document.createElement('button');
+      const button=deleteButton||document.createElement('button');
       button.className='secondary danger small';button.textContent='Удалить';button.disabled=!people.length;
       button.style.cssText='margin-left:auto;flex-shrink:0';
-      qs('#closeModal').before(button);
+      if(!deleteButton){qs('#closeModal').before(button);deleteButton=button}
       button.onclick=()=>openDeleteBrigadeContacts(day,people);
     }
-  }catch(e){toast(e.message,4000)}
+   }catch(e){if(active())body.textContent=e.message}
+   if(active())setTimeout(refresh,5000);
+  }
+  await refresh();
 }
 function openDeleteBrigadeContacts(day,people){
   const selected=new Set();
