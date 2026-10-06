@@ -160,6 +160,7 @@ def startup():
     with Session(engine) as db:
         _recover_employee_profiles(db)
         _normalize_brigadier_phones(db)
+        _migrate_order_contact_marks(db)
         _purge_demo_cash_entries(db)
         for emp in db.execute(select(Employee)).scalars():
             if _cashier_excluded(db, emp):
@@ -198,7 +199,10 @@ for _phone_id, _telegram_id in (("profilePhone", "profileTelegram"),
               '<input id="' + _telegram_id + '" type="text" maxlength="100" '
               'autocapitalize="none" autocorrect="off" spellcheck="false" '
               'placeholder="@username или https://t.me/username"></div>')
-    INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_phone_end] + _field + INLINE_INDEX_HTML[_phone_end:]
+    _phone_field = INLINE_INDEX_HTML[_phone_start:_phone_end].replace(
+        _marker, 'placeholder="8 999 123-45-67"></div>')
+    INLINE_INDEX_HTML = (INLINE_INDEX_HTML[:_phone_start] + _phone_field + _field
+                         + INLINE_INDEX_HTML[_phone_end:])
     _value = "qs('#" + _phone_id + "').value=employee.phone||'';"
     INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
         _value, _value + "\nqs('#" + _telegram_id + "').value=employee.telegram_username||'';", 1)
@@ -452,6 +456,8 @@ class BrigadeContactReport(BaseModel):
     tg_id: int
     work_date: date
     raw_text: str = ""
+    report_key: str | None = Field(default=None, pattern=r'^card:-\d+:\d+$', max_length=180)
+    request_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
 
 
 class BrigadierTeaReport(BaseModel):
@@ -674,7 +680,7 @@ def _employee_dict(emp: Employee, workload: int = 0, readiness_status: str | Non
         "tg_id": emp.tg_id,
         "full_name": emp.full_name,
         "display_name": ((emp.full_name.split()[0] if emp.full_name else "") + (f" {emp.metro.strip()}" if emp.group_code == "brigadier" and (emp.metro or "").strip() else "") + (f" {emp.height_cm}" if emp.group_code == "brigadier" and emp.height_cm else "")).strip() or emp.full_name,
-        "phone": brigadier_phone8(emp.phone) if emp.group_code == "brigadier" else emp.phone,
+        "phone": brigadier_phone8(emp.phone),
         "telegram_username": emp.telegram_username or "",
         "telegram_url": (f"https://t.me/{(emp.telegram_username or '').lstrip('@')}" if emp.telegram_username else (f"tg://user?id={emp.tg_id}" if emp.tg_id else "")),
         "group_code": emp.group_code,
@@ -1518,12 +1524,7 @@ def _save_employee_profile(db, emp, name, metro, height, phone=None, telegram_us
         value = re.sub(r"[\s()\-]", "", phone)
         if value and not re.fullmatch(r"\+?[0-9]{7,15}", value):
             raise HTTPException(422, "Укажите корректный номер телефона")
-        if emp.group_code == "brigadier":
-            value = brigadier_phone8(value)
-        elif len(value) == 11 and value.startswith("8"):
-            value = "+7" + value[1:]
-        elif len(value) == 11 and value.startswith("7"):
-            value = "+" + value
+        value = brigadier_phone8(value)
         saved = db.get(EmployeePhoneOverride, emp.id)
         if saved is None:
             saved = EmployeePhoneOverride(employee_id=emp.id)
@@ -1793,15 +1794,77 @@ def manual_brigade_contact(employee_id: int, work_date: date, db: Session = Depe
         raise HTTPException(404, "Бригадир не найден")
     if not employee.tg_id:
         raise HTTPException(400, "У бригадира не указан Telegram ID")
-    if any(person.get("tg_id") == employee.tg_id for person in brigades_contact_data(db, work_date)):
-        return {"ok": True, "already_added": True}
-    db.add(ImportLog(
-        kind="brigade_contact", created_by_tg_id=user.id,
-        raw_text="Ручная отметка связи бригады",
-        result_json=json.dumps({"tg_id": employee.tg_id, "work_date": work_date.isoformat(), "source": "manual"}, ensure_ascii=False),
-    ))
+    cards = db.scalars(select(NumberCardEvent).where(NumberCardEvent.tg_id == employee.tg_id,
+        NumberCardEvent.work_date == work_date, _visible_number_card())).all()
+    if len(cards) != 1:
+        raise HTTPException(409, "Выберите конкретный заказ для отметки связи")
+    return manual_order_contact(cards[0].id, work_date, db, user)
+
+
+class OrderBrigadeContact(Base):
+    __tablename__ = "order_brigade_contacts"
+    event_id = Column(Integer, primary_key=True)
+    tg_id = Column(BigInteger, nullable=False)
+    confirmed = Column(Boolean, nullable=False, default=False)
+    updated_by_tg_id = Column(BigInteger, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+def _order_contact_states(db, work_date):
+    return {row.event_id: bool(row.confirmed) for row in db.scalars(
+        select(OrderBrigadeContact).join(NumberCardEvent,
+            NumberCardEvent.id == OrderBrigadeContact.event_id).where(
+            NumberCardEvent.work_date == work_date,
+            NumberCardEvent.tg_id == OrderBrigadeContact.tg_id,
+            NumberCardEvent.tg_id.notin_(HIDDEN_TG_IDS), _visible_number_card()))}
+
+
+def _set_order_contact(db, card, confirmed, actor):
+    row = db.get(OrderBrigadeContact, card.id)
+    if row is None:
+        row = OrderBrigadeContact(event_id=card.id)
+        db.add(row)
+    row.tg_id = card.tg_id
+    row.confirmed = confirmed
+    row.updated_by_tg_id = actor
+    row.updated_at = datetime.utcnow()
+    return row
+
+
+def _migrate_order_contact_marks(db):
+    # Preserve checks already shown by the old person/day rule, once, on the
+    # existing cards. A later card must never inherit another order's check-in.
+    kind = "order_contact_migration_v1"
+    if db.scalar(select(ImportLog.id).where(ImportLog.kind == kind).limit(1)):
+        return
+    grouped = defaultdict(list)
+    for card in db.scalars(select(NumberCardEvent).where(_visible_number_card())):
+        grouped[(card.work_date, card.tg_id)].append(card)
+    old = {day: brigade_contact_states(db, day) for day in {day for day, _ in grouped}}
+    for (day, uid), cards in grouped.items():
+        for card in cards:
+            if db.get(OrderBrigadeContact, card.id) is None:
+                _set_order_contact(db, card, bool(old[day].get(uid)), uid)
+    db.add(ImportLog(kind=kind, created_by_tg_id=0, raw_text="Связь переведена на отдельные заказы",
+                     result_json="{}"))
+
+
+@app.post("/api/readiness/order-contact/{event_id}")
+def manual_order_contact(event_id: int, work_date: date, db: Session = Depends(get_db),
+                         user: TelegramUser = Depends(require_admin)):
+    card = db.scalar(select(NumberCardEvent).where(NumberCardEvent.id == event_id,
+        NumberCardEvent.work_date == work_date, _visible_number_card()).with_for_update())
+    if not card or card.tg_id in HIDDEN_TG_IDS:
+        raise HTTPException(404, "Заказ не найден")
+    job = db.get(NumberReassignment, card.id)
+    if job and job.status == "pending":
+        raise HTTPException(409, "Дождитесь завершения замены бригадира")
+    _set_order_contact(db, card, True, user.id)
+    db.add(ImportLog(kind="order_contact_manual", created_by_tg_id=user.id,
+        raw_text="Ручная отметка связи по заказу",
+        result_json=json.dumps({"event_id":card.id,"work_date":work_date.isoformat()})))
     db.commit()
-    return {"ok": True}
+    return {"ok":True,"event_id":card.id,"on_contact":True}
 
 
 def brigade_contact_states(db: Session, work_date: date):
@@ -1821,49 +1884,46 @@ def brigade_contact_states(db: Session, work_date: date):
 
 
 class BrigadeContactDelete(BaseModel):
-    employee_ids: list[int]
+    event_ids: list[int] = Field(min_length=1, max_length=1000)
 
 
 @app.post("/api/readiness/brigade-contacts/delete")
 def delete_brigade_contacts(data: BrigadeContactDelete, work_date: date,
                            db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
     _require_owner(db, user)
-    if not data.employee_ids or len(data.employee_ids) > 1000:
-        raise HTTPException(400, "Выберите от 1 до 1000 отметок")
-    selected = set(data.employee_ids)
-    people = [p for p in brigades_contact_data(db, work_date) if p["id"] in selected]
-    for person in people:
-        db.add(ImportLog(kind="brigade_contact", created_by_tg_id=user.id,
+    cards = db.scalars(select(NumberCardEvent).where(NumberCardEvent.id.in_(set(data.event_ids)),
+        NumberCardEvent.work_date == work_date, _visible_number_card()).order_by(NumberCardEvent.id)
+        .with_for_update()).all()
+    if len(cards) != len(set(data.event_ids)):
+        raise HTTPException(409, "Список заказов изменился. Откройте его заново")
+    if any((job := db.get(NumberReassignment, c.id)) and job.status == "pending" for c in cards):
+        raise HTTPException(409, "Дождитесь завершения замены бригадира")
+    for card in cards:
+        _set_order_contact(db, card, False, user.id)
+        db.add(ImportLog(kind="order_contact_removed", created_by_tg_id=user.id,
             raw_text="Удаление отметки связи владельцем",
-            result_json=json.dumps({"tg_id": person["tg_id"], "work_date": work_date.isoformat(),
+            result_json=json.dumps({"event_id":card.id,"tg_id":card.tg_id,"work_date":work_date.isoformat(),
                                     "deleted": True}, ensure_ascii=False)))
-        orders = db.execute(select(Order).join(Assignment, Assignment.order_id == Order.id)
-            .join(Employee, Employee.id == Assignment.employee_id).where(
-                Employee.tg_id == person["tg_id"], Assignment.role == "brigadier",
-                Order.work_date == work_date)).scalars().all()
-        for order in orders:
-            order.brigade_on_contact_at = None
     db.commit()
-    remaining = brigades_contact_data(db, work_date)
-    return {"ok": True, "deleted": len(people),
-            "remaining": sum(p["contact_order_count"] for p in remaining)}
+    return {"ok":True,"deleted":len(cards),"remaining":sum(_order_contact_states(db, work_date).values())}
 
 
 def brigades_contact_data(db: Session, work_date: date):
-    ids = {tg_id for tg_id, active in brigade_contact_states(db, work_date).items()
-           if active and tg_id not in HIDDEN_TG_IDS}
+    states = _order_contact_states(db, work_date)
+    counts = defaultdict(int)
+    for card in db.scalars(select(NumberCardEvent).where(
+            NumberCardEvent.work_date == work_date, _visible_number_card())):
+        if states.get(card.id) and card.tg_id not in HIDDEN_TG_IDS:
+            counts[card.tg_id] += 1
+    ids = set(counts)
     if not ids:
         return []
     employees = db.execute(select(Employee).where(
         Employee.tg_id.in_(ids), Employee.active.is_(True), Employee.group_code == "brigadier",
         _visible_employee(),
     ).order_by(Employee.full_name)).scalars().all()
-    # Keep one person in the list; their check-in covers every visible daily card.
+    # The people list aggregates only independently confirmed orders.
     unique = {emp.tg_id: _employee_dict(emp) for emp in employees}
-    counts = dict(db.execute(select(NumberCardEvent.tg_id, func.count(NumberCardEvent.id))
-        .where(NumberCardEvent.work_date == work_date, _visible_number_card(),
-               NumberCardEvent.tg_id.in_(list(unique)))
-        .group_by(NumberCardEvent.tg_id)).all()) if unique else {}
     for tg_id, person in unique.items():
         person["contact_order_count"] = int(counts.get(tg_id, 0))
     return list(unique.values())
@@ -1901,7 +1961,7 @@ def readiness_summary_data(db: Session, work_date: date):
 
     manual_totals = apply_manual_readiness(db, work_date, groups, cutoff)
     on_contact = brigades_contact_data(db, work_date)
-    manual_totals["brigades_on_contact"] = sum(p["contact_order_count"] for p in on_contact)
+    manual_totals["brigades_on_contact"] = sum(_order_contact_states(db, work_date).values())
     manual_totals["brigades_expected"] = sum(
         x["expected"] for x in order_completion_data(db, work_date)["sources"].values())
 
@@ -2472,48 +2532,36 @@ def bot_brigadier_orders(tg_id: int, work_date: date, db: Session = Depends(get_
 def bot_brigade_contact(data: BrigadeContactReport, db: Session = Depends(get_db)):
     if data.tg_id in HIDDEN_TG_IDS:
         raise HTTPException(403, "Бригадир недоступен")
-    # A delayed bot retry must not restore an explicitly removed daily mark.
-    if brigade_contact_states(db, data.work_date).get(data.tg_id) is False:
-        return {"ok": True, "count": 0, "orders": [], "removed": True}
-    rows = db.execute(
-        select(Order)
-        .join(Assignment, Assignment.order_id == Order.id)
-        .join(Employee, Employee.id == Assignment.employee_id)
-        .where(
-            Employee.tg_id == data.tg_id,
-            Assignment.role == "brigadier",
-            Order.work_date == data.work_date,
-            ~Order.status.in_(["closed", "cancelled"]),
-        )
-        .order_by(Order.issue_time, Order.id)
-    ).scalars().all()
-    now = datetime.utcnow()
-    for o in rows:
-        o.brigade_on_contact_at = now
+    if not data.report_key or not data.request_id:
+        return {"ok":True,"count":0,"needs_selection":True}
+    _, chat, message = data.report_key.split(":")
+    card = db.scalar(select(NumberCardEvent).where(NumberCardEvent.chat_id == int(chat),
+        NumberCardEvent.message_id == int(message), NumberCardEvent.work_date == data.work_date,
+        NumberCardEvent.tg_id == data.tg_id, _visible_number_card()).with_for_update())
+    if not card:
+        return {"ok":True,"count":0,"discarded":True,"error":"Заказ удалён или передан другому бригадиру"}
+    job = db.get(NumberReassignment, card.id)
+    if job and job.status == "pending":
+        return {"ok":False,"error":"Выполняется замена бригадира"}
+    # A retry carries the same ID. Replaying it after a manual removal or
+    # reassignment must not bring the old check-in back.
+    receipt = db.scalar(select(ImportLog.id).where(
+        ImportLog.kind == "order_contact_confirm", ImportLog.raw_text == data.request_id).limit(1))
+    if receipt:
+        return {"ok":True,"event_id":card.id,"replayed":True,
+                "on_contact":bool(_order_contact_states(db, data.work_date).get(card.id))}
+    _set_order_contact(db, card, True, data.tg_id)
     db.add(ImportLog(
-        kind="brigade_contact",
+        kind="order_contact_confirm",
         created_by_tg_id=data.tg_id,
-        raw_text=data.raw_text or "",
+        raw_text=data.request_id,
         result_json=json.dumps({
-            "tg_id": data.tg_id,
-            "work_date": data.work_date.isoformat(),
-            "orders": [o.public_id for o in rows],
+            "event_id":card.id,"tg_id":data.tg_id,"work_date":data.work_date.isoformat(),
+            "report_key":data.report_key,"raw_text":data.raw_text,
         }, ensure_ascii=False),
     ))
     db.commit()
-    return {
-        "ok": True,
-        "count": len(rows),
-        "orders": [
-            {
-                "public_id": o.public_id,
-                "issue_time": o.issue_time.strftime("%H:%M"),
-                "deceased_name": o.deceased_name,
-                "source": o.source,
-            }
-            for o in rows
-        ],
-    }
+    return {"ok":True,"count":1,"event_id":card.id,"on_contact":True}
 
 
 @app.post("/api/bot/readiness", dependencies=[Depends(_bot_key)])
@@ -3431,14 +3479,13 @@ def acknowledge_number_reassignment(token:str, data:NumberReassignAck, db:Sessio
         day=date.fromisoformat(payload['work_date'])
         for j in jobs:
             r=db.get(NumberCardEvent,j.event_id)
+            contact=db.get(OrderBrigadeContact,r.id)
+            keep_contact=bool(payload['keep_contact'] and contact and contact.tg_id==r.tg_id and contact.confirmed)
             r.tg_id=payload['new_tg_id'];r.full_name=payload['label'];r.phone=payload['phone']
+            _set_order_contact(db,r,keep_contact,payload['requested_by'])
             photo=db.get(PhotoReportEvent,f'card:{r.chat_id}:{r.message_id}')
             if photo:photo.tg_id=payload['new_tg_id']
             j.status='done'
-        if payload['keep_contact'] and brigade_contact_states(db,day).get(payload['old_tg_id']):
-            db.add(ImportLog(kind='brigade_contact',created_by_tg_id=payload['requested_by'],
-                raw_text='Связь сохранена при замене бригадира',result_json=json.dumps({
-                    'tg_id':payload['new_tg_id'],'work_date':payload['work_date'],'source':'reassignment'})))
         db.add(ImportLog(kind='number_reassignment',created_by_tg_id=payload['requested_by'],
             raw_text='Замена бригадира',result_json=jobs[0].payload))
     db.commit()
@@ -3601,7 +3648,7 @@ def list_brigade_contact_orders(work_date:date, db:Session=Depends(get_db),
         user:TelegramUser=Depends(require_admin)):
     cards=db.scalars(select(NumberCardEvent).where(
         NumberCardEvent.work_date==work_date,_visible_number_card())).all()
-    states=brigade_contact_states(db,work_date)
+    states=_order_contact_states(db,work_date)
     employees={e.tg_id:e for e in db.scalars(select(Employee).where(
         Employee.tg_id.in_([c.tg_id for c in cards]),_visible_employee()))} if cards else {}
     items=[]
@@ -3611,7 +3658,7 @@ def list_brigade_contact_orders(work_date:date, db:Session=Depends(get_db),
         items.append({'id':card.id,'employee':_employee_dict(employees[card.tg_id]) if card.tg_id in employees else {'full_name':card.full_name},
             'source':card.source,'surname':card.surname,
             'contact_time':schedule.contact_time if schedule else None,
-            'on_contact':bool(states.get(card.tg_id))})
+            'on_contact':bool(states.get(card.id))})
     def sort_key(item):
         clock=item['contact_time']
         return (sum(int(v)*m for v,m in zip(clock.split(':'),(60,1))) if clock else 1440,item['id'])
@@ -3698,8 +3745,13 @@ def bot_order_completion(work_date: date, db: Session = Depends(get_db)):
     rows = db.scalars(select(NumberCardEvent).where(
         NumberCardEvent.work_date == work_date, _visible_number_card()
     ).order_by(NumberCardEvent.id)).all()
-    result['number_cards'] = [{'chat_id': row.chat_id, 'message_id': row.message_id,
-                               'tg_id': row.tg_id, 'source': row.source} for row in rows]
+    states = _order_contact_states(db,work_date)
+    result['per_order_contacts'] = True
+    result['number_cards'] = [{'chat_id':row.chat_id,'message_id':row.message_id,
+        'tg_id':row.tg_id,'source':row.source,'surname':row.surname,'full_name':row.full_name,
+        'phone':brigadier_phone8(row.phone),'work_date':work_date.isoformat(),
+        'sent_at':row.sent_at.isoformat(),
+        'on_contact':bool(states.get(row.id))} for row in rows]
     overrides = {o.event_id: o for o in db.scalars(select(OrderPhotoOverride).where(
         OrderPhotoOverride.event_id.in_([r.id for r in rows])))} if rows else {}
     result['photo_overrides'] = {
@@ -4128,7 +4180,7 @@ function openPhotoControl(source,day){
 
 def _contact_bulk_delete_ui(html):
     start = html.index('async function openContactBrigades(')
-    end = html.index('async function openAddBrigadeContact(', start)
+    end = html.index('function currentViewId()', start)
     return html[:start] + r'''
 async function openContactBrigades(workDay){
   const day=typeof workDay==='string'?workDay:state.selectedDate;
@@ -4141,25 +4193,44 @@ async function openContactBrigades(workDay){
    try{
     const [r,orders]=await Promise.all([api(`/api/readiness/summary?work_date=${day}`),api(`/api/brigade-contact-orders?work_date=${day}`)]);
     if(!active())return;
-    const people=r.brigades_on_contact||[];
+    const confirmed=orders.items.filter(x=>x.on_contact);
     body.className='';
     body.innerHTML=`<div class="attention"><div style="display:flex;align-items:center;justify-content:space-between;gap:8px"><h4>Связь по заказам: ${r.totals.brigades_on_contact}/${r.totals.brigades_expected}</h4><button class="secondary small" id="addBrigadeContact">＋ Добавить</button></div><p>За ${esc(day)}. Каждый заказ — отдельной строкой, по времени связи.</p></div><div class="list">${orders.items.map((x,i)=>`<div class="employee-row"><div class="name"><b>${i+1}. ${esc(employeeListName(x.employee))}</b><small>${x.source==='gbu'?'ГБУ':'Частный'} · ${esc(x.surname||'')}</small></div><div style="display:flex;gap:8px;align-items:center;flex-shrink:0"><b>${esc(x.contact_time||'—')}</b><span aria-label="${x.on_contact?'На связи':'Ожидается связь'}">${x.on_contact?'✅':'⬜'}</span></div></div>`).join('')||'<div class="empty">Заказы пока не добавлены</div>'}</div>`;
-    qs('#addBrigadeContact').onclick=()=>openAddBrigadeContact(day,people);
+    qs('#addBrigadeContact').onclick=()=>openAddBrigadeContact(day,orders.items);
     if(state.bootstrap?.is_owner){
       const button=deleteButton||document.createElement('button');
-      button.className='secondary danger small';button.textContent='Удалить';button.disabled=!people.length;
+      button.className='secondary danger small';button.textContent='Удалить';button.disabled=!confirmed.length;
       button.style.cssText='margin-left:auto;flex-shrink:0';
       if(!deleteButton){qs('#closeModal').before(button);deleteButton=button}
-      button.onclick=()=>openDeleteBrigadeContacts(day,people);
+      button.onclick=()=>openDeleteBrigadeContacts(day,confirmed);
     }
    }catch(e){if(active())body.textContent=e.message}
    if(active())setTimeout(refresh,5000);
   }
   await refresh();
 }
+function contactOrderLabel(x){
+  return `${employeeListName(x.employee)} · ${x.source==='gbu'?'ГБУ':'Частный'} · ${x.surname||'—'} · ${x.contact_time||'—'}`;
+}
+async function openAddBrigadeContact(day,items){
+  const pending=items.filter(x=>!x.on_contact);
+  showModal('Добавить связь по заказу',`<p class="muted">За ${esc(day)}. Каждый заказ отмечается отдельно.</p><div class="list">${pending.map(x=>`<div class="employee-row"><div class="name"><b>${esc(employeeListName(x.employee))}</b><small>${esc(x.source==='gbu'?'ГБУ':'Частный')} · ${esc(x.surname||'—')} · ${esc(x.contact_time||'—')}</small></div><button class="secondary" data-add-contact="${x.id}" aria-label="Отметить связь по заказу">＋</button></div>`).join('')||'<div class="empty">Все заказы на связи</div>'}</div><button class="secondary" id="contactBack" style="margin-top:12px">Назад</button>`);
+  qs('#contactBack').onclick=()=>openContactBrigades(day);
+  qsa('[data-add-contact]',qs('#modal')).forEach(button=>button.onclick=async()=>{
+    if(button.disabled)return;
+    button.disabled=true;
+    try{
+      await api(`/api/readiness/order-contact/${button.dataset.addContact}?work_date=${day}`,{method:'POST'});
+      items.find(x=>x.id===Number(button.dataset.addContact)).on_contact=true;
+      button.textContent='✅';button.setAttribute('aria-label','Связь по заказу подтверждена');
+      if(state.selectedDate===day){const counter=qs('#brigadesContactCount b');if(counter)counter.textContent=items.filter(x=>x.on_contact).length+'/'+String(state.bootstrap.summary.orders_total||0)}
+      toast('Связь по выбранному заказу отмечена');
+    }catch(e){button.disabled=false;toast(e.message,4000)}
+  });
+}
 function openDeleteBrigadeContacts(day,people){
   const selected=new Set();
-  showModal('Удалить отметки связи',`<p class="muted">За ${esc(day)}. Выберите бригады.</p><label style="display:flex;gap:12px;padding:12px"><input type="checkbox" id="contactSelectAll"> Выбрать все</label><div class="list">${people.map((p,i)=>`<label class="employee-row" style="cursor:pointer;justify-content:flex-start;gap:12px"><input type="checkbox" data-contact-select="${p.id}" style="width:22px;height:22px;flex-shrink:0"><b>${i+1}. ${esc(employeeListName(p))}</b></label>`).join('')}</div><div style="position:sticky;bottom:0;background:var(--card,#17171c);padding:12px 0;display:flex;gap:8px"><button class="secondary" id="cancelContactDelete">Отмена</button><button class="primary" id="submitContactDelete" disabled>Удалить выбранные (0)</button></div>`);
+  showModal('Удалить отметки связи',`<p class="muted">За ${esc(day)}. Выберите заказы.</p><label style="display:flex;gap:12px;padding:12px"><input type="checkbox" id="contactSelectAll"> Выбрать все</label><div class="list">${people.map((p,i)=>`<label class="employee-row" style="cursor:pointer;justify-content:flex-start;gap:12px"><input type="checkbox" data-contact-select="${p.id}" style="width:22px;height:22px;flex-shrink:0"><b>${i+1}. ${esc(contactOrderLabel(p))}</b></label>`).join('')}</div><div style="position:sticky;bottom:0;background:var(--card,#17171c);padding:12px 0;display:flex;gap:8px"><button class="secondary" id="cancelContactDelete">Отмена</button><button class="primary" id="submitContactDelete" disabled>Удалить выбранные (0)</button></div>`);
   const submit=qs('#submitContactDelete'),all=qs('#contactSelectAll');
   const checks=qsa('[data-contact-select]',qs('#modal'));
   const update=()=>{submit.disabled=!selected.size;submit.textContent=`Удалить выбранные (${selected.size})`;all.checked=selected.size===people.length;all.indeterminate=selected.size>0&&selected.size<people.length};
@@ -4170,7 +4241,7 @@ function openDeleteBrigadeContacts(day,people){
     if(submit.disabled)return;
     submit.disabled=true;all.disabled=true;checks.forEach(c=>c.disabled=true);
     try{
-      const result=await api(`/api/readiness/brigade-contacts/delete?work_date=${day}`,{method:'POST',body:JSON.stringify({employee_ids:[...selected]})});
+      const result=await api(`/api/readiness/brigade-contacts/delete?work_date=${day}`,{method:'POST',body:JSON.stringify({event_ids:[...selected]})});
       if(state.selectedDate===day){const counter=qs('#brigadesContactCount b');if(counter)counter.textContent=String(result.remaining)+'/'+String(state.bootstrap.summary.orders_total||0)}
       toast(`Удалено отметок: ${result.deleted}`);
       await openContactBrigades(day);
@@ -4254,7 +4325,7 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
 
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     '''${state.bootstrap?.is_owner?`<button type="button" class="secondary danger" data-number-delete="${x.id}" aria-label="Удалить запись" style="min-width:44px;min-height:44px">🗑</button>`:''}''',
-    '''<div style="display:flex;flex-direction:column;gap:8px;flex-shrink:0"><button type="button" class="secondary" data-number-reassign="${x.id}" aria-label="Заменить бригадира" title="Заменить бригадира" style="width:44px;height:44px;padding:6px;font-size:22px">🔄</button>${state.bootstrap?.is_owner?`<button type="button" class="secondary danger" data-number-delete="${x.id}" aria-label="Удалить запись" style="width:44px;height:44px;padding:6px;font-size:22px">🗑</button>`:''}</div>''',1,
+    '''<div style="display:flex;flex-direction:column;align-items:center;gap:10px;flex-shrink:0"><button type="button" class="secondary" data-number-reassign="${x.id}" aria-label="Заменить бригадира" title="Заменить бригадира" style="width:52px;height:52px;padding:6px;font-size:28px">🔄</button>${state.bootstrap?.is_owner?`<button type="button" class="secondary danger" data-number-delete="${x.id}" aria-label="Удалить запись" style="width:36px;height:36px;padding:4px;font-size:18px;border-radius:10px">🗑</button>`:''}</div>''',1,
 ).replace(
     "   qsa('[data-number-delete]',body).forEach",
     "   qsa('[data-number-reassign]',body).forEach(b=>b.onclick=()=>openNumberReassignment(r.items,Number(b.dataset.numberReassign),day));\n   qsa('[data-number-delete]',body).forEach",1,
