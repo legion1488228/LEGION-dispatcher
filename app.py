@@ -309,9 +309,9 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_cash_start] + _cash_html + INLINE_INDEX_
 
 # Each modal opening owns its refresh timer and outstanding requests.
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('function showModal(title, body) {',
-    'let cashModalGeneration=0;\nfunction showModal(title, body) {cashModalGeneration++;if(cashRefreshTimer){clearInterval(cashRefreshTimer);cashRefreshTimer=null}', 1)
+    'let cashModalGeneration=0;\nfunction showModal(title, body) {rememberCashTablePosition();cashModalGeneration++;if(cashRefreshTimer){clearInterval(cashRefreshTimer);cashRefreshTimer=null}', 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('function closeModal(){',
-    'function closeModal(){cashModalGeneration++;', 1)
+    'function closeModal(){rememberCashTablePosition();cashModalGeneration++;', 1)
 _cash_start = INLINE_INDEX_HTML.index('async function openCashTable(){')
 _cash_end = INLINE_INDEX_HTML.index('// Events', _cash_start)
 _cash_html = INLINE_INDEX_HTML[_cash_start:_cash_end]
@@ -325,6 +325,43 @@ _cash_html = _cash_html.replace("    cashMonth=value;qs('#cashMonth').value=valu
 _cash_html = _cash_html.replace("  qs('#cashMonth').onchange=event=>selectMonth(event.target.value);", "  qs('#cashMonth').oninput=event=>selectMonth(event.target.value);\n  qs('#cashMonth').onchange=event=>{if(event.target.value!==cashMonth) selectMonth(event.target.value)};", 1)
 _cash_html = _cash_html.replace("    cashRange=btn.dataset.cashRange;", "    if(!cashActive()) return;\n    cashBody.innerHTML='<div class=empty>Загрузка выбранного периода…</div>';\n    cashRange=btn.dataset.cashRange;", 1)
 _cash_html = _cash_html.replace("  cashRefreshTimer=setInterval(()=>{\n    if(qs('#cashTableBody')) drawCash();\n  },10000);", "  if(cashActive()){\n    if(cashRefreshTimer) clearInterval(cashRefreshTimer);\n    cashRefreshTimer=setInterval(()=>{if(cashActive()) drawCash()},10000);\n  }", 1)
+_cash_html = _cash_html.replace('async function openCashTable(){', r'''let cashTableReturnState=null;
+function rememberCashTablePosition(){
+  const body=qs('#cashTableBody'),modal=qs('#modal'),table=qs('#cashMatrixScroller');
+  if(!body||!table||!modal||modal.classList.contains('hidden'))return;
+  cashTableReturnState={month:body.dataset.cashMonth,range:body.dataset.cashRange,
+    modalScroll:modal.scrollTop,tableScroll:table.scrollLeft,tableTop:table.scrollTop};
+}
+async function openCashTable(){
+  const resume=cashTableReturnState;
+  let pendingRestore=resume;
+''', 1)
+_cash_html = _cash_html.replace("let cashMonth=new Date().toLocaleDateString('sv-SE',{timeZone:'Europe/Moscow'}).slice(0,7);",
+    "let cashMonth=resume?.month||new Date().toLocaleDateString('sv-SE',{timeZone:'Europe/Moscow'}).slice(0,7);", 1)
+_cash_html = _cash_html.replace("let cashRange='month', cashRequest=0;", "let cashRange=resume?.range||'month', cashRequest=0;", 1)
+_cash_html = _cash_html.replace('    const requestedMonth=cashMonth, requestedRange=cashRange;',
+    "    const requestedMonth=cashMonth, requestedRange=cashRange;\n    body.dataset.cashMonth=cashMonth;body.dataset.cashRange=cashRange;", 1)
+_cash_html = _cash_html.replace('''    // Запоминаем положение окна и горизонтальную прокрутку таблицы.
+    // Автообновление больше не возвращает владельца в начало.
+    const modal=qs('#modal');
+    const savedModalScroll=modal ? modal.scrollTop : 0;
+    const oldScroller=qs('#cashMatrixScroller');
+    const savedTableScroll=oldScroller ? oldScroller.scrollLeft : 0;
+''', '', 1)
+_cash_html = _cash_html.replace('''      body.innerHTML=`
+        <div class="summary-grid compact">''', '''      const modal=qs('#modal'),oldScroller=qs('#cashMatrixScroller');
+      const savedModalScroll=pendingRestore?.modalScroll??modal.scrollTop;
+      const savedTableScroll=pendingRestore?.tableScroll??oldScroller?.scrollLeft??0;
+      const savedTableTop=pendingRestore?.tableTop??oldScroller?.scrollTop??0;
+      pendingRestore=null;
+      body.innerHTML=`
+        <div class="summary-grid compact">''', 1)
+_cash_html = _cash_html.replace('if(currentScroller) currentScroller.scrollLeft=savedTableScroll;',
+    'if(currentScroller){currentScroller.scrollLeft=savedTableScroll;currentScroller.scrollTop=savedTableTop}\n        rememberCashTablePosition();', 1)
+_cash_html = _cash_html.replace('    cashMonth=value;', '    pendingRestore=null;cashMonth=value;', 1)
+_cash_html = _cash_html.replace('    cashRange=btn.dataset.cashRange;', '    pendingRestore=null;cashRange=btn.dataset.cashRange;', 1)
+_cash_html = _cash_html.replace('  await drawCash();\n  if(cashActive()){',
+    "  qsa('[data-cash-range]').forEach(btn=>btn.className=btn.dataset.cashRange===cashRange?'primary':'secondary');\n  await drawCash();\n  if(cashActive()){", 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_cash_start] + _cash_html + INLINE_INDEX_HTML[_cash_end:]
 
 
@@ -332,22 +369,88 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_cash_start] + _cash_html + INLINE_INDEX_
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('${dayNumber(day.work_date)}</td>',
     '<button type="button" class="secondary" style="padding:6px;min-width:32px" onclick="openCashDayCheck(\'${day.work_date}\')" aria-label="Проверить кассу за ${day.work_date}">${dayNumber(day.work_date)}</button></td>', 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
+<style>
+.cash-day-edit-row{padding:14px 0;border-bottom:1px solid var(--line)}
+.cash-day-edit-row b{display:block;font-size:13px;overflow-wrap:anywhere}
+.cash-day-edit-row small{display:block;margin-top:5px;color:var(--muted);font-size:11px}
+.cash-day-edit-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px}
+.cash-day-edit-controls input{width:74px;padding:8px;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:10px;font-size:16px;text-align:center}
+.cash-day-edit-controls button{padding:8px;font-size:11px}
+</style>
 <script>
 async function openCashDayCheck(day){
-  showModal('Касса · '+fmtDate(day), '<button class="secondary" onclick="openCashTable()">← К таблице</button><div id="cashDayCheckBody" class="empty">Загрузка…</div>');
+  rememberCashTablePosition();
+  showModal('Касса · '+fmtDate(day), '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"><button class="secondary" onclick="openCashTable()">← К таблице</button><button class="secondary" id="cashDayEdit">✏️ Редактировать</button></div><div id="cashDayCheckBody" class="empty">Загрузка…</div>');
   const body=qs('#cashDayCheckBody');
   const active=()=>qs('#cashDayCheckBody')===body&&!qs('#modal').classList.contains('hidden');
+  qs('#cashDayEdit').onclick=()=>openCashDayEditor(day);
   async function refresh(){
     if(!active())return;
     try{
       const r=await api(`/api/cash/day-check?work_date=${encodeURIComponent(day)}`);
       if(!active())return;
+      const scroll=qs('#modal').scrollTop;
       body.className='';
-      body.innerHTML=`<div class="attention"><h4>Касса выставлена ${r.submitted}/${r.expected}</h4><p>Частные заказы кассовых бригадиров. На каждый заказ нужна отдельная запись.</p></div>${r.items.map((x,i)=>`<div class="employee-row"><div class="name"><b>${i+1}. ${esc(x.name)}</b><small>Записей в кассе: ${x.submitted}/${x.expected} <span style="font-size:11px;margin-left:6px;color:var(--muted)">${(x.amounts||[]).map(amount=>esc(String(amount))).join('; ')}</span></small></div><span aria-label="${x.complete?'Касса выставлена':'Ожидаем кассу'}" style="font-size:22px">${x.complete?'✅':'⬜'}</span></div>`).join('')||'<div class="empty">На этот день частных заказов у кассовых бригадиров нет</div>'}`;
+      body.innerHTML=`<div class="attention"><h4>Касса выставлена ${r.submitted}/${r.expected}</h4><p>Частные заказы кассовых бригадиров. На каждый заказ нужна отдельная запись.</p>${r.manual_count?'<p>Есть ручные изменения за этот день. Их можно изменить или отменить через «Редактировать».</p>':''}</div>${r.items.map((x,i)=>`<div class="employee-row"><div class="name"><b>${i+1}. ${esc(x.name)}</b><small>Записей в кассе: ${x.submitted}/${x.expected} <span style="font-size:11px;margin-left:6px;color:var(--muted)">${(x.amounts||[]).map(amount=>esc(String(amount))).join('; ')}</span>${x.manual_expected!==null?' · вручную':''}</small></div><span aria-label="${x.complete?'Касса выставлена':'Ожидаем кассу'}" style="font-size:22px">${x.complete?'✅':'⬜'}</span></div>`).join('')||'<div class="empty">На этот день кассу не ожидаем</div>'}`;
+      qs('#modal').scrollTop=scroll;
     }catch(e){if(active())body.textContent=e.message}
     if(active())setTimeout(refresh,5000);
   }
   await refresh();
+}
+
+async function openCashDayEditor(day){
+  showModal('Редактировать кассу · '+fmtDate(day), '<button class="secondary" id="cashDayEditBack">← К списку дня</button><p class="muted">Укажите, сколько записей кассы ожидаем. 0 — касса не требуется. «Авто» — считать по частным заказам. Изменения действуют только на этот день. Сданные суммы сохраняются.</p><div id="cashDayEditBody" class="empty">Загрузка…</div>');
+  const body=qs('#cashDayEditBody'),back=qs('#cashDayEditBack');
+  const active=()=>qs('#cashDayEditBody')===body&&!qs('#modal').classList.contains('hidden');
+  let data=null,busy=false,drafts=new Map(),included=new Set();
+  back.onclick=()=>{if(!busy)openCashDayCheck(day)};
+  const changed=()=>data&&data.brigadiers.some(x=>drafts.get(x.tg_id)!==x.manual_expected);
+  function lock(value){busy=value;back.disabled=value;qsa('button,input,select',body).forEach(x=>x.disabled=value)}
+  function render(){
+    const shown=data.brigadiers.filter(x=>included.has(x.tg_id)),available=data.brigadiers.filter(x=>!included.has(x.tg_id));
+    body.className='';
+    body.innerHTML=`<form id="cashDayEditForm">${shown.map(x=>{const manual=drafts.get(x.tg_id),count=manual===null?x.automatic_expected:manual;return `<div class="cash-day-edit-row"><b>${esc(x.name)}</b><small>По заказам: ${x.automatic_expected} · Сдано: ${x.submitted}${x.amounts.length?' · '+x.amounts.map(a=>esc(String(a))).join('; '):''}</small><div class="cash-day-edit-controls"><label>Ждём <input type="number" min="0" max="1000" step="1" inputmode="numeric" required value="${esc(String(count))}" data-cash-expected="${x.tg_id}" aria-label="Сколько записей кассы ожидаем: ${esc(x.name)}"></label><button type="button" class="secondary" data-cash-exclude="${x.tg_id}">Не ждать</button><button type="button" class="secondary" data-cash-auto="${x.tg_id}">Авто</button><small data-cash-mode="${x.tg_id}">${manual===null?'По заказам':'Вручную'}</small></div></div>`}).join('')||'<div class="empty">Бригадиров в списке пока нет</div>'}${available.length?`<label style="display:block;margin-top:16px">Добавить бригадира<select id="cashDayAdd" style="display:block;width:100%;margin-top:8px;padding:10px;font-size:16px;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:10px"><option value="">Выберите бригадира</option>${available.map(x=>`<option value="${x.tg_id}">${esc(x.name)}</option>`).join('')}</select></label>`:''}<p id="cashDayEditError" role="status" style="color:var(--red)"></p><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px"><button type="submit" class="primary">Сохранить</button><button type="button" class="secondary" id="cashDayEditCancel">Отмена</button><button type="button" class="secondary" id="cashDayEditReload">Обновить</button></div></form>`;
+    qsa('[data-cash-expected]',body).forEach(input=>input.oninput=()=>{
+      const id=Number(input.dataset.cashExpected);drafts.set(id,input.value);
+      qs(`[data-cash-mode="${id}"]`,body).textContent='Вручную';
+    });
+    qsa('[data-cash-exclude]',body).forEach(button=>button.onclick=()=>{drafts.set(Number(button.dataset.cashExclude),0);render()});
+    qsa('[data-cash-auto]',body).forEach(button=>button.onclick=()=>{drafts.set(Number(button.dataset.cashAuto),null);render()});
+    const add=qs('#cashDayAdd');
+    if(add)add.onchange=()=>{const id=Number(add.value);if(!id)return;included.add(id);drafts.set(id,1);render()};
+    qs('#cashDayEditCancel').onclick=()=>openCashDayCheck(day);
+    qs('#cashDayEditReload').onclick=()=>{if(!changed()||confirm('Обновить список? Несохранённые изменения будут отменены.'))load()};
+    qs('#cashDayEditForm').onsubmit=save;
+  }
+  async function load(){
+    if(busy)return;lock(true);
+    try{
+      const result=await api(`/api/cash/day-check?work_date=${encodeURIComponent(day)}`);if(!active())return;
+      data=result;drafts=new Map(data.brigadiers.map(x=>[x.tg_id,x.manual_expected]));
+      included=new Set(data.brigadiers.filter(x=>x.automatic_expected>0||x.manual_expected!==null).map(x=>x.tg_id));
+      render();
+    }catch(e){if(active()){const error=qs('#cashDayEditError');if(error)error.textContent=e.message;else body.textContent=e.message}}
+    finally{if(active())lock(false)}
+  }
+  async function save(event){
+    event.preventDefault();if(busy||!data)return;
+    const error=qs('#cashDayEditError');error.textContent='';
+    const changes=[];
+    for(const x of data.brigadiers){
+      const raw=drafts.get(x.tg_id),expected=raw===null?null:Number(raw);
+      if(raw!==null&&(String(raw).trim()===''||!Number.isInteger(expected)||expected<0||expected>1000)){error.textContent='Укажите целое количество от 0 до 1000';return}
+      if(expected!==x.manual_expected)changes.push({tg_id:x.tg_id,expected});
+    }
+    if(!changes.length){openCashDayCheck(day);return}
+    lock(true);
+    try{
+      await api(`/api/cash/day-check/${encodeURIComponent(day)}`,{method:'PUT',body:JSON.stringify({version:data.version,changes})});
+      if(!active())return;toast('Список кассы сохранён');await openCashDayCheck(day);
+    }catch(e){if(active())error.textContent=e.message}
+    finally{if(active())lock(false)}
+  }
+  await load();
 }
 </script>
 </body>''',1)
@@ -534,6 +637,25 @@ class CashEntrySubmission(Base):
     request_id = Column(String(64), primary_key=True)
     entry_id = Column(Integer, nullable=False)
     payload_hash = Column(String(64), nullable=False)
+
+
+class CashDayCheckPlan(Base):
+    __tablename__ = 'cash_day_check_plans'
+    work_date = Column(Date, primary_key=True)
+    overrides_json = Column(String, nullable=False, default='{}')
+    version = Column(Integer, nullable=False, default=1)
+    updated_by_tg_id = Column(BigInteger, nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class CashDayExpectedChange(BaseModel):
+    tg_id: int = Field(gt=0, strict=True)
+    expected: int | None = Field(ge=0, le=1000, strict=True)
+
+
+class CashDayCheckChange(BaseModel):
+    version: int = Field(ge=0, strict=True)
+    changes: list[CashDayExpectedChange] = Field(min_length=1, max_length=200)
 
 
 class CashEntryPatch(BaseModel):
@@ -2335,9 +2457,9 @@ def owner_cash_day(work_date: date, db: Session = Depends(get_db), user: Telegra
     return {"work_date": work_date.isoformat(), "rows": [_cash_row_dict(x, db) for x in rows], "day": {"commission_rub": sum(x.commission_rub or 0 for x in rows), "kickback_rub": sum(x.kickback_rub or 0 for x in rows), "cash_rub": sum(x.commission_rub or 0 for x in rows), "total_rub": sum(x.commission_rub or 0 for x in rows)}, "period": {"start": start.isoformat(), "end": end.isoformat(), "commission_rub": sum(x.commission_rub or 0 for x in period_rows), "kickback_rub": sum(x.kickback_rub or 0 for x in period_rows), "cash_rub": sum(x.commission_rub or 0 for x in period_rows), "total_rub": sum(x.commission_rub or 0 for x in period_rows), "entries": len(period_rows)}}
 
 
-@app.get("/api/cash/day-check")
-def owner_cash_day_check(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
-    _require_owner(db, user)
+def _cash_day_check_data(db: Session, work_date: date) -> dict:
+    plan = db.get(CashDayCheckPlan, work_date)
+    overrides = json.loads(plan.overrides_json) if plan else {}
     cashiers = db.scalars(select(Employee).where(
         Employee.group_code == 'brigadier', Employee.is_cashier.is_(True),
         _visible_employee())).all()
@@ -2353,16 +2475,67 @@ def owner_cash_day_check(work_date: date, db: Session = Depends(get_db), user: T
     for entry in db.scalars(select(CashEntry).where(CashEntry.work_date == work_date).order_by(CashEntry.id)):
         submitted[int(entry.brigadier_tg_id)] += 1
         amounts[int(entry.brigadier_tg_id)].append(int(entry.commission_rub or 0))
-    items = []
-    for tg_id, count in expected.items():
+    brigadiers = []
+    for tg_id, employee in cashiers.items():
+        manual = overrides.get(str(tg_id))
+        count = manual if manual is not None else expected[tg_id]
         received = submitted[tg_id]
-        items.append({'tg_id': tg_id, 'name': _cash_brigadier_label(db, tg_id, cashiers[tg_id].full_name),
-                      'expected': count, 'submitted': received, 'amounts': amounts[tg_id],
-                      'complete': received >= count})
-    items.sort(key=lambda x: (x['name'].casefold(), x['tg_id']))
+        brigadiers.append({'tg_id': tg_id, 'name': _cash_brigadier_label(db, tg_id, employee.full_name),
+                           'expected': count, 'automatic_expected': expected[tg_id],
+                           'manual_expected': manual, 'submitted': received, 'amounts': amounts[tg_id],
+                           'complete': count > 0 and received >= count})
+    brigadiers.sort(key=lambda x: (x['name'].casefold(), x['tg_id']))
+    items = [x for x in brigadiers if x['expected'] > 0]
     return {'work_date': work_date.isoformat(), 'items': items,
+            'brigadiers': brigadiers, 'version': plan.version if plan else 0,
+            'manual_count': sum(x['manual_expected'] is not None for x in brigadiers),
             'expected': sum(x['expected'] for x in items),
             'submitted': sum(min(x['submitted'], x['expected']) for x in items)}
+
+
+@app.get("/api/cash/day-check")
+def owner_cash_day_check(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    _require_owner(db, user)
+    return _cash_day_check_data(db, work_date)
+
+
+@app.put("/api/cash/day-check/{work_date}")
+def owner_save_cash_day_check(work_date: date, change: CashDayCheckChange,
+                             db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    _require_owner(db, user)
+    data = _cash_day_check_data(db, work_date)
+    conflict = 'Список кассы уже изменён. Обновите его перед сохранением.'
+    if data['version'] != change.version:
+        raise HTTPException(409, conflict)
+    tg_ids = [x.tg_id for x in change.changes]
+    if len(set(tg_ids)) != len(tg_ids):
+        raise HTTPException(422, 'Каждый бригадир должен быть указан один раз')
+    allowed = {x['tg_id'] for x in data['brigadiers']}
+    if not set(tg_ids).issubset(allowed):
+        raise HTTPException(422, 'Выберите кассового бригадира из списка')
+    plan = db.get(CashDayCheckPlan, work_date)
+    overrides = json.loads(plan.overrides_json) if plan else {}
+    for item in change.changes:
+        if item.expected is None:
+            overrides.pop(str(item.tg_id), None)
+        else:
+            overrides[str(item.tg_id)] = item.expected
+    values = {'overrides_json': json.dumps(overrides, sort_keys=True), 'version': change.version + 1,
+              'updated_by_tg_id': user.id, 'updated_at': datetime.now(timezone.utc)}
+    try:
+        if change.version == 0:
+            db.add(CashDayCheckPlan(work_date=work_date, **values))
+        else:
+            result = db.execute(update(CashDayCheckPlan).where(
+                CashDayCheckPlan.work_date == work_date, CashDayCheckPlan.version == change.version).values(**values))
+            if result.rowcount != 1:
+                db.rollback()
+                raise HTTPException(409, conflict)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, conflict)
+    return _cash_day_check_data(db, work_date)
 
 
 @app.get("/api/cash/ledger")
