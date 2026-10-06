@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, StrictInt
-from sqlalchemy import and_, func, or_, select, inspect as sa_inspect, text
+from sqlalchemy import and_, func, or_, select, update, inspect as sa_inspect, text
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import Column, Integer, BigInteger, String, Date, DateTime, Boolean, UniqueConstraint
 from sqlalchemy.exc import IntegrityError
@@ -881,6 +881,61 @@ def _upsert_employee(db: Session, data: EmployeeSync) -> Employee:
 
 # ---------- Auth / bootstrap ----------
 
+class DispatchDayComment(Base):
+    __tablename__ = "dispatch_day_comments"
+    work_date = Column(Date, primary_key=True)
+    text = Column(String(500), nullable=False, default="")
+    version = Column(Integer, nullable=False, default=1)
+    updated_by_tg_id = Column(BigInteger, nullable=False)
+    updated_by_name = Column(String(200), nullable=False, default="")
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class DayCommentChange(BaseModel):
+    text: str = Field(max_length=500)
+    version: int = Field(ge=0, strict=True)
+
+
+def day_comment_data(db: Session, work_date: date):
+    row = db.get(DispatchDayComment, work_date)
+    updated = row.updated_at if row else None
+    if updated and updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    return {"work_date": work_date.isoformat(), "text": row.text if row else "",
+            "version": row.version if row else 0,
+            "updated_by": row.updated_by_name if row else "",
+            "updated_at": updated.isoformat() if updated else None}
+
+
+@app.get("/api/day-comments/{work_date}")
+def get_day_comment(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    return day_comment_data(db, work_date)
+
+
+@app.put("/api/day-comments/{work_date}")
+def save_day_comment(work_date: date, change: DayCommentChange,
+                     db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    values = {"text": change.text.strip(), "version": change.version + 1,
+              "updated_by_tg_id": user.id, "updated_by_name": user.full_name[:200],
+              "updated_at": datetime.now(timezone.utc)}
+    conflict = "Комментарий уже изменён. Обновите его перед сохранением. Ваш текст остался в поле."
+    try:
+        if change.version == 0:
+            db.add(DispatchDayComment(work_date=work_date, **values))
+        else:
+            result = db.execute(update(DispatchDayComment).where(
+                DispatchDayComment.work_date == work_date,
+                DispatchDayComment.version == change.version).values(**values))
+            if result.rowcount != 1:
+                db.rollback()
+                raise HTTPException(409, conflict)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, conflict)
+    return day_comment_data(db, work_date)
+
+
 @app.get("/api/me")
 def api_me(user: TelegramUser = Depends(require_admin)):
     return {"id": user.id, "name": user.full_name, "username": user.username}
@@ -898,6 +953,7 @@ def bootstrap(work_date: date | None = None, db: Session = Depends(get_db), user
         "today": datetime.now(MOSCOW).date().isoformat(),
         "dates": dates,
         "summary": summary,
+        "day_comment": day_comment_data(db, selected),
         "groups": GROUP_LABELS,
     }
 
@@ -3713,17 +3769,32 @@ def _visible_number_card():
     return ~select(NumberCardDeletion.event_id).where(NumberCardDeletion.event_id == NumberCardEvent.id).exists()
 
 
+def number_card_statuses(db: Session, cards):
+    if not cards:
+        return {}
+    closed_ids = set(db.scalars(select(NumberCardClosure.event_id).where(
+        NumberCardClosure.event_id.in_([card.id for card in cards]))))
+    keys = [f'card:{card.chat_id}:{card.message_id}' for card in cards]
+    schedules = {row.report_key: row.contact_time for row in db.scalars(
+        select(OrderContactSchedule).where(OrderContactSchedule.report_key.in_(keys)))}
+    result = {}
+    for card, key in zip(cards, keys):
+        clock = schedules.get(key) or None
+        # The bot stores this time only after the complete evening report is
+        # accepted. Its publication can still be waiting for the other numbers.
+        result[card.id] = {'closed': card.id in closed_ids or bool(clock), 'contact_time': clock}
+    return result
+
+
 def order_completion_data(db: Session, work_date: date):
     counts = {source: {'cards': 0, 'closed': 0} for source in ORDER_COUNT_TYPES}
-    rows = db.execute(
-        select(NumberCardEvent.source, func.count(NumberCardEvent.id), func.count(NumberCardClosure.event_id))
-        .outerjoin(NumberCardClosure, NumberCardClosure.event_id == NumberCardEvent.id)
-        .where(NumberCardEvent.work_date == work_date, _visible_number_card())
-        .group_by(NumberCardEvent.source)
-    ).all()
-    for source, cards, closed in rows:
-        if source in counts:
-            counts[source] = {'cards': cards, 'closed': closed}
+    rows = db.scalars(select(NumberCardEvent).where(
+        NumberCardEvent.work_date == work_date, _visible_number_card())).all()
+    statuses = number_card_statuses(db, rows)
+    for card in rows:
+        if card.source in counts:
+            counts[card.source]['cards'] += 1
+            counts[card.source]['closed'] += int(statuses[card.id]['closed'])
     for source, item in counts.items():
         expected = int(_category_counts(db, work_date, source)['total'])
         item.update(expected=expected,
@@ -3873,8 +3944,8 @@ def delete_brigadier_number(data: BrigadierNumberDelete, db: Session=Depends(get
 def list_number_cards(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
     rows = db.scalars(select(NumberCardEvent).where(NumberCardEvent.work_date == work_date, _visible_number_card()).order_by(NumberCardEvent.sent_at, NumberCardEvent.id)).all()
     employees = {e.tg_id: e for e in db.scalars(select(Employee).where(Employee.tg_id.in_([r.tg_id for r in rows])))} if rows else {}
-    closed_ids = set(db.scalars(select(NumberCardClosure.event_id).where(NumberCardClosure.event_id.in_([r.id for r in rows])))) if rows else set()
-    return {"count": len(rows), "progress": order_completion_data(db, work_date), "items": [{"id": r.id, "closed": r.id in closed_ids, "employee": _employee_dict(employees[r.tg_id]) if r.tg_id in employees else {"full_name": r.full_name, "display_name": r.full_name},
+    statuses = number_card_statuses(db, rows)
+    return {"count": len(rows), "progress": order_completion_data(db, work_date), "items": [{"id": r.id, **statuses[r.id], "employee": _employee_dict(employees[r.tg_id]) if r.tg_id in employees else {"full_name": r.full_name, "display_name": r.full_name},
         "tg_id": r.tg_id, "phone": brigadier_phone8(r.phone), "source": r.source, "surname": r.surname,
         "sent_at": (r.sent_at.replace(tzinfo=timezone.utc) if r.sent_at.tzinfo is None else r.sent_at).isoformat()} for r in rows]}
 
@@ -4001,28 +4072,49 @@ async function openOrderCountPeriod(){
 
 _number_list_start = INLINE_INDEX_HTML.index('async function openNumberCards(){')
 _number_list_end = INLINE_INDEX_HTML.index('\n}', _number_list_start) + 2
-INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_number_list_start] + r'''async function openNumberCards(){
+INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_number_list_start] + r'''function numberCardDetailsHtml(x){
+ const sent=new Date(x.sent_at).toLocaleTimeString('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'});
+ return `<small class="number-card-line">${x.source==='gbu'?'ГБУ':'Частный'} · ${esc(x.surname)} · ${esc(sent)}</small>
+   <small class="number-card-line">📞 ${esc(x.phone)}</small>
+   <small class="number-card-line number-card-status">${x.closed?'✅ Заказ закрыт':'Ожидается закрытие'}</small>
+   ${x.closed?`<small class="number-card-line">${x.contact_time?`Связь бригады в ${esc(x.contact_time)}`:'Время связи не указано'}</small>`:''}`;
+}
+async function openNumberCards(){
  const day=state.selectedDate;
  showModal('📱 Номера в группе','<div id="numberCardsBody" class="empty">Загрузка…</div>');
  const body=qs('#numberCardsBody');
+ const active=()=>qs('#numberCardsBody')===body&&!qs('#modal').classList.contains('hidden');
+ let timer=null,revision=0,mutating=false;
  async function draw(){
+  clearTimeout(timer);timer=null;
+  if(!active()||mutating)return;
+  const request=++revision;
   try{
-   const r=await api(`/api/number-cards?work_date=${day}`);if(qs('#numberCardsBody')!==body)return;
-   body.className='';body.innerHTML=`<div class="attention"><h4>Номера: ${r.count}/${r.progress.expected}</h4><p>За ${esc(day)}. Кто выставил номер через бота.</p>${["private","gbu"].map(source=>{const p=r.progress.sources[source];return `<p><b>${source==="gbu"?"ГБУ":"Частные"}</b> · Номера ${p.cards}/${p.expected} · Закрыто ${p.closed}/${p.expected}${p.complete?" ✅":""}${p.missing_numbers?` · Не хватает номеров: ${p.missing_numbers}`:""}${p.extra_numbers?` · ⚠️ Лишних номеров: ${p.extra_numbers}`:""}</p>`}).join("")}</div>${r.items.map((x,i)=>`<div class="employee-row"><div class="name"><b>${i+1}. ${esc(employeeListName(x.employee))}</b><small>${x.source==='gbu'?'ГБУ':'Частный'} · ${esc(x.surname)} · ${esc(new Date(x.sent_at).toLocaleTimeString('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'}))}</small><small>📞 ${esc(x.phone)} · ${x.closed?"✅ Заказ закрыт":"Ожидается закрытие"}</small></div>${state.bootstrap?.is_owner?`<button type="button" class="secondary danger" data-number-delete="${x.id}" aria-label="Удалить запись" style="min-width:44px;min-height:44px">🗑</button>`:''}</div>`).join('')||'<div class="empty">Номера пока не отправляли</div>'}`;
+   const r=await api(`/api/number-cards?work_date=${day}`);if(!active()||request!==revision||mutating)return;
+   const scroll=qs('#modal').scrollTop;
+   body.className='';body.innerHTML=`<div class="attention"><h4>Номера: ${r.count}/${r.progress.expected}</h4><p>За ${esc(day)}. Кто выставил номер через бота.</p>${["private","gbu"].map(source=>{const p=r.progress.sources[source];return `<p><b>${source==="gbu"?"ГБУ":"Частные"}</b> · Номера ${p.cards}/${p.expected} · Закрыто ${p.closed}/${p.expected}${p.complete?" ✅":""}${p.missing_numbers?` · Не хватает номеров: ${p.missing_numbers}`:""}${p.extra_numbers?` · ⚠️ Лишних номеров: ${p.extra_numbers}`:""}</p>`}).join("")}</div>${r.items.map((x,i)=>`<div class="employee-row"><div class="name"><b>${i+1}. ${esc(employeeListName(x.employee))}</b>${numberCardDetailsHtml(x)}</div>${state.bootstrap?.is_owner?`<button type="button" class="secondary danger" data-number-delete="${x.id}" aria-label="Удалить запись" style="min-width:44px;min-height:44px">🗑</button>`:''}</div>`).join('')||'<div class="empty">Номера пока не отправляли</div>'}`;
+   qs('#modal').scrollTop=scroll;
+   if(state.selectedDate===day&&state.bootstrap?.summary){
+    state.bootstrap.summary.number_cards_count=r.count;state.bootstrap.summary.order_completion=r.progress;renderSummary();
+   }
    qsa('[data-number-delete]',body).forEach(button=>button.onclick=async()=>{
     const item=r.items.find(x=>Number(x.id)===Number(button.dataset.numberDelete));if(!item||button.disabled)return;
     if(!confirm(`Удалить запись «${employeeListName(item.employee)} · ${item.surname}» из списка и подсчёта за ${day}? Сообщение в Telegram останется.`))return;
-    button.disabled=true;const modal=qs('#modal'),scroll=modal.scrollTop;
+    button.disabled=true;mutating=true;revision++;clearTimeout(timer);timer=null;
+    const modal=qs('#modal'),scroll=modal.scrollTop;
     try{
      await api(`/api/number-cards/${item.id}`,{method:'DELETE'});
+     mutating=false;
      await draw();
      if(qs('#numberCardsBody')===body)modal.scrollTop=scroll;
      const selected=state.selectedDate,bootstrap=await api(`/api/bootstrap?work_date=${selected}`);
      if(state.selectedDate===selected){state.bootstrap=bootstrap;renderSummary()}
      toast('Запись удалена');
     }catch(e){button.disabled=false;toast(e.message,5000)}
+    finally{mutating=false;if(active()&&!timer)timer=setTimeout(draw,5000)}
    });
-  }catch(e){if(qs('#numberCardsBody')===body)body.textContent=e.message}
+  }catch(e){if(active()&&request===revision)body.textContent=e.message}
+  if(active()&&!mutating&&request===revision)timer=setTimeout(draw,5000);
  }
  await draw();
 }''' + INLINE_INDEX_HTML[_number_list_end:]
@@ -4092,11 +4184,12 @@ function renderSummary() {
   qs('#selectedDayHeader').innerHTML=`<h2>${esc(fmtDate(day))}</h2><label class="muted">Выбрать дату <input type="date" id="dashboardDate" value="${day}" style="max-width:160px"></label>`;
   qs('#dashboardDate').onchange=e=>{if(e.target.value)loadBootstrap(e.target.value).catch(e=>toast(e.message))};
   qs('#summary').innerHTML=`
-    <div class="metric" style="display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center"><b>${s.orders_total}</b><span>Всего заказов</span></div>
+    <div class="metric order-total-metric" style="display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center"><b>${s.orders_total}</b><span>Всего заказов</span><button type="button" class="day-comment-btn${state.bootstrap.day_comment?.text?' has-comment':''}" id="dayCommentBtn" aria-label="${state.bootstrap.day_comment?.text?'Открыть комментарий на день':'Добавить комментарий на день'}">Комментарий</button></div>
     <button class="metric" data-count-field="private_count"><b>${s.private_count} ✍️</b><span>Частные</span></button>
     <button class="metric" data-count-field="gbu_count"><b>${s.gbu_count} ✍️</b><span>ГБУ</span></button>
     <div class="metric" aria-label="Нужно сотрудников: ${s.requested_staff||0}. Без выносов: ${s.requested_staff_without_carryouts??s.requested_staff??0}. Частные: ${s.requested_staff_by_source?.private||0}. ГБУ: ${s.requested_staff_by_source?.gbu||0}"><b style="font-size:18px;overflow-wrap:anywhere">${s.requested_staff||0}${s.requested_staff_without_carryouts!=null && s.requested_staff_without_carryouts<s.requested_staff ? `(${s.requested_staff_without_carryouts})` : ""}</b><span style="white-space:normal;overflow:visible">Нужно сотрудников</span><b style="font-size:14px;margin-top:8px">${s.requested_staff_by_source?.private||0} / ${s.requested_staff_by_source?.gbu||0}</b><span style="white-space:normal;overflow:visible">Частные / ГБУ</span></div>`;
   qsa('[data-count-field]').forEach(btn=>btn.onclick=()=>editDispatchCount(btn.dataset.countField));
+  qs('#dayCommentBtn').onclick=()=>openDayComment(day);
   const view=qs('#readinessView');
   for(const id of ['orderPreparation','brigadeWork']){
     if(!qs('#'+id)){const section=document.createElement('section');section.id=id;section.style.margin='24px 0';view.appendChild(section)}
@@ -4125,6 +4218,53 @@ function renderSummary() {
 
 
 INLINE_INDEX_HTML = _organize_day_dashboard(INLINE_INDEX_HTML)
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
+<style>
+.metric.order-total-metric{padding-left:4px;padding-right:4px}
+.day-comment-btn{margin-top:10px;max-width:100%;min-height:30px;padding:5px 3px;border:1px solid var(--gold2);border-radius:12px;background:var(--panel2);color:var(--gold);font-size:10px;line-height:1.2;white-space:nowrap;cursor:pointer}
+.day-comment-btn.has-comment{background:#302719;border-color:var(--gold)}
+.employee-row .name small.number-card-line{display:block;line-height:1.4;margin-top:4px;overflow-wrap:anywhere}
+.employee-row .name small.number-card-status{margin-top:7px;color:var(--text)}
+.day-comment-text{display:block;width:100%;min-height:120px;margin-top:8px;padding:12px;resize:vertical;border:1px solid var(--line);border-radius:12px;background:var(--panel2);color:var(--text);font-size:16px}
+</style>
+<script>
+async function openDayComment(day){
+ showModal('Комментарий',`<p class="muted">${esc(fmtDate(day))} · Общая заметка для вас и помощников</p><form id="dayCommentForm" style="margin-top:16px"><label for="dayCommentText">Комментарий на день</label><textarea id="dayCommentText" class="day-comment-text" maxlength="500" rows="4" placeholder="Напишите короткую заметку…" disabled></textarea><div style="display:flex;justify-content:space-between;gap:12px;margin-top:6px"><small class="muted" id="dayCommentAuthor"></small><small class="muted" id="dayCommentCounter">0/500</small></div><p id="dayCommentError" role="status" aria-live="polite" style="color:var(--amber)"></p><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px"><button type="submit" class="primary" id="dayCommentSave" disabled>Сохранить</button><button type="button" class="secondary" id="dayCommentCancel">Отмена</button><button type="button" class="secondary" id="dayCommentReload">Обновить</button></div></form>`);
+ const form=qs('#dayCommentForm'),input=qs('#dayCommentText'),save=qs('#dayCommentSave'),reload=qs('#dayCommentReload'),error=qs('#dayCommentError');
+ const active=()=>qs('#dayCommentForm')===form&&!qs('#modal').classList.contains('hidden');
+ let version=0,savedText='',ready=false,busy=false;
+ function setBusy(value){busy=value;input.disabled=value||!ready;save.disabled=value||!ready;reload.disabled=value}
+ function count(){qs('#dayCommentCounter').textContent=input.value.length+'/500'}
+ function apply(data){
+  version=data.version;savedText=data.text;input.value=savedText;ready=true;count();
+  const updated=data.updated_at?new Date(data.updated_at).toLocaleString('ru-RU',{timeZone:'Europe/Moscow',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'';
+  qs('#dayCommentAuthor').textContent=data.updated_by?`${data.updated_by}${updated?' · '+updated:''}`:'';
+ }
+ async function load(){
+  if(busy)return;
+  if(ready&&input.value!==savedText&&!confirm('Загрузить сохранённый комментарий? Ваш несохранённый текст будет заменён.'))return;
+  setBusy(true);error.textContent='';
+  try{const data=await api(`/api/day-comments/${day}`);if(active())apply(data)}
+  catch(e){if(active())error.textContent=e.message}
+  finally{if(active())setBusy(false)}
+ }
+ input.oninput=count;
+ reload.onclick=load;
+ qs('#dayCommentCancel').onclick=closeModal;
+ form.onsubmit=async event=>{
+  event.preventDefault();if(!ready||busy)return;
+  setBusy(true);error.textContent='';
+  try{
+   const data=await api(`/api/day-comments/${day}`,{method:'PUT',body:JSON.stringify({text:input.value,version})});
+   if(state.selectedDate===day&&state.bootstrap){state.bootstrap.day_comment=data;renderSummary()}
+   if(active()){closeModal();toast(data.text?'Комментарий сохранён':'Комментарий очищен')}
+  }catch(e){if(active())error.textContent=e.message}
+  finally{if(active())setBusy(false)}
+ };
+ await load();
+}
+</script></body>''', 1)
 
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>',r'''
 <style>
