@@ -2968,15 +2968,6 @@ def readiness_chat_messages(summary, settings, kind, work_date):
             f"<b>Всего готовы: {sum(ready_counts.values())}</b>",
         ]
         lines.extend(f"{escape(label)}: <b>{ready_counts[code]}</b>" for code, label in GROUP_LABELS.items())
-        for code, label in GROUP_LABELS.items():
-            group = groups.get(code, {})
-            lines += ["", f"<b>{escape(label)}</b>"]
-            for status, title in [("ready", "Готовы"), ("not_ready", "На основной"), ("day_off", "Выходной"), ("no_response", "Не отписались")]:
-                if code == "reserve" and status != "ready":
-                    continue
-                people = sort_people(group.get(status, []))
-                lines.append(f"<b>{title}: {len(people)}</b>")
-                lines.extend(f"{i}. {readiness_chat_person(p)}" + (" 🚗" if status == "ready" and p.get("has_car") else "") for i, p in enumerate(people, 1))
         chunks = readiness_chat_chunks(lines)
         for chat_id in sorted(set(settings["admin_chat_ids"]) - staff_chats):
             result.append((chat_id, chunks))
