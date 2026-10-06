@@ -378,10 +378,20 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
 .cash-day-edit-controls button{padding:8px;font-size:11px}
 </style>
 <script>
+let cashDayReturnAction=()=>openCashTable(),cashDayReturnLabel='← К таблице';
 async function openCashDayCheck(day){
+  if(qs('#personalGrid')){
+    const grid=qs('#personalGrid'),modal=qs('#modal');
+    const resume={month:qs('#personalMonth').value,kind:qs('[data-personal-kind].primary')?.dataset.personalKind||'earnings',left:grid.scrollLeft,top:grid.scrollTop,modalTop:modal.scrollTop};
+    cashDayReturnAction=()=>openPersonalTables(resume);cashDayReturnLabel='← К моим таблицам';
+  }else if(qs('#cashTableBody')){
+    cashDayReturnAction=()=>openCashTable();cashDayReturnLabel='← К таблице';
+  }
   rememberCashTablePosition();
   showModal('Касса · '+fmtDate(day), '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"><button class="secondary" onclick="openCashTable()">← К таблице</button><button class="secondary" id="cashDayEdit">✏️ Редактировать</button></div><div id="cashDayCheckBody" class="empty">Загрузка…</div>');
   const body=qs('#cashDayCheckBody');
+  const back=qs('#modal button[onclick="openCashTable()"]');
+  back.removeAttribute('onclick');back.textContent=cashDayReturnLabel;back.onclick=()=>cashDayReturnAction();
   const active=()=>qs('#cashDayCheckBody')===body&&!qs('#modal').classList.contains('hidden');
   qs('#cashDayEdit').onclick=()=>openCashDayEditor(day);
   async function refresh(){
@@ -2472,7 +2482,10 @@ def _cash_day_check_data(db: Session, work_date: date) -> dict:
             expected[int(card.tg_id)] += 1
     submitted = defaultdict(int)
     amounts = defaultdict(list)
-    for entry in db.scalars(select(CashEntry).where(CashEntry.work_date == work_date).order_by(CashEntry.id)):
+    total_rub = 0
+    for entry in db.scalars(select(CashEntry).where(CashEntry.work_date == work_date,
+            CashEntry.brigadier_tg_id.notin_(_cash_excluded_ids(db))).order_by(CashEntry.id)):
+        total_rub += int(entry.commission_rub or 0)
         submitted[int(entry.brigadier_tg_id)] += 1
         amounts[int(entry.brigadier_tg_id)].append(int(entry.commission_rub or 0))
     brigadiers = []
@@ -2486,7 +2499,7 @@ def _cash_day_check_data(db: Session, work_date: date) -> dict:
                            'complete': count > 0 and received >= count})
     brigadiers.sort(key=lambda x: (x['name'].casefold(), x['tg_id']))
     items = [x for x in brigadiers if x['expected'] > 0]
-    return {'work_date': work_date.isoformat(), 'items': items,
+    return {'work_date': work_date.isoformat(), 'items': items, 'total_rub': total_rub,
             'brigadiers': brigadiers, 'version': plan.version if plan else 0,
             'manual_count': sum(x['manual_expected'] is not None for x in brigadiers),
             'expected': sum(x['expected'] for x in items),
@@ -4683,3 +4696,20 @@ async function openNumberReassignment(items,id,day){
 }
 </script>
 </body>''',1)
+
+# Reuse the cash-day checklist from the owner's personal earnings table.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    '<h4>Касса выставлена ${r.submitted}/${r.expected}</h4>',
+    '<h4>Итого касса: <span style="color:var(--green,#53c68c)">${new Intl.NumberFormat(\'ru-RU\').format(r.total_rub||0)} ₽</span></h4><h4>Касса выставлена ${r.submitted}/${r.expected}</h4>', 1)
+_personal_start = INLINE_INDEX_HTML.index('async function openPersonalTables(){')
+_personal_end = INLINE_INDEX_HTML.index('</script>', _personal_start)
+_personal_html = INLINE_INDEX_HTML[_personal_start:_personal_end]
+_personal_html = _personal_html.replace('async function openPersonalTables(){', 'async function openPersonalTables(resume=null){', 1)
+_personal_html = _personal_html.replace("let month=new Date()", "let month=resume?.month||new Date()", 1)
+_personal_html = _personal_html.replace("kind='earnings',data=null", "kind=resume?.kind||'earnings',data=null", 1)
+_personal_html = _personal_html.replace("const left=grid.scrollLeft,top=grid.scrollTop;", "const left=resume?.left??grid.scrollLeft,top=resume?.top??grid.scrollTop;const modalTop=resume?.modalTop??qs('#modal').scrollTop;resume=null;", 1)
+_personal_html = _personal_html.replace("'disabled title=\"Из общей кассы\"'", "(kind==='earnings'&&col===0?'title=\"Открыть кассу за день\"':'disabled title=\"Из общей кассы\"')", 1)
+_personal_html = _personal_html.replace("const value=prompt(`${data.columns[column]} ·", "if(kind==='earnings'&&column===0){openCashDayCheck(`${month}-${String(day).padStart(2,'0')}`);return}\n   const value=prompt(`${data.columns[column]} ·", 1)
+_personal_html = _personal_html.replace('grid.scrollLeft=left;grid.scrollTop=top;', "grid.scrollLeft=left;grid.scrollTop=top;qs('#modal').scrollTop=modalTop;", 1)
+_personal_html = _personal_html.replace(' await load();', " qsa('[data-personal-kind]').forEach(btn=>btn.className=btn.dataset.personalKind===kind?'primary':'secondary');\n await load();", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_personal_start]+_personal_html+INLINE_INDEX_HTML[_personal_end:]
