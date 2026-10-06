@@ -4845,3 +4845,31 @@ async function openPersonalCashDay(day){
  }catch(e){if(active())body.textContent=e.message}
 }
 </script></body>''',1)
+
+# Earnings is the money-button landing screen; the detailed cash matrix lives
+# under My Tables. Keep day-check routes and the existing calculation models.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    'id="cashBtn" aria-label="Касса"', 'id="cashBtn" aria-label="Заработок"', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "qs('#cashBtn').onclick=openCashTable;",
+    "qs('#cashBtn').onclick=()=>openPersonalTables();", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "showModal('📒 Мои таблицы',`<p",
+    "showModal('💰 Заработок',`<button class=\"secondary\" id=\"earningsTables\" style=\"margin-bottom:12px\">📒 Мои таблицы</button><p", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "qsa('[data-personal-kind],#personalMonth,#personalAdd')",
+    "qsa('[data-personal-kind],#personalMonth,#personalAdd,#earningsTables')", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    " qs('#personalAdd').onclick=",
+    """ qs('#earningsTables').onclick=()=>{
+  if(busy)return;
+  earningsReturnState={month,kind,left:grid.scrollLeft,top:grid.scrollTop,modalTop:qs('#modal').scrollTop};
+  openCashTable();
+ };
+ qs('#personalAdd').onclick=""", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    'let cashTableReturnState=null;', 'let cashTableReturnState=null,earningsReturnState=null;', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    '''showModal('💰 Касса', `<button class="secondary" style="margin-bottom:12px" onclick="openPersonalTables()">📒 Мои таблицы</button>''',
+    '''showModal('📒 Мои таблицы', `<button class="secondary" style="margin-bottom:12px" onclick="rememberCashTablePosition();openPersonalTables(earningsReturnState)">← Назад к заработку</button><h3>💰 Касса · расширенная</h3>''', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('← К моим таблицам', '← К заработку')
