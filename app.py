@@ -3874,7 +3874,7 @@ def _organize_day_dashboard(html):
   qs('#selectedDayHeader').innerHTML=`<h2>${esc(fmtDate(day))}</h2><label class="muted">Выбрать дату <input type="date" id="dashboardDate" value="${day}" style="max-width:160px"></label>`;
   qs('#dashboardDate').onchange=e=>{if(e.target.value)loadBootstrap(e.target.value).catch(e=>toast(e.message))};
   qs('#summary').innerHTML=`
-    <div class="metric"><b>${s.orders_total}</b><span>Всего заказов</span></div>
+    <div class="metric" style="display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center"><b>${s.orders_total}</b><span>Всего заказов</span></div>
     <button class="metric" data-count-field="private_count"><b>${s.private_count} ✍️</b><span>Частные</span></button>
     <button class="metric" data-count-field="gbu_count"><b>${s.gbu_count} ✍️</b><span>ГБУ</span></button>
     <div class="metric" aria-label="Нужно сотрудников: ${s.requested_staff||0}. Без выносов: ${s.requested_staff_without_carryouts??s.requested_staff??0}. Частные: ${s.requested_staff_by_source?.private||0}. ГБУ: ${s.requested_staff_by_source?.gbu||0}"><b style="font-size:18px;overflow-wrap:anywhere">${s.requested_staff||0}${s.requested_staff_without_carryouts!=null && s.requested_staff_without_carryouts<s.requested_staff ? `(${s.requested_staff_without_carryouts})` : ""}</b><span style="white-space:normal;overflow:visible">Нужно сотрудников</span><b style="font-size:14px;margin-top:8px">${s.requested_staff_by_source?.private||0} / ${s.requested_staff_by_source?.gbu||0}</b><span style="white-space:normal;overflow:visible">Частные / ГБУ</span></div>`;
