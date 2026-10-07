@@ -5307,7 +5307,7 @@ async function openFreeStaff(){
    #freeStaffBody .free-staff-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}
    #freeStaffBody .free-staff-group{border:1px solid var(--line);border-radius:10px;padding:5px;margin-bottom:8px}
    #freeStaffBody .free-staff-group>b{display:block;color:var(--gold);font-size:12px;padding:5px 0}
-   #freeStaffBody .free-staff-row{display:flex;align-items:center;gap:5px;min-height:32px;border-top:1px solid var(--line);font-size:11px;line-height:1.2;cursor:pointer}
+   #freeStaffBody .free-staff-row{display:grid;grid-template-columns:minmax(0,1fr) 17px;align-items:center;gap:5px;min-height:32px;border-top:1px solid var(--line);font-size:11px;line-height:1.2;cursor:pointer}
    #freeStaffBody .free-staff-row span{min-width:0;overflow-wrap:anywhere}
    #freeStaffBody input{width:17px;height:17px;min-width:17px;margin:0;padding:0;accent-color:var(--green)}
    #freeStaffBody .free-staff-footer{position:sticky;bottom:0;background:var(--panel);padding:10px 0;display:flex;align-items:center;gap:10px;border-top:1px solid var(--line)}
