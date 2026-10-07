@@ -717,6 +717,21 @@ def _is_owner(db: Session, tg_id: int) -> bool:
     return int(tg_id) in ids
 
 
+def _can_view_vlad_allowance(db: Session, user: TelegramUser) -> bool:
+    if _is_owner(db, user.id):
+        return True
+    # Require an existing dispatcher session and the registered brigadier's
+    # Telegram identity, not a match on an editable display name.
+    employee = db.scalar(select(Employee).where(
+        Employee.tg_id == user.id, Employee.active.is_(True),
+        Employee.group_code == "brigadier", _visible_employee()))
+    if employee is None:
+        return False
+    handles = {str(value or "").strip().lstrip("@").casefold() for value in
+               (employee.telegram_username, getattr(user, "username", ""))}
+    return "vlad_ryazanski" in handles
+
+
 def _require_owner(db: Session, user: TelegramUser) -> None:
     if not _is_owner(db, user.id):
         raise HTTPException(status_code=403, detail="Касса доступна только владельцу")
@@ -1081,6 +1096,7 @@ def bootstrap(work_date: date | None = None, db: Session = Depends(get_db), user
     return {
         "user": {"id": user.id, "name": user.full_name},
         "is_owner": _is_owner(db, user.id),
+        "can_view_vlad_allowance": _can_view_vlad_allowance(db, user),
         "selected_date": selected.isoformat(),
         "today": datetime.now(MOSCOW).date().isoformat(),
         "dates": dates,
@@ -3440,7 +3456,7 @@ def _earnings_after_vlad(data, days, month, db):
     for day in range(1, days + 1):
         gross = sum(data['cells'].get(f'{day}:{col}', 0) for col in range(len(data['columns'])))
         work_date = date.fromisoformat(month + '-01').replace(day=day)
-        allowance = _requested_staff_from_orders(db, work_date, include_carryouts=False) * 10000 if db is not None else 0
+        allowance = _vlad_allowance_cents(db, work_date) if db is not None else 0
         daily[str(day)] = gross - allowance
     return {'daily': daily,
             'first': sum(daily[str(day)] for day in range(1, 16)),
@@ -3482,7 +3498,7 @@ def _personal_table_result(row, kind: str, month: str, db=None) -> dict:
             data["cells"].pop(key, None)
             if db is not None:
                 work_date = date.fromisoformat(month + "-01").replace(day=day)
-                data["cells"][key] = _requested_staff_from_orders(db, work_date, include_carryouts=False) * 100 * 100
+                data["cells"][key] = _vlad_allowance_cents(db, work_date)
     if kind == "kickbacks" and db is not None:
         for day in range(1, days + 1):
             delta = int(adjustments.get(str(day), 0))
@@ -3662,6 +3678,35 @@ def _requested_staff_by_source(db, work_date, *, include_carryouts=True):
 
 def _requested_staff_from_orders(db, work_date, *, include_carryouts=True):
     return sum(_requested_staff_by_source(db, work_date, include_carryouts=include_carryouts).values())
+
+
+VLAD_ALLOWANCE_RATE_CENTS = 10000  # 100 ₽ per requested staff place, excluding carryouts.
+
+
+def _vlad_allowance_cents(db, work_date):
+    return _requested_staff_from_orders(db, work_date, include_carryouts=False) * VLAD_ALLOWANCE_RATE_CENTS
+
+
+def _vlad_allowance_month(db, month):
+    days = _personal_month_days(month)
+    first = date.fromisoformat(month + "-01")
+    daily = []
+    for day in range(1, days + 1):
+        work_date = first.replace(day=day)
+        amount = _vlad_allowance_cents(db, work_date)
+        daily.append({"work_date": work_date.isoformat(), "day": day,
+                      "staff_count": amount // VLAD_ALLOWANCE_RATE_CENTS, "amount": amount})
+    return {"month": month, "days": days, "rate": VLAD_ALLOWANCE_RATE_CENTS, "daily": daily,
+            "first": sum(x["amount"] for x in daily if x["day"] <= 15),
+            "second": sum(x["amount"] for x in daily if x["day"] >= 16),
+            "total": sum(x["amount"] for x in daily)}
+
+
+@app.get('/api/vlad-allowance/{month}')
+def get_vlad_allowance(month: str, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    if not _can_view_vlad_allowance(db, user):
+        raise HTTPException(403, "Надбавка доступна Владу Рязанскому и владельцу")
+    return _vlad_allowance_month(db, month)
 
 
 @app.get('/api/order-counts/{work_date}/{source}')
@@ -5055,3 +5100,75 @@ async function openGbuEarningsDay(day,resume){
  }catch(e){if(active())body.textContent=e.message}
 }
 </script></body>''',1)
+
+
+# The money icon opens Vlad's own allowance; the owner's earnings remain separate.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "const cashBtn=qs('#cashBtn'); if(cashBtn) cashBtn.classList.toggle('hidden', !data.is_owner);",
+    "updateMoneyButton(data);", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "const cashBtn=qs('#cashBtn'); if(cashBtn) cashBtn.classList.toggle('hidden', !state.bootstrap.is_owner);",
+    "updateMoneyButton(state.bootstrap);", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "qs('#cashBtn').onclick=()=>openPersonalTables();",
+    "qs('#cashBtn').onclick=()=>state.bootstrap?.is_owner?openPersonalTables():openVladAllowance();", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    '<button class="secondary" id="earningsTables" style="margin-bottom:12px">📒 Мои таблицы</button>',
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"><button class="secondary" id="earningsTables">📒 Мои таблицы</button><button class="secondary" id="earningsVladAllowance">💰 Надбавка Владу</button></div>', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "qsa('[data-personal-kind],#personalMonth,#personalAdd,#earningsTables')",
+    "qsa('[data-personal-kind],#personalMonth,#personalAdd,#earningsTables,#earningsVladAllowance')", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    " qs('#earningsTables').onclick=()=>{",
+    """ qs('#earningsVladAllowance').onclick=()=>{
+  if(busy)return;
+  openVladAllowance({month,kind,left:grid.scrollLeft,top:grid.scrollTop,modalTop:qs('#modal').scrollTop});
+ };
+ qs('#earningsTables').onclick=()=>{""", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</script></body>', r"""
+function updateMoneyButton(data){
+ const btn=qs('#cashBtn');if(!btn)return;
+ btn.classList.toggle('hidden',!(data.is_owner||data.can_view_vlad_allowance));
+ const label=data.is_owner?'Заработок':'Моя надбавка';
+ btn.setAttribute('aria-label',label);btn.title=label;
+}
+async function openVladAllowance(resume=null){
+ if(!(state.bootstrap?.is_owner||state.bootstrap?.can_view_vlad_allowance)){toast('Нет доступа к надбавке');return}
+ let month=resume?.month||state.selectedDate?.slice(0,7)||new Date().toLocaleDateString('sv-SE',{timeZone:'Europe/Moscow'}).slice(0,7);
+ let period='month',data=null,revision=0,signature='';
+ const title=state.bootstrap?.is_owner?'💰 Надбавка Владу Рязанскому':'💰 Моя надбавка';
+ showModal(title,`<button class="secondary" id="vladAllowanceBack" style="margin-bottom:12px">← Назад</button>
+ <p class="muted">1 сотрудник = 100 ₽. По всем частным заказам и ГБУ за день, без выносов. Суммы обновляются автоматически.</p>
+ <label>Месяц<input type="month" id="vladAllowanceMonth" value="${esc(month)}" style="width:100%;box-sizing:border-box"></label>
+ <div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0"><button class="primary" data-vlad-period="month">Весь месяц</button><button class="secondary" data-vlad-period="first">1–15</button><button class="secondary" data-vlad-period="second">16–конец</button></div>
+ <div id="vladAllowanceBody">Загрузка…</div><small class="muted" id="vladAllowanceStatus" role="status"></small>`);
+ const body=qs('#vladAllowanceBody'),status=qs('#vladAllowanceStatus'),input=qs('#vladAllowanceMonth'),session=cashModalGeneration;
+ const active=()=>session===cashModalGeneration && qs('#vladAllowanceBody')===body && !qs('#modal').classList.contains('hidden');
+ const rub=value=>new Intl.NumberFormat('ru-RU',{maximumFractionDigits:0}).format(Number(value||0)/100)+' ₽';
+ qs('#vladAllowanceBack').onclick=()=>resume?openPersonalTables(resume):closeModal();
+ function draw(){
+  if(!active()||!data)return;
+  const rows=data.daily.filter(x=>period==='month'||(period==='first'?x.day<=15:x.day>=16));
+  const total=rows.reduce((sum,x)=>sum+x.amount,0),staff=rows.reduce((sum,x)=>sum+x.staff_count,0);
+  const pos=qs('#modal').scrollTop;
+  body.innerHTML=`<div class="attention" style="display:flex;justify-content:space-between;gap:12px;align-items:center"><div><b>${staff} сотрудников</b><p>По заказам за период</p></div><div style="text-align:right"><small class="muted">Итого надбавка</small><br><b style="font-size:24px;color:var(--gold)">${rub(total)}</b></div></div>
+  <table style="width:100%;border-collapse:collapse;margin-top:16px"><thead><tr><th style="text-align:left">День</th><th style="text-align:center">Сотрудников</th><th style="text-align:right">Надбавка</th></tr></thead><tbody>${rows.map(x=>`<tr style="border-bottom:1px solid var(--line,#303036);${x.work_date===state.selectedDate?'background:rgba(215,178,96,.10)':''}"><td style="padding:12px 4px;white-space:nowrap">${esc(shortCalendarDay(x.work_date))}</td><td style="text-align:center;padding:12px 4px">${x.staff_count}</td><td style="text-align:right;padding:12px 4px;font-weight:700;color:var(--gold)">${rub(x.amount)}</td></tr>`).join('')}</tbody></table>
+  <div style="display:grid;gap:8px;margin-top:16px"><div style="display:flex;justify-content:space-between"><span>Итого 1–15</span><b>${rub(data.first)}</b></div><div style="display:flex;justify-content:space-between"><span>Итого 16–${data.days}</span><b>${rub(data.second)}</b></div><div style="display:flex;justify-content:space-between;color:var(--gold)"><b>За месяц</b><b>${rub(data.total)}</b></div></div>`;
+  qs('#modal').scrollTop=pos;
+ }
+ async function load(){
+  const request=++revision,wanted=month;
+  try{
+   const fresh=await api(`/api/vlad-allowance/${wanted}`);
+   if(!active()||request!==revision||wanted!==month)return;
+   const next=JSON.stringify(fresh);data=fresh;
+   if(next!==signature){signature=next;draw()}
+   status.textContent='Обновляется автоматически';
+  }catch(e){if(active()&&request===revision)status.textContent=e.message}
+ }
+ input.onchange=()=>{if(!/^\d{4}-\d{2}$/.test(input.value))return;month=input.value;data=null;signature='';body.textContent='Загрузка…';status.textContent='';load()};
+ qsa('[data-vlad-period]').forEach(btn=>btn.onclick=()=>{period=btn.dataset.vladPeriod;qsa('[data-vlad-period]').forEach(b=>b.className=b===btn?'primary':'secondary');draw()});
+ await load();
+ if(active())cashRefreshTimer=setInterval(()=>{if(active()&&!document.hidden)load()},10000);
+}
+</script></body>""", 1)
