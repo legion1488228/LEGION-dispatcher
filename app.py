@@ -4215,8 +4215,7 @@ def edit_number_card(data: NumberCardInput, db: Session = Depends(get_db)):
 
 @app.delete('/api/number-cards/{event_id}')
 def delete_number_card(event_id: int, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
-    if not _is_owner(db, user.id):
-        raise HTTPException(403, 'Удаление доступно только владельцу')
+    # Authenticated dispatchers may remove number records; financial rights stay unchanged.
     row = db.get(NumberCardEvent, event_id)
     if row is None:
         raise HTTPException(404, 'Запись не найдена')
@@ -4272,11 +4271,23 @@ def delete_brigadier_number(data: BrigadierNumberDelete, db: Session=Depends(get
     return {'saved':True}
 
 
+def number_card_contact_sort_key(row, statuses):
+    value = str(statuses.get(row.id, {}).get('contact_time') or '').strip()
+    match = re.fullmatch(r'(\d{1,2})[:.](\d{2})', value)
+    minutes = 1440
+    if match:
+        hour, minute = map(int, match.groups())
+        if 0 <= hour < 24 and 0 <= minute < 60:
+            minutes = hour * 60 + minute
+    return minutes, row.id
+
+
 @app.get("/api/number-cards")
 def list_number_cards(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
     rows = db.scalars(select(NumberCardEvent).where(NumberCardEvent.work_date == work_date, _visible_number_card()).order_by(NumberCardEvent.sent_at, NumberCardEvent.id)).all()
     employees = {e.tg_id: e for e in db.scalars(select(Employee).where(Employee.tg_id.in_([r.tg_id for r in rows])))} if rows else {}
     statuses = number_card_statuses(db, rows)
+    rows.sort(key=lambda row: number_card_contact_sort_key(row, statuses))
     return {"count": len(rows), "progress": order_completion_data(db, work_date), "items": [{"id": r.id, **statuses[r.id], "employee": _employee_dict(employees[r.tg_id]) if r.tg_id in employees else {"full_name": r.full_name, "display_name": r.full_name},
         "tg_id": r.tg_id, "phone": brigadier_phone8(r.phone), "source": r.source, "surname": r.surname,
         "sent_at": (r.sent_at.replace(tzinfo=timezone.utc) if r.sent_at.tzinfo is None else r.sent_at).isoformat()} for r in rows]}
@@ -5172,3 +5183,8 @@ async function openVladAllowance(resume=null){
  if(active())cashRefreshTimer=setInterval(()=>{if(active()&&!document.hidden)load()},10000);
 }
 </script></body>""", 1)
+
+# Both number-card actions are available to authenticated dispatchers.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    '''${state.bootstrap?.is_owner?`<button type="button" class="secondary danger" data-number-delete="${x.id}" aria-label="Удалить запись" style="width:36px;height:36px;padding:4px;font-size:18px;border-radius:10px">🗑</button>`:''}''',
+    '''<button type="button" class="secondary danger" data-number-delete="${x.id}" aria-label="Удалить запись" style="width:36px;height:36px;padding:4px;font-size:18px;border-radius:10px">🗑</button>''', 1)
