@@ -3117,6 +3117,106 @@ class ReadinessChatGroup(BaseModel):
     group_code: Literal["brigadier", "main", "cashless", "reserve"]
 
 
+class FreeStaffDispatch(Base):
+    __tablename__ = "free_staff_dispatches"
+    request_id = Column(String(80), primary_key=True)
+    payload = Column(String, nullable=False)
+    created_by = Column(BigInteger, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class FreeStaffSelection(BaseModel):
+    work_date: date
+    employee_ids: list[StrictInt] = Field(max_length=1000)
+    snapshot: str = Field(max_length=64)
+    request_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{16,80}$")
+
+
+def free_staff_snapshot(db, day):
+    summary = readiness_summary_data(db, day)
+    groups = []
+    for code, label in GROUP_LABELS.items():
+        people = []
+        for p in summary["groups"].get(code, {}).get("ready", []):
+            if int(p.get("id") or 0) <= 0:
+                continue
+            people.append({"id": p["id"], "name": str(p.get("full_name") or "—").split()[0],
+                           "metro": p.get("metro") or "—", "height": p.get("height_cm") or "—"})
+        people.sort(key=lambda p: (p["name"].casefold(), p["metro"].casefold(), p["id"]))
+        groups.append({"code": code, "label": label, "people": people})
+    signature = hashlib.sha256(json.dumps(groups, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    return {"work_date": day.isoformat(), "groups": groups, "snapshot": signature}
+
+
+def free_staff_messages(snapshot, ids, settings, day):
+    selected = set(ids)
+    valid = {p["id"] for g in snapshot["groups"] for p in g["people"]}
+    if not selected or not selected <= valid:
+        raise HTTPException(409, "Отметьте готовых сотрудников из актуального списка.")
+    targets = {}
+    for target in settings["groups"]:
+        targets.setdefault(int(target["chat_id"]), set()).add(target["group_code"])
+    messages = []
+    for group in snapshot["groups"]:
+        people = [p for p in group["people"] if p["id"] in selected]
+        if not people:
+            continue
+        chats = [chat for chat, codes in targets.items() if group["code"] in codes]
+        if not chats or any(len(targets[chat]) != 1 for chat in chats):
+            raise HTTPException(409, "Проверьте отдельный чат группы: " + group["label"])
+        lines = ["<b>Заказы на завтра закрыты❗️</b>", day.strftime("%d.%m.%Y"), "", "<b>Без заказа:👇</b>"]
+        lines.extend(f"{i}. {escape(p['name'])} · {escape(p['metro'])} · {p['height']}" for i, p in enumerate(people, 1))
+        for chat in sorted(chats):
+            messages.append({"chat_id": chat, "label": group["label"],
+                             "chunks": readiness_chat_chunks(lines), "done": 0})
+    return messages
+
+
+@app.get("/api/readiness/free-tomorrow")
+def get_free_staff(db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    day = datetime.now(ZoneInfo("Europe/Moscow")).date() + timedelta(days=1)
+    return free_staff_snapshot(db, day)
+
+
+@app.post("/api/readiness/free-tomorrow")
+async def send_free_staff(data: FreeStaffSelection, db: Session = Depends(get_db),
+                          user: TelegramUser = Depends(require_admin)):
+    day = datetime.now(ZoneInfo("Europe/Moscow")).date() + timedelta(days=1)
+    if data.work_date != day:
+        raise HTTPException(409, "Дата изменилась. Откройте список заново.")
+    # Serialize creation and retries, including simultaneous dispatcher clicks.
+    config = db.execute(select(ReadinessChatConfig).where(ReadinessChatConfig.id == 1).with_for_update()).scalar_one_or_none()
+    if config is None or datetime.utcnow() - config.updated_at > timedelta(minutes=5):
+        raise HTTPException(409, "Связь с ботом не обновлена. Повторите через минуту.")
+    fingerprint = {"day": day.isoformat(), "ids": sorted(set(data.employee_ids)), "snapshot": data.snapshot}
+    job = db.get(FreeStaffDispatch, data.request_id)
+    if job:
+        saved = json.loads(job.payload)
+        if saved["selection"] != fingerprint or job.created_by != user.id:
+            raise HTTPException(409, "Запрос уже использован. Откройте список заново.")
+    else:
+        snapshot = free_staff_snapshot(db, day)
+        if snapshot["snapshot"] != data.snapshot:
+            raise HTTPException(409, "Готовность сотрудников изменилась. Откройте список заново.")
+        saved = {"selection": fingerprint, "messages": free_staff_messages(snapshot, data.employee_ids, json.loads(config.payload), day)}
+        job = FreeStaffDispatch(request_id=data.request_id, payload=json.dumps(saved), created_by=user.id)
+        db.add(job)
+        db.flush()
+    for message in saved["messages"]:
+        while message["done"] < len(message["chunks"]):
+            try:
+                ok = await send_telegram_message(message["chat_id"], message["chunks"][message["done"]])
+            except Exception:
+                ok = False
+            if not ok:
+                break
+            message["done"] += 1
+    job.payload = json.dumps(saved, ensure_ascii=False)
+    db.commit()
+    failed = [m["label"] for m in saved["messages"] if m["done"] < len(m["chunks"])]
+    return {"sent_chats": len(saved["messages"]) - len(failed), "failed_groups": failed}
+
+
 class ReadinessChatSettings(BaseModel):
     admin_chat_ids: list[int] = Field(max_length=100)
     groups: list[ReadinessChatGroup] = Field(max_length=100)
@@ -3193,6 +3293,8 @@ def readiness_chat_messages(summary, settings, kind, work_date):
 @app.post("/api/readiness/chat/{kind}")
 async def send_readiness_chat_action(kind: Literal["summary", "reminders", "roshcha", "avral"],
         db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    if kind == "roshcha":
+        raise HTTPException(409, "Откройте Кнопку Рощи и отметьте сотрудников без заказа.")
     now = datetime.utcnow()
     config = db.execute(select(ReadinessChatConfig).where(ReadinessChatConfig.id == 1).with_for_update()).scalar_one_or_none()
     if config is None or now - config.updated_at > timedelta(minutes=5):
@@ -5188,3 +5290,47 @@ async function openVladAllowance(resume=null){
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     '''${state.bootstrap?.is_owner?`<button type="button" class="secondary danger" data-number-delete="${x.id}" aria-label="Удалить запись" style="width:36px;height:36px;padding:4px;font-size:18px;border-radius:10px">🗑</button>`:''}''',
     '''<button type="button" class="secondary danger" data-number-delete="${x.id}" aria-label="Удалить запись" style="width:36px;height:36px;padding:4px;font-size:18px;border-radius:10px">🗑</button>''', 1)
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</script></body>', r'''
+async function openFreeStaff(){
+ showModal('Без заказа на завтра','<div id="freeStaffBody">Загрузка…</div>');
+ const body=qs('#freeStaffBody');
+ try{
+  const data=await api('/api/readiness/free-tomorrow');if(qs('#freeStaffBody')!==body)return;
+  const selected=new Set();let locked=false;
+  const requestId=Array.from(crypto.getRandomValues(new Uint8Array(20)),b=>b.toString(16).padStart(2,'0')).join('');
+  const group=code=>{
+   const g=data.groups.find(x=>x.code===code);
+   return `<section class="free-staff-group"><b>${esc(g.label)} · ${g.people.length}</b>${g.people.map(p=>`<label class="free-staff-row"><span>${esc(p.name)} · ${esc(p.metro)} · ${esc(p.height)}</span><input type="checkbox" value="${p.id}" aria-label="Без заказа: ${esc(p.name)} ${esc(p.metro)} ${esc(p.height)}"></label>`).join('')||'<small>Нет готовых</small>'}</section>`;
+  };
+  body.innerHTML=`<style>
+   #freeStaffBody .free-staff-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}
+   #freeStaffBody .free-staff-group{border:1px solid var(--line);border-radius:10px;padding:5px;margin-bottom:8px}
+   #freeStaffBody .free-staff-group>b{display:block;color:var(--gold);font-size:12px;padding:5px 0}
+   #freeStaffBody .free-staff-row{display:flex;align-items:center;gap:5px;min-height:32px;border-top:1px solid var(--line);font-size:11px;line-height:1.2;cursor:pointer}
+   #freeStaffBody .free-staff-row span{min-width:0;overflow-wrap:anywhere}
+   #freeStaffBody input{width:17px;height:17px;min-width:17px;margin:0;padding:0;accent-color:var(--green)}
+   #freeStaffBody .free-staff-footer{position:sticky;bottom:0;background:var(--panel);padding:10px 0;display:flex;align-items:center;gap:10px;border-top:1px solid var(--line)}
+   #freeStaffBody .free-staff-footer button{flex:1}
+  </style><p style="font-size:13px;color:var(--muted)">${esc(data.work_date)} · Отметьте свободных сотрудников</p>
+  <div class="free-staff-grid"><div>${group('brigadier')}${group('cashless')}</div><div>${group('main')}${group('reserve')}</div></div>
+  <p style="font-size:12px;color:var(--muted)">Каждая группа получит только своих отмеченных сотрудников. Группам без отметок сообщение не отправляется.</p>
+  <div id="freeStaffStatus" role="status" style="font-size:13px"></div>
+  <div class="free-staff-footer"><span style="font-size:13px">Без заказа: <b id="freeStaffCount">0</b></span><button class="primary" id="freeStaffSend" disabled>Отправить</button></div>`;
+  const button=qs('#freeStaffSend'),status=qs('#freeStaffStatus'),checks=qsa('input[type="checkbox"]',body);
+  checks.forEach(c=>c.onchange=()=>{if(locked)return;c.checked?selected.add(Number(c.value)):selected.delete(Number(c.value));qs('#freeStaffCount').textContent=selected.size;button.disabled=!selected.size});
+  button.onclick=async()=>{
+   if(button.disabled)return;
+   locked=true;button.disabled=true;checks.forEach(c=>c.disabled=true);status.textContent='Отправка…';
+   try{
+    const r=await api('/api/readiness/free-tomorrow',{method:'POST',body:JSON.stringify({work_date:data.work_date,employee_ids:[...selected],snapshot:data.snapshot,request_id:requestId})});
+    if(qs('#freeStaffBody')!==body)return;
+    if(r.failed_groups.length){status.textContent=`Отправлено в ${r.sent_chats} групп. Не доставлено: ${r.failed_groups.join(', ')}. Повтор отправит только недоставленное.`;button.textContent='Повторить';button.disabled=false}
+    else{status.textContent=`✓ Отправлено в ${r.sent_chats} групп`;button.textContent='Отправлено'}
+   }catch(e){if(qs('#freeStaffBody')!==body)return;status.textContent=e.message;button.textContent='Повторить';button.disabled=false}
+  };
+ }catch(e){if(qs('#freeStaffBody')===body)body.textContent=e.message}
+}
+qs('#readinessHistoryBtn').onclick=openFreeStaff;
+qs('#readinessHistoryBtn').title='Выбрать готовых сотрудников без заказа на завтра';
+</script></body>''', 1)
