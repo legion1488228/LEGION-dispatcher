@@ -3294,7 +3294,7 @@ def readiness_chat_messages(summary, settings, kind, work_date):
 async def send_readiness_chat_action(kind: Literal["summary", "reminders", "roshcha", "avral"],
         db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
     if kind == "roshcha":
-        raise HTTPException(409, "Откройте Кнопку Рощи и отметьте сотрудников без заказа.")
+        raise HTTPException(409, "Откройте «Выходной» и отметьте сотрудников без заказа.")
     now = datetime.utcnow()
     config = db.execute(select(ReadinessChatConfig).where(ReadinessChatConfig.id == 1).with_for_update()).scalar_one_or_none()
     if config is None or now - config.updated_at > timedelta(minutes=5):
@@ -4875,7 +4875,7 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
 
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     'id="readinessHistoryBtn">🧾 История</button>',
-    'id="readinessHistoryBtn" title="Отправить сообщение о выходном в четыре группы">🧐 Кнопка Рощи<br><small>(Ревизорская)</small></button>',
+    'id="readinessHistoryBtn" title="Выбрать сотрудников без заказа"><b>Выходной</b><br><small style="font-size:11px;font-weight:400">(Кто не получил заказ)</small></button>',
 ).replace(
     "qs('#readinessHistoryBtn').onclick=openReadinessHistory;",
     """qs('#readinessHistoryBtn').onclick=async event=>{
