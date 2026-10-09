@@ -3751,6 +3751,12 @@ class CategoryCountsChange(BaseModel):
     version: int = Field(ge=0, strict=True)
 
 
+def valid_order_count_key(source, key):
+    if key in ORDER_COUNT_TYPES[source]:
+        return True
+    return source == 'private' and bool(re.fullmatch(r'(standard|vip|elite):(?:[1-9]|[1-9][0-9]|100)', key))
+
+
 def _category_counts(db, work_date, source):
     row = db.get(DispatchCategoryCounts, (work_date, source))
     counts = dict.fromkeys(ORDER_COUNT_TYPES[source], 0)
@@ -3766,7 +3772,7 @@ def _category_counts(db, work_date, source):
     else:
         for order in db.scalars(select(Order).where(Order.work_date==work_date, Order.source==source, Order.status!='cancelled')):
             key=f'{order.category}:{order.team_size}'
-            if key in counts: counts[key]+=1
+            if valid_order_count_key(source, key): counts[key]=counts.get(key,0)+1
             else: unallocated+=1
     return {'counts':counts,'unallocated':unallocated,'total':sum(counts.values())+unallocated,'version':0}
 
@@ -3819,7 +3825,9 @@ def get_category_counts(work_date: date, source: Literal['private','gbu'], db: S
 @app.put('/api/order-counts/{work_date}/{source}')
 def save_category_counts(work_date: date, source: Literal['private','gbu'], change: CategoryCountsChange,
                          db: Session=Depends(get_db), user: TelegramUser=Depends(require_admin)):
-    if set(change.counts)!=set(ORDER_COUNT_TYPES[source]) or any(type(v) is not int or not 0<=v<=100000 for v in change.counts.values()):
+    if (not set(ORDER_COUNT_TYPES[source]).issubset(change.counts)
+            or any(not valid_order_count_key(source,k) for k in change.counts)
+            or any(type(v) is not int or not 0<=v<=100000 for v in change.counts.values())):
         raise HTTPException(422,'Введите целые неотрицательные количества для допустимых категорий')
     total=sum(change.counts.values())+change.unallocated
     if total>100000: raise HTTPException(422,'Слишком большое количество заказов')
@@ -3855,7 +3863,7 @@ def order_count_period(month: str, half: Literal['first','second']='first', db: 
         day=first+timedelta(days=offset);item={'date':day.isoformat()}
         for src in ORDER_COUNT_TYPES:
             values=_category_counts(db,day,src);item[src]=values['total']
-            for key,value in values['counts'].items():result[src]['counts'][key]+=value
+            for key,value in values['counts'].items():result[src]['counts'][key]=result[src]['counts'].get(key,0)+value
             result[src]['unallocated']+=values['unallocated'];result[src]['total']+=values['total']
         item['total']=item['private']+item['gbu'];daily.append(item)
     return {'start':first.isoformat(),'end':last.isoformat(),'days':days,'sources':result,'daily':daily,'total':sum(x['total'] for x in result.values())}
@@ -4448,6 +4456,7 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</script>\n</body>', r'''
 const orderCountTypes={private:['standard:3','standard:4','standard:5','standard:6','vip:4','vip:6','elite:4','elite:6','carryout:2','carryout:3','carryout:4'],gbu:['standard:4','standard:6','elite:4','elite:6']};
 const orderCountLabel=key=>{const [cat,size]=key.split(':');return `${{standard:'Стандарт',vip:'Вип',elite:'Элит',carryout:'Вынос'}[cat]} · ${size} чел`};
+function periodCountKeys(source,counts){return [...new Set([...orderCountTypes[source],...Object.keys(counts)])].sort((a,b)=>{const rank={standard:0,vip:1,elite:2,carryout:3};return rank[a.split(':')[0]]-rank[b.split(':')[0]]||Number(a.split(':')[1])-Number(b.split(':')[1])})}
 async function openOrderCategoryCounts(source){
  const day=state.selectedDate;
  showModal(source==='gbu'?'Заказы ГБУ':'Частные заказы','<div id="categoryCountBody">Загрузка…</div>');
@@ -4461,6 +4470,31 @@ async function openOrderCategoryCounts(source){
    <div class="category-save-bar" style="position:sticky;bottom:0;z-index:3;display:flex;align-items:center;justify-content:space-between;gap:12px;background:#111114;padding:12px 0 0;margin-top:8px;border-top:1px solid var(--line)"><h3 style="margin:0;min-width:0;font-size:18px">Всего: <span id="categoryCountTotal">${Object.values(data.counts).reduce((a,b)=>a+b,0)}</span></h3><button class="primary" type="submit" style="flex-shrink:0">Сохранить</button></div>
    </form>`;
   const form=qs('#categoryCountForm');
+  const customRows=[];
+  if(source==='private'){
+   // Keep the common 4/6-person counters; move all uncommon sizes into editable rows.
+   qsa('[data-category]',body).filter(el=>!['4','6'].includes(el.dataset.category.split(':')[1])).forEach(el=>el.closest('label').remove());
+   const section=document.createElement('section');
+   section.innerHTML='<h4 style="color:var(--gold);margin-bottom:6px">Другое количество сотрудников</h4><p class="muted" style="font-size:12px">Укажите число человек и количество заказов. Можно добавить несколько составов одной категории.</p><div id="customCountRows"></div>';
+   form.insertBefore(section,form.querySelector('.category-save-bar'));
+   const holder=section.querySelector('#customCountRows');
+   const addRow=(cat,size='',count=0)=>{
+    const row=document.createElement('div');
+    row.style.cssText='display:grid;grid-template-columns:minmax(65px,1fr) 68px 76px 30px;gap:6px;align-items:end;margin:10px 0';
+    row.innerHTML=`<span style="align-self:center">${{standard:'Стандарт',vip:'Вип',elite:'Элит'}[cat]}</span><label style="font-size:11px">Человек<input data-custom-size type="number" inputmode="numeric" min="1" max="100" step="1" placeholder="—" style="width:100%;font-size:16px" value="${size}"></label><label style="font-size:11px">Заказов<input data-custom-count type="number" inputmode="numeric" min="0" max="100000" step="1" style="width:100%;font-size:16px" value="${count}"></label><button type="button" class="secondary" style="padding:4px;min-width:0" aria-label="Добавить состав ${cat}">+</button>`;
+    row.querySelector('button').onclick=()=>{addRow(cat);form.oninput()};
+    holder.appendChild(row);customRows.push({cat,size:row.querySelector('[data-custom-size]'),count:row.querySelector('[data-custom-count]')});
+   };
+   ['standard','vip','elite'].forEach(cat=>{
+    const saved=Object.entries(data.counts).filter(([key,count])=>key.startsWith(cat+':')&&!['4','6'].includes(key.split(':')[1])&&count>0).sort((a,b)=>Number(a[0].split(':')[1])-Number(b[0].split(':')[1]));
+    if(saved.length)saved.forEach(([key,count])=>addRow(cat,Number(key.split(':')[1]),count));else addRow(cat);
+   });
+  }
+  if(data.unallocated){
+   const label=document.createElement('label');label.textContent='Без категории (сохранённые заказы)';
+   label.innerHTML+=`<input id="categoryUnallocated" type="number" min="0" max="100000" step="1" value="${data.unallocated}">`;
+   form.insertBefore(label,form.querySelector('.category-save-bar'));
+  }
   const carryouts=source==='private'?Object.fromEntries([2,3,4].map(size=>['carryout:'+size,Number(data.counts['carryout:'+size]||0)])):{};
   const drawCarryouts=()=>{
    if(source!=='private')return;
@@ -4470,7 +4504,12 @@ async function openOrderCategoryCounts(source){
    input.onfocus=()=>{if(input.value==='0')input.value=''};
    input.onblur=()=>{if(input.value!==''&&Number.isInteger(Number(input.value))&&Number(input.value)>=0)input.value=Number(input.value)===0?'':String(Number(input.value))};
   });
-  const read=()=>{const counts={...carryouts};qsa('[data-category]',body).forEach(el=>counts[el.dataset.category]=Number(el.value));return {counts,unallocated:0,version:data.version}};
+  const read=()=>{
+   const counts={...Object.fromEntries(orderCountTypes[source].map(k=>[k,0])),...carryouts};
+   qsa('[data-category]',body).forEach(el=>counts[el.dataset.category]=Number(el.value));
+   customRows.forEach(row=>{const size=Number(row.size.value),count=Number(row.count.value);if(count>0&&Number.isInteger(size)&&size>=1&&size<=100){const key=row.cat+':'+size;counts[key]=(counts[key]||0)+count}});
+   return {counts,unallocated:Number(qs('#categoryUnallocated')?.value||0),version:data.version};
+  };
   form.oninput=()=>{const v=read();qs('#categoryCountTotal').textContent=Object.values(v.counts).reduce((a,b)=>a+b,0)+v.unallocated};
   if(source==='private'){
    const size=qs('#carryoutSize'),quantity=qs('#carryoutQuantity');
@@ -4489,6 +4528,7 @@ async function openOrderCategoryCounts(source){
   });
   form.onsubmit=async event=>{
    event.preventDefault();const button=form.querySelector('button[type="submit"]');if(button.disabled)return;
+   if(customRows.some(row=>{const size=Number(row.size.value),count=Number(row.count.value);return !Number.isInteger(count)||count<0||count>100000||(row.size.value!==''&&(!Number.isInteger(size)||size<1||size>100))||(count>0&&row.size.value==='')})){toast('Укажите от 1 до 100 человек и целое количество заказов');return}
    const values=read();if([...Object.values(values.counts),values.unallocated].some(v=>!Number.isInteger(v)||v<0||v>100000)){toast('Введите целые неотрицательные количества');return}
    button.disabled=true;
    try{await api(`/api/order-counts/${day}/${source}`,{method:'PUT',body:JSON.stringify(values)});
@@ -4496,6 +4536,7 @@ async function openOrderCategoryCounts(source){
     await loadBootstrap(state.selectedDate);toast('Количество заказов сохранено');
    }catch(e){toast(e.message,6000);button.disabled=false}
   };
+  form.oninput();
  }catch(e){if(qs('#categoryCountBody')===body)body.textContent=e.message}
 }
 async function openOrderCountPeriod(){
@@ -5334,3 +5375,7 @@ async function openFreeStaff(){
 qs('#readinessHistoryBtn').onclick=openFreeStaff;
 qs('#readinessHistoryBtn').title='Выбрать готовых сотрудников без заказа на завтра';
 </script></body>''', 1)
+
+# Include uncommon team sizes in the period breakdown as well as daily totals.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "orderCountTypes[src].map(key=>", "periodCountKeys(src,r.sources[src].counts).map(key=>", 1)
