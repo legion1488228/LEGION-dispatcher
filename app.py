@@ -5384,3 +5384,52 @@ qs('#readinessHistoryBtn').title='Выбрать готовых сотрудни
 # Include uncommon team sizes in the period breakdown as well as daily totals.
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     "orderCountTypes[src].map(key=>", "periodCountKeys(src,r.sources[src].counts).map(key=>", 1)
+
+
+def _compact_personal_table_html(html):
+    """Keep the earnings columns compact without changing table data or actions."""
+    start = html.index('async function openPersonalTables(')
+    end = html.index('\nconst orderCountTypes=', start)
+    personal = html[start:end]
+    personal = re.sub(r'<style>#personalGrid\b.*?</style>', '', personal, count=1, flags=re.S)
+    personal = personal.replace(
+        '<table style="border-collapse:separate;border-spacing:8px;min-width:100%;text-align:right">',
+        '<table class="personal-table">',
+        1,
+    ).replace(
+        'class="contact-btn" style="min-width:80px"',
+        'class="contact-btn personal-cell"',
+    ).replace(
+        '<button class="secondary" style="white-space:nowrap" ${data.automatic_columns.includes(col)?\'disabled\':\'\'} data-personal-col="${col}">${esc(name)} ${data.automatic_columns.includes(col)?\'· авто\':\'✍️\'}</button>',
+        '<button class="secondary personal-column" ${data.automatic_columns.includes(col)?\'disabled\':\'\'} data-personal-col="${col}"><span>${esc(name)}</span><small>${data.automatic_columns.includes(col)?\'авто\':\'✍️\'}</small></button>',
+        1,
+    ).replace(
+        '<tr style="color:var(--gold);background:#211d14"><th>${title}</th>',
+        '<tr class="personal-total" style="color:var(--gold);background:#211d14"><th class="personal-period">${esc(title).replace(" ","<br>")}</th>',
+        1,
+    )
+    html = html[:start] + personal + html[end:]
+    return html.replace('</head>', r'''
+<style id="personal-table-compact-style">
+#personalGrid{overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+#personalGrid table.personal-table{width:auto;min-width:0;border-collapse:separate;border-spacing:0;text-align:center;font-size:14px;font-variant-numeric:tabular-nums}
+#personalGrid .personal-table th,#personalGrid .personal-table td{box-sizing:border-box;padding:2px 3px;vertical-align:middle}
+#personalGrid .personal-table th:not(:first-child),#personalGrid .personal-table td:not(:first-child){min-width:76px}
+#personalGrid .personal-table thead th{position:sticky;top:0;z-index:3;height:52px;background:var(--panel2);box-shadow:0 1px 0 var(--line);font-size:12px;font-weight:700;line-height:1.25;white-space:normal}
+#personalGrid .personal-table th:first-child{position:sticky;left:0;z-index:2;width:44px;min-width:44px;max-width:44px;background:#111114;box-shadow:1px 0 0 var(--line);text-align:center;white-space:normal;overflow-wrap:anywhere}
+#personalGrid .personal-table thead th:first-child{z-index:4;background:var(--panel2);box-shadow:1px 1px 0 var(--line)}
+#personalGrid .personal-table tbody th{height:44px;font-size:14px;font-weight:600}
+#personalGrid .personal-table tbody td{height:44px;white-space:nowrap}
+#personalGrid .personal-column{display:block;box-sizing:border-box;width:76px;max-width:76px;min-height:44px;margin:0;padding:4px 2px;border:0;border-radius:6px;background:transparent;font-size:12px;font-weight:700;line-height:1.25;white-space:normal;overflow-wrap:anywhere}
+#personalGrid .personal-column:disabled{opacity:1}
+#personalGrid .personal-column small{display:block;margin-top:2px;color:var(--muted);font-size:11px;font-weight:400;line-height:1.2}
+#personalGrid .personal-cell{box-sizing:border-box;width:100%;min-width:0;min-height:40px;padding:4px 2px;border-radius:8px;font-size:14px;line-height:1.25;white-space:nowrap}
+#personalGrid td.vlad-deduction{color:#ff5555;font-weight:700}
+#personalGrid .personal-total th:first-child{background:#211d14;font-size:11px;line-height:1.2;overflow-wrap:normal}
+#personalGrid .personal-total td{font-size:13px;font-weight:700}
+@media(pointer:coarse){#personalGrid .personal-cell{min-height:44px}}
+</style>
+</head>''', 1)
+
+
+INLINE_INDEX_HTML = _compact_personal_table_html(INLINE_INDEX_HTML)
