@@ -3410,17 +3410,19 @@ def owner_cash_months(db: Session = Depends(get_db), user: TelegramUser = Depend
     months.add(datetime.now(ZoneInfo("Europe/Moscow")).strftime("%Y-%m"))
     return {"months": sorted(months, reverse=True)}
 
-# Net earnings is a computed display field, never an editable income column.
+# Earnings columns are computed display-only fields (no DB schema change):
+# Итого + (negative Vlad allowance) = Чистыми.
+# Read the existing backend net_after_vlad result to prevent double deductions.
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     'const totalRow=(title,values)=>',
     'const totalRow=(title,values,net)=>',
 ).replace(
     '${money(values.reduce((a,b)=>a+b,0))}</b></td></tr>',
-    '${money(values.reduce((a,b)=>a+b,0))}</b></td>${kind===\'earnings\'?`<td style="color:var(--gold)"><b>${money(net)}</b></td>`:""}</tr>',
+    '${money(values.reduce((a,b)=>a+b,0))}</b></td>${kind===\'earnings\'?`<td class="vlad-deduction"><b>${money(net-values.reduce((a,b)=>a+b,0))}</b></td><td style="color:var(--gold)"><b>${money(net)}</b></td>`:""}</tr>',
     1,
 ).replace(
     '${money(values.reduce((a,b)=>a+b,0))}</b></td></tr>',
-    '${money(values.reduce((a,b)=>a+b,0))}</b></td>${kind===\'earnings\'?`<td style="color:var(--gold)"><b>${money(data.net_after_vlad.daily[String(day)])}</b></td>`:""}</tr>',
+    '${money(values.reduce((a,b)=>a+b,0))}</b></td>${kind===\'earnings\'?`<td class="vlad-deduction"><b>${money(data.net_after_vlad.daily[String(day)]-values.reduce((a,b)=>a+b,0))}</b></td><td style="color:var(--gold)"><b>${money(data.net_after_vlad.daily[String(day)])}</b></td>`:""}</tr>',
     1,
 ).replace(
     "totalRow('Итого 1–15',data.first)",
@@ -3430,10 +3432,13 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     "totalRow('Итого 16–'+data.days,data.second,data.net_after_vlad?.second)+totalRow('За месяц',data.total,data.net_after_vlad?.total)",
 ).replace(
     '<th>Итого ₽</th></tr></thead>',
-    '<th>Итого ₽</th>${kind===\'earnings\'?\'<th style="min-width:150px;color:var(--gold)">Чистыми<br>после вычета<br>Владу ₽</th>\':""}</tr></thead>',
+    '<th>Итого ₽</th>${kind===\'earnings\'?\'<th>Надбавка<br>Владу</th><th style="color:var(--gold)">Чистыми</th>\':""}</tr></thead>',
 ).replace(
     '«Владу» — количество запрошенных сотрудников × 100 ₽ за день.',
     '«Владу» — количество запрошенных сотрудников без выносов × 100 ₽ за день. «Чистыми» — итог дня минус надбавка Владу.',
+).replace(
+    'grid.innerHTML=`<table style="border-collapse:separate;border-spacing:8px;min-width:100%;text-align:right"><thead>',
+    'grid.innerHTML=`<style>#personalGrid thead th{position:sticky;top:0;z-index:3;background:var(--panel2);box-shadow:0 2px 0 var(--line);padding:8px 5px;vertical-align:middle;white-space:nowrap}#personalGrid thead th:first-child{text-align:left}#personalGrid td.vlad-deduction{color:#ff5555;white-space:nowrap;font-weight:700}#personalGrid table{min-width:max-content}#personalGrid{overscroll-behavior:contain}</style><table style="border-collapse:separate;border-spacing:8px;min-width:100%;text-align:right"><thead>',
 )
 
 # Personal manual ledgers are separate from cash reported by brigadiers.
