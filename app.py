@@ -3458,6 +3458,57 @@ class PersonalMonthlyTable(Base):
     version = Column(Integer, nullable=False, default=1)
     __table_args__ = (UniqueConstraint("owner_id", "month", "kind", name="uq_personal_month_table"),)
 
+
+class PersonalGbuComment(Base):
+    __tablename__ = "personal_gbu_comments"
+    owner_id = Column(BigInteger, primary_key=True)
+    month = Column(String(7), primary_key=True)
+    text = Column(String(500), nullable=False, default="")
+    version = Column(Integer, nullable=False, default=1)
+
+
+class PersonalGbuCommentChange(BaseModel):
+    text: str = Field(max_length=500)
+    version: int = Field(ge=0, strict=True)
+
+
+def personal_gbu_comment_data(db: Session, owner_id: int, month: str):
+    row = db.get(PersonalGbuComment, (owner_id, month))
+    return {"month": month, "text": row.text if row else "", "version": row.version if row else 0}
+
+
+@app.get("/api/personal-gbu-comment/{month}")
+def get_personal_gbu_comment(month: str, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    _require_owner(db, user)
+    _personal_month_days(month)
+    return personal_gbu_comment_data(db, user.id, month)
+
+
+@app.put("/api/personal-gbu-comment/{month}")
+def save_personal_gbu_comment(month: str, change: PersonalGbuCommentChange,
+                              db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    _require_owner(db, user)
+    _personal_month_days(month)
+    values = {"text": change.text.strip(), "version": change.version + 1}
+    conflict = "Комментарий изменён в другом окне. Ваш текст остался в поле. Скопируйте его и откройте комментарий заново."
+    try:
+        if change.version == 0:
+            db.add(PersonalGbuComment(owner_id=user.id, month=month, **values))
+        else:
+            result = db.execute(update(PersonalGbuComment).where(
+                PersonalGbuComment.owner_id == user.id,
+                PersonalGbuComment.month == month,
+                PersonalGbuComment.version == change.version).values(**values))
+            if result.rowcount != 1:
+                db.rollback()
+                raise HTTPException(409, conflict)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, conflict)
+    return personal_gbu_comment_data(db, user.id, month)
+
+
 class PersonalCashDay(Base):
     __tablename__ = 'personal_cash_days'
     owner_id = Column(BigInteger, primary_key=True)
@@ -3641,7 +3692,10 @@ def personal_table_get(kind: Literal["earnings", "cash", "kickbacks"], month: st
     _personal_month_days(month)
     row = db.execute(select(PersonalMonthlyTable).where(PersonalMonthlyTable.owner_id == user.id,
         PersonalMonthlyTable.month == month, PersonalMonthlyTable.kind == kind)).scalar_one_or_none()
-    return _personal_table_result(row, kind, month, db)
+    result = _personal_table_result(row, kind, month, db)
+    if kind == "earnings":
+        result["gbu_comment"] = personal_gbu_comment_data(db, user.id, month)
+    return result
 
 
 @app.patch("/api/personal-tables/{kind}/{month}")
@@ -3715,7 +3769,10 @@ def personal_table_edit(kind: Literal["earnings", "cash", "kickbacks"], month: s
     except IntegrityError:
         db.rollback()
         raise HTTPException(409, "Таблица уже создана в другом окне. Откройте её заново.")
-    return _personal_table_result(row, kind, month, db)
+    result = _personal_table_result(row, kind, month, db)
+    if kind == "earnings":
+        result["gbu_comment"] = personal_gbu_comment_data(db, user.id, month)
+    return result
 
 
 class DispatchDayCounts(Base):
@@ -4717,8 +4774,9 @@ INLINE_INDEX_HTML = _organize_day_dashboard(INLINE_INDEX_HTML)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
 <style>
 .metric.order-total-metric{padding-left:4px;padding-right:4px}
-.day-comment-btn{margin-top:10px;max-width:100%;min-height:30px;padding:5px 3px;border:1px solid var(--gold2);border-radius:12px;background:var(--panel2);color:var(--gold);font-size:10px;line-height:1.2;white-space:nowrap;cursor:pointer}
+.day-comment-btn{position:relative;overflow:visible;margin-top:10px;max-width:100%;min-height:30px;padding:5px 3px;border:1px solid var(--gold2);border-radius:12px;background:var(--panel2);color:var(--gold);font-size:10px;line-height:1.2;white-space:nowrap;cursor:pointer}
 .day-comment-btn.has-comment{background:#302719;border-color:var(--gold)}
+.day-comment-btn.has-comment::after{content:"";position:absolute;right:-2px;top:-2px;width:6px;height:6px;border-radius:50%;background:var(--gold);box-shadow:0 0 0 2px var(--panel2);pointer-events:none}
 #numberCardsBody .number-card-row{padding:16px 0;gap:10px}
 #numberCardsBody .number-card-details{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:10px;row-gap:6px;align-items:start}
 #numberCardsBody .number-card-name{grid-column:1;grid-row:1;white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere;line-height:1.4}
@@ -5433,3 +5491,105 @@ def _compact_personal_table_html(html):
 
 
 INLINE_INDEX_HTML = _compact_personal_table_html(INLINE_INDEX_HTML)
+
+
+def _personal_comments_html(html):
+    """Open the GBU header's monthly note without changing daily earnings."""
+    start = html.index('async function openPersonalTables(')
+    end = html.index('\nconst orderCountTypes=', start)
+    personal = html[start:end]
+
+    def replace_once(old, new):
+        nonlocal personal
+        if old not in personal:
+            raise ValueError('Personal comment UI anchor missing: ' + old[:70])
+        personal = personal.replace(old, new, 1)
+
+    replace_once("data=null,busy=false,request=0;",
+                 "data=null,busy=false,request=0,commentOpen=false,commentDraft='',commentVersion=0,commentTop=0;")
+    replace_once(".forEach(e=>e.disabled=value)}", """.forEach(e=>e.disabled=value||commentOpen);
+  qsa('#personalGbuCommentForm input,#personalGbuCommentForm button,[data-personal-col]',grid).forEach(e=>e.disabled=value||(e.dataset.personalCol!==undefined&&data?.automatic_columns.includes(Number(e.dataset.personalCol))))
+ }""")
+    replace_once('class="secondary personal-column"',
+                 'class="secondary personal-column${kind===\'earnings\'&&col===1&&commentOpen?\' is-comment-open\':\'\'}"')
+    replace_once('data-personal-col="${col}"><span>${esc(name)}</span>',
+                 '''data-personal-col="${col}" ${kind==='earnings'&&col===1?`aria-expanded="${commentOpen}" aria-label="${data.gbu_comment?.text?.trim()?'Открыть сохранённый комментарий к ГБУ':'Добавить комментарий к ГБУ'}"`:''}><span class="personal-column-label">${esc(name)}${kind==='earnings'&&col===1&&data.gbu_comment?.text?.trim()?'<i class="gbu-comment-dot" aria-hidden="true"></i>':''}</span>''')
+    replace_once('<tbody>${rows}</tbody>', '<tbody>${gbuCommentRow()}${rows}</tbody>')
+    replace_once("  qsa('[data-kickback-day]',grid)", "  bindGbuComment();\n  qsa('[data-kickback-day]',grid)")
+    replace_once("if(busy)return;const column=Number(btn.dataset.personalCol),value=prompt('Название столбца',data.columns[column]);", """if(busy)return;const column=Number(btn.dataset.personalCol);
+   if(kind==='earnings'&&column===1){awaitToggleGbuComment();return}
+   if(commentOpen)return;
+   const value=prompt('Название столбца',data.columns[column]);""")
+    replace_once("if(busy)return;const [day,column]", "if(busy||commentOpen)return;const [day,column]")
+    # A background response must never replace a draft or overwrite a just-saved note.
+    replace_once("  if(busy||!data)return;\n  const id=request,loadedKind=kind,loadedMonth=month;",
+                 "  if(busy||!data||commentOpen)return;\n  const id=request,loadedKind=kind,loadedMonth=month;")
+    replace_once("if(active()&&!busy&&id===request&&kind===loadedKind",
+                 "if(active()&&!busy&&!commentOpen&&id===request&&kind===loadedKind")
+    replace_once(' async function load(){', r'''
+ function gbuCommentRow(){
+  if(!commentOpen||kind!=='earnings')return '';
+  const width=Math.max(220,grid.clientWidth-12);
+  return `<tr class="gbu-comment-row"><td colspan="${data.columns.length+4}"><form id="personalGbuCommentForm" class="gbu-comment-panel" style="width:${width}px">
+   <label for="personalGbuCommentInput">Комментарий к ГБУ</label>
+   <p class="muted" id="personalGbuCommentHelp">Заработок за предыдущую половину месяца</p>
+   <input id="personalGbuCommentInput" type="text" maxlength="500" aria-describedby="personalGbuCommentHelp" placeholder="Укажите период и сумму заработка">
+   <small class="muted">Чтобы удалить запись, очистите поле и сохраните.</small>
+   <p id="personalGbuCommentStatus" role="status" aria-live="polite"></p>
+   <div class="gbu-comment-actions"><button type="submit" class="primary">Сохранить</button><button type="button" class="secondary" id="personalGbuCommentCancel">Отмена</button></div>
+  </form></td></tr>`;
+ }
+ function closeGbuComment(){
+  if(busy)return;
+  ++request;commentOpen=false;grid.scrollTop=commentTop;render();lock(false);
+ }
+ async function awaitToggleGbuComment(){
+  if(commentOpen){closeGbuComment();return}
+  ++request;lock(true);status.textContent='Загрузка комментария…';
+  try{
+   const note=await api(`/api/personal-gbu-comment/${month}`);if(!active())return;
+   data.gbu_comment=note;commentDraft=note.text;commentVersion=note.version;
+   commentTop=grid.scrollTop;commentOpen=true;grid.scrollTop=0;render();status.textContent='';
+   qs('#personalGbuCommentInput',grid).focus({preventScroll:true});
+  }catch(e){if(active())status.textContent=e.message}
+  finally{if(active())lock(false)}
+ }
+ function bindGbuComment(){
+  if(!commentOpen)return;
+  const form=qs('#personalGbuCommentForm',grid),input=qs('#personalGbuCommentInput',grid),message=qs('#personalGbuCommentStatus',grid);
+  input.value=commentDraft;
+  input.oninput=()=>{commentDraft=input.value;message.textContent=''};
+  qs('#personalGbuCommentCancel',grid).onclick=closeGbuComment;
+  form.onsubmit=async e=>{
+   e.preventDefault();if(busy||!active())return;
+   ++request;lock(true);message.textContent='Сохранение…';
+   try{
+    const note=await api(`/api/personal-gbu-comment/${month}`,{method:'PUT',body:JSON.stringify({text:input.value,version:commentVersion})});
+    if(!active())return;
+    data.gbu_comment=note;commentDraft=note.text;commentVersion=note.version;commentOpen=false;
+    grid.scrollTop=commentTop;render();status.textContent=note.text?'✓ Комментарий сохранён':'Комментарий очищен';
+   }catch(err){if(active())message.textContent='Не сохранено: '+err.message}
+   finally{if(active())lock(false)}
+  };
+ }
+ async function load(){''')
+    html = html[:start] + personal + html[end:]
+    return html.replace('</head>', r'''
+<style id="personal-gbu-comment-style">
+#personalGrid .personal-column-label{position:relative;display:inline-block}
+#personalGrid .gbu-comment-dot{position:absolute;top:-1px;right:-8px;width:6px;height:6px;border-radius:50%;background:var(--gold);pointer-events:none}
+#personalGrid .personal-column.is-comment-open{background:#302719;box-shadow:inset 0 0 0 1px var(--gold)}
+#personalGrid .personal-table .gbu-comment-row>td{height:auto;padding:8px 0;text-align:left;white-space:normal}
+#personalGrid .gbu-comment-panel{position:sticky;left:0;box-sizing:border-box;margin:0;padding:12px;background:var(--panel2);border:1px solid var(--line);border-radius:12px;color:var(--text);text-align:left;white-space:normal}
+#personalGrid .gbu-comment-panel label{display:block;font-size:16px;font-weight:700}
+#personalGrid .gbu-comment-panel p{margin:5px 0 8px;font-size:12px;line-height:1.4}
+#personalGrid .gbu-comment-panel input{display:block;box-sizing:border-box;width:100%;min-width:0;margin:8px 0;padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text);font-size:16px}
+#personalGrid .gbu-comment-panel small{font-size:11px;line-height:1.4}
+#personalGrid #personalGbuCommentStatus{color:var(--amber);overflow-wrap:anywhere}
+#personalGrid .gbu-comment-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+#personalGrid .gbu-comment-actions button{min-height:40px;padding:8px 14px;font-size:14px}
+</style>
+</head>''', 1)
+
+
+INLINE_INDEX_HTML = _personal_comments_html(INLINE_INDEX_HTML)
