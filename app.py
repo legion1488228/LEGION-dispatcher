@@ -509,6 +509,15 @@ class ReadinessReport(BaseModel):
     raw_text: str = ""
 
 
+class ReadinessMessageReport(ReadinessReport):
+    source_chat_id: int = Field(lt=0)
+    source_message_id: int = Field(gt=0)
+    source_sent_at: int = Field(gt=0)
+    source_event_at: int = Field(gt=0)
+    source_event_key: str = Field(min_length=64, max_length=64)
+    is_edit: bool = False
+
+
 class EmployeeMembership(BaseModel):
     tg_id: int
     full_name: str
@@ -1646,6 +1655,18 @@ async def finalize_order(order_id: int, db: Session = Depends(get_db), user: Tel
 
 
 # ---------- Readiness ----------
+
+class ReadinessMessageSource(Base):
+    __tablename__ = "readiness_message_sources"
+    employee_id = Column(Integer, primary_key=True)
+    work_date = Column(Date, primary_key=True)
+    chat_id = Column(BigInteger, nullable=False)
+    message_id = Column(BigInteger, nullable=False)
+    sent_at = Column(BigInteger, nullable=False)
+    event_at = Column(BigInteger, nullable=False)
+    event_key = Column(String(64), nullable=False)
+    applied_at = Column(DateTime, nullable=False)
+
 
 class ManualReadiness(Base):
     __tablename__ = "manual_readiness_entries"
@@ -2850,6 +2871,12 @@ def bot_readiness(data: ReadinessReport, db: Session = Depends(get_db)):
     )
     emp = _upsert_employee(db, sync)
     row = db.execute(select(Readiness).where(Readiness.employee_id == emp.id, Readiness.work_date == data.work_date)).scalar_one_or_none()
+    row = _record_bot_readiness(db, data, emp, row)
+    db.commit()
+    return {"ok": True, "employee_id": emp.id, "status": row.status}
+
+
+def _record_bot_readiness(db, data, emp, row, source="message"):
     old_status = row.status if row else "no_response"
     if not row:
         row = Readiness(employee_id=emp.id, work_date=data.work_date, status=data.status)
@@ -2869,9 +2896,66 @@ def bot_readiness(data: ReadinessReport, db: Session = Depends(get_db)):
                 "work_date": data.work_date.isoformat(),
                 "old_status": old_status,
                 "new_status": data.status,
-                "source": "button" if str(data.raw_text or "").startswith("button:") else "message",
+                "source": "button" if str(data.raw_text or "").startswith("button:") else source,
             }, ensure_ascii=False),
         ))
+    return row
+
+
+@app.post("/api/bot/readiness/message", dependencies=[Depends(_bot_key)])
+def bot_readiness_message(data: ReadinessMessageReport, db: Session = Depends(get_db)):
+    if data.tg_id in HIDDEN_TG_IDS:
+        raise HTTPException(403, "Участник недоступен")
+    if data.work_date < datetime.now(MOSCOW).date():
+        return {"ok": False, "reason": "expired"}
+    # Assignment endpoints lock the same employee. A withdrawal and a new
+    # assignment therefore cannot both pass their checks concurrently.
+    emp = db.scalar(select(Employee).where(Employee.tg_id == data.tg_id).with_for_update())
+    if emp is None:
+        emp = _upsert_employee(db, EmployeeSync(**{
+            k: getattr(data, k) for k in ("tg_id", "full_name", "phone", "telegram_username", "group_code", "height_cm", "has_car")
+        }, preserve_identity=True, active=True))
+    row = db.scalar(select(Readiness).where(Readiness.employee_id == emp.id, Readiness.work_date == data.work_date))
+    state = db.get(ReadinessMessageSource, (emp.id, data.work_date))
+    if state:
+        same_message = (state.chat_id, state.message_id) == (data.source_chat_id, data.source_message_id)
+        newer_source = (data.source_sent_at, data.source_message_id, data.source_chat_id) > (state.sent_at, state.message_id, state.chat_id)
+        if (not same_message and not newer_source) or (same_message and data.source_event_at < state.event_at):
+            return {"ok": False, "reason": "stale"}
+        if (data.is_edit or state.event_key == data.source_event_key) and (not row or row.reported_at != state.applied_at):
+            return {"ok": False, "reason": "stale"}
+    manual = db.scalar(select(ManualReadiness).where(
+        ManualReadiness.work_date == data.work_date,
+        ManualReadiness.identity_key.in_([f"employee:{emp.id}", manual_readiness_identity(emp.full_name, emp.metro, emp.height_cm)]),
+    ).order_by(ManualReadiness.reported_at.desc()).limit(1))
+    if manual and (
+        manual.reported_at >= datetime.fromtimestamp(data.source_event_at, timezone.utc).replace(tzinfo=None)
+        or (data.is_edit and (not row or manual.reported_at >= row.reported_at))
+    ):
+        return {"ok": False, "reason": "stale"}
+    if state and state.event_key == data.source_event_key:
+        return {"ok": True, "employee_id": emp.id, "status": row.status, "replayed": True}
+    if data.status != "ready":
+        assigned = db.scalar(select(Assignment.id).join(Order, Order.id == Assignment.order_id).where(
+            Assignment.employee_id == emp.id, Order.work_date == data.work_date,
+            Order.status.notin_(["closed", "cancelled"])).limit(1))
+        # Number cards are also actual brigade orders, even when they were
+        # entered directly in Telegram rather than assigned in the mini app.
+        card = db.scalar(select(NumberCardEvent.id).where(
+            NumberCardEvent.tg_id == data.tg_id, NumberCardEvent.work_date == data.work_date,
+            _visible_number_card()).limit(1))
+        if assigned is not None or card is not None:
+            return {"ok": False, "reason": "assigned"}
+    emp = _upsert_employee(db, EmployeeSync(**{
+        k: getattr(data, k) for k in ("tg_id", "full_name", "phone", "telegram_username", "group_code", "height_cm", "has_car")
+    }, preserve_identity=True, active=True))
+    row = _record_bot_readiness(db, data, emp, row, source="message_edit" if data.is_edit else "message")
+    if state is None:
+        state = ReadinessMessageSource(employee_id=emp.id, work_date=data.work_date)
+        db.add(state)
+    state.chat_id, state.message_id = data.source_chat_id, data.source_message_id
+    state.sent_at, state.event_at = data.source_sent_at, data.source_event_at
+    state.event_key, state.applied_at = data.source_event_key, row.reported_at
     db.commit()
     return {"ok": True, "employee_id": emp.id, "status": row.status}
 
