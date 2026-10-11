@@ -13,7 +13,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field, StrictInt
 from sqlalchemy import and_, func, or_, select, update, inspect as sa_inspect, text
 from sqlalchemy.orm import Session, selectinload
@@ -630,8 +630,9 @@ class GbuDraft(BaseModel):
 
 
 class OwnerSync(BaseModel):
-    tg_id: int
+    tg_id: int = Field(gt=0)
     full_name: str = ""
+    bot_username: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
 
 
 class CashierToggle(BaseModel):
@@ -1105,6 +1106,7 @@ def bootstrap(work_date: date | None = None, db: Session = Depends(get_db), user
     return {
         "user": {"id": user.id, "name": user.full_name},
         "is_owner": _is_owner(db, user.id),
+        "can_use_owner_cabinet": _can_use_owner_cabinet(db, user.id),
         "can_view_vlad_allowance": _can_view_vlad_allowance(db, user),
         "selected_date": selected.isoformat(),
         "today": datetime.now(MOSCOW).date().isoformat(),
@@ -2336,6 +2338,14 @@ def bot_sync_owner(data: OwnerSync, db: Session = Depends(get_db)):
         row = AccessUser(tg_id=data.tg_id, full_name=data.full_name, role="owner", active=True); db.add(row)
     else:
         row.full_name = data.full_name or row.full_name; row.role = "owner"; row.active = True
+    # This singleton follows the bot's actual owner, not the list of admins.
+    cabinet = db.get(OwnerCabinetConfig, 1)
+    if cabinet is None:
+        cabinet = OwnerCabinetConfig(id=1, owner_tg_id=data.tg_id)
+        db.add(cabinet)
+    cabinet.owner_tg_id = data.tg_id
+    if data.bot_username:
+        cabinet.bot_username = data.bot_username
     db.commit(); return {"ok": True}
 
 
@@ -5677,3 +5687,200 @@ def _personal_comments_html(html):
 
 
 INLINE_INDEX_HTML = _personal_comments_html(INLINE_INDEX_HTML)
+
+
+class OwnerCabinetConfig(Base):
+    __tablename__ = "owner_brigadier_cabinet_config"
+    id = Column(Integer, primary_key=True)
+    owner_tg_id = Column(BigInteger, nullable=False)
+    bot_username = Column(String(32), nullable=True)
+
+
+def _can_use_owner_cabinet(db: Session, tg_id: int) -> bool:
+    config = db.get(OwnerCabinetConfig, 1)
+    return bool(config and config.owner_tg_id == int(tg_id)
+                and int(tg_id) not in HIDDEN_TG_IDS and _is_owner(db, tg_id))
+
+
+def _owner_cabinet_readiness(db: Session, employee, work_date: date):
+    row = db.scalar(select(Readiness).where(
+        Readiness.employee_id == employee.id, Readiness.work_date == work_date)) if employee else None
+    status = row.status if row else "no_response"
+    raw_text = row.raw_text if row else ""
+    if employee:
+        manual = db.scalar(select(ManualReadiness).where(
+            ManualReadiness.work_date == work_date,
+            ManualReadiness.identity_key == f"employee:{employee.id}",
+        ).order_by(ManualReadiness.reported_at.desc()).limit(1))
+        if manual and (not row or not row.reported_at or manual.reported_at >= row.reported_at):
+            status, raw_text = manual.status, ""
+    labels = {"ready": "Готов", "not_ready": "На основной", "day_off": "Выходной",
+              "responded": "Отписался", "no_response": "Ещё не отмечена"}
+    return {"work_date": work_date.isoformat(), "status": status,
+            "label": labels.get(status, "Ещё не отмечена"), "text": raw_text or ""}
+
+
+@app.get("/api/owner/brigadier-cabinet")
+def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends(get_db),
+                            user: TelegramUser = Depends(require_admin)):
+    if not _can_use_owner_cabinet(db, user.id):
+        raise HTTPException(403, "Личный кабинет доступен только владельцу «ЛЕГИОН»")
+    today = datetime.now(MOSCOW).date()
+    selected = work_date or today
+    config = db.get(OwnerCabinetConfig, 1)
+    # Identity is derived only from the authenticated Telegram session.
+    employee = db.scalar(select(Employee).where(
+        Employee.tg_id == user.id, Employee.active.is_(True), _visible_employee(),
+        Employee.group_code == "brigadier").order_by(Employee.id).limit(1))
+    profile = _employee_dict(employee) if employee else None
+    orders = db.scalars(select(Order).join(Assignment, Assignment.order_id == Order.id).join(
+        Employee, Employee.id == Assignment.employee_id).where(
+        Employee.tg_id == user.id, Employee.active.is_(True), _visible_employee(),
+        Assignment.role == "brigadier", Order.work_date == selected,
+        Order.status != "cancelled").order_by(Order.issue_time, Order.id)).unique().all()
+    cards = db.scalars(select(NumberCardEvent).where(
+        NumberCardEvent.tg_id == user.id, NumberCardEvent.work_date == selected,
+        _visible_number_card()).order_by(NumberCardEvent.sent_at, NumberCardEvent.id)).all()
+    statuses = number_card_statuses(db, cards)
+    contacts = {row.event_id: bool(row.confirmed) for row in db.scalars(
+        select(OrderBrigadeContact).where(OrderBrigadeContact.tg_id == user.id,
+            OrderBrigadeContact.event_id.in_([card.id for card in cards])))} if cards else {}
+    items = [{"id": card.id, "source": card.source, "surname": card.surname,
+              "composition_closed": statuses[card.id]["closed"],
+              "contact_time": statuses[card.id]["contact_time"],
+              "on_contact": bool(contacts.get(card.id)), **effective_order_photo(db, card)} for card in cards]
+    def contact_sort_key(item):
+        clock = item["contact_time"]
+        minutes = sum(int(value) * factor for value, factor in zip(clock.split(":"), (60, 1))) if clock else 1440
+        return minutes, item["id"]
+    items.sort(key=contact_sort_key)
+    username = config.bot_username or ""
+    valid_username = bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", username))
+    actions = {key: f"https://t.me/{username}?start=ownercab_{key}" for key in
+               ("profile", "register", "readiness", "number", "contact", "photo", "tea", "close")} if valid_username else {}
+    return JSONResponse({
+        "user": {"id": user.id, "name": user.full_name}, "profile": profile,
+        "today": today.isoformat(), "work_date": selected.isoformat(),
+        "tomorrow": (today + timedelta(days=1)).isoformat(),
+        "readiness": _owner_cabinet_readiness(db, employee, selected),
+        "tomorrow_readiness": _owner_cabinet_readiness(db, employee, today + timedelta(days=1)),
+        "orders": [_order_dict(order, db) for order in orders], "number_cards": items,
+        "actions": actions,
+    }, headers={"Cache-Control": "private, no-store, max-age=0", "Pragma": "no-cache"})
+
+
+def _owner_brigadier_cabinet_html(html):
+    def replace_once(old, new):
+        nonlocal html
+        if html.count(old) != 1:
+            raise ValueError("Owner cabinet UI anchor missing or ambiguous: " + old[:80])
+        html = html.replace(old, new, 1)
+
+    replace_once('<button data-view="controlView">', '<button id="ownerCabinetNav" data-view="controlView">')
+    replace_once('<section id="controlView" class="view">',
+                 '<section id="ownerCabinetView" class="view" aria-label="Личный кабинет бригадира"><div id="ownerCabinetContent"></div></section>\n<section id="controlView" class="view">')
+    replace_once("async function renderCurrentView() {\n  const v = currentViewId();", """async function renderCurrentView() {
+  updateOwnerCabinetNav();
+  const v = currentViewId();
+  const personal=v==='ownerCabinetView'&&state.bootstrap?.can_use_owner_cabinet;
+  document.body.classList.toggle('owner-cabinet-open',!!personal);
+  qs('.topbar h1').textContent=personal?'Мой кабинет':'Диспетчерская';
+  if(personal)return loadOwnerCabinet();
+  ownerCabinetRequest++;
+  ownerCabinetData=null;
+  qs('#ownerCabinetContent').innerHTML='';""")
+    replace_once('// Events', r'''
+let ownerCabinetRequest=0,ownerCabinetData=null,ownerCabinetSignature='';
+function updateOwnerCabinetNav(){
+  const nav=qs('#ownerCabinetNav'),allowed=!!state.bootstrap?.can_use_owner_cabinet;
+  const next=allowed?'ownerCabinetView':'controlView';
+  if(nav.dataset.view===next)return;
+  const wasActive=nav.classList.contains('active');
+  nav.dataset.view=next;
+  nav.innerHTML=allowed?'<span aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="7" r="3.5"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/></svg></span><small>Мой кабинет</small>':'<span aria-hidden="true">!</span><small>Контроль</small>';
+  nav.setAttribute('aria-label',allowed?'Мой кабинет бригадира':'Контроль');
+  if(wasActive){qsa('.view').forEach(x=>x.classList.remove('active'));qs('#'+next).classList.add('active')}
+  if(!allowed){ownerCabinetRequest++;ownerCabinetData=null;ownerCabinetSignature='';qs('#ownerCabinetContent').innerHTML=''}
+}
+function ownerCabinetAction(key){
+  if(!state.bootstrap?.can_use_owner_cabinet||currentViewId()!=='ownerCabinetView')return;
+  const url=ownerCabinetData?.actions?.[key];
+  if(!url||!/^https:\/\/t\.me\/[A-Za-z][A-Za-z0-9_]{4,31}\?start=ownercab_(profile|register|readiness|number|contact|photo|tea|close)$/.test(url)){
+    toast('Кнопки станут доступны после подключения бота. Обновите кабинет чуть позже.');return;
+  }
+  if(tg?.openTelegramLink)tg.openTelegramLink(url);else window.location.href=url;
+}
+function ownerCabinetProfileHtml(data){
+  const p=data.profile,name=p?.full_name||data.user.name||'Ваш профиль';
+  const initials=name.trim().split(/\s+/).slice(0,2).map(x=>x[0]||'').join('');
+  const details=p?[p.metro,p.height_cm?`${p.height_cm} см`:'',p.has_car?'На авто':''].filter(Boolean).join(' · '):'Заполните профиль бригадира в боте';
+  return `<article class="cabinet-profile"><div class="cabinet-avatar" aria-hidden="true">${esc(initials)}</div><div class="cabinet-profile-copy"><small>Личный кабинет бригадира</small><h2>${esc(name)}</h2><p>${esc(details)}</p><button type="button" class="cabinet-text-link" data-cabinet-action="${p?'profile':'register'}">${p?'Изменить профиль':'Заполнить профиль'} ›</button></div><span class="cabinet-owner-badge">Только вы</span></article>`;
+}
+function ownerCabinetCardsHtml(data){
+  const cards=data.number_cards||[],orders=data.orders||[];
+  const cardRows=cards.map(c=>{
+    const photoTotal=c.source==='gbu'?2:1,photoReceived=Number(!!c.first_received)+(c.source==='gbu'?Number(!!c.second_received):0);
+    return `<article class="cabinet-order"><div class="cabinet-order-top"><span class="badge ${c.source==='gbu'?'gbu':'private'}">${c.source==='gbu'?'ГБУ':'Частный'}</span><span class="muted">${c.composition_closed?'Состав закрыт':'Состав не закрыт'}</span></div><h4>ум: ${esc(c.surname)}</h4><div class="cabinet-order-statuses"><span class="${c.on_contact?'cabinet-done':''}">Связь ${esc(c.contact_time||'—')} · ${c.on_contact?'на связи':'нет отметки'}</span><span class="${photoReceived===photoTotal?'cabinet-done':''}">Фото ${esc(c.photo_time||'—')} · ${photoReceived}/${photoTotal}</span></div></article>`;
+  }).join('');
+  const assigned=orders.map(o=>`<button type="button" class="cabinet-order cabinet-assigned" data-cabinet-order="${Number(o.id)}"><div class="cabinet-order-top"><span class="badge ${o.source==='gbu'?'gbu':'private'}">${esc(o.source_label)}</span><b>${esc(o.issue_time)}</b></div><h4>ум: ${esc(o.deceased_name||'Не указано')}</h4><p>${esc(o.route||'Маршрут не указан')}</p><small>${esc(o.status_label)} · Открыть заказ ›</small></button>`).join('');
+  return `${cards.length?'<h3>Мои номера в группе</h3>'+cardRows:''}${orders.length?'<h3>Назначено в диспетчерской</h3>'+assigned:''}${!cards.length&&!orders.length?'<div class="cabinet-empty">На эту дату у вас пока нет заказов.</div>':''}`;
+}
+async function loadOwnerCabinet(){
+  const root=qs('#ownerCabinetContent'),day=state.selectedDate,uid=state.bootstrap?.user?.id;
+  if(!state.bootstrap?.can_use_owner_cabinet)return;
+  const request=++ownerCabinetRequest;
+  const active=()=>request===ownerCabinetRequest&&currentViewId()==='ownerCabinetView'&&state.bootstrap?.can_use_owner_cabinet&&state.selectedDate===day&&state.bootstrap?.user?.id===uid;
+  if(ownerCabinetData?.work_date!==day){ownerCabinetData=null;ownerCabinetSignature='';root.innerHTML='<p class="muted" role="status">Загрузка вашего кабинета…</p>'}
+  try{
+    const data=await api(`/api/owner/brigadier-cabinet?work_date=${encodeURIComponent(day)}`,{cache:'no-store'});
+    if(!active()||data.work_date!==day||data.user.id!==uid)return;
+    ownerCabinetData=data;
+    const signature=JSON.stringify(data);
+    if(signature===ownerCabinetSignature&&qs('.cabinet-profile',root))return;
+    // A background refresh must not dismiss an open native date picker.
+    if(root.contains(document.activeElement)&&document.activeElement?.tagName==='INPUT')return;
+    ownerCabinetSignature=signature;
+    const r=data.tomorrow_readiness;
+    const actions=[['number','▤','Номер в группу','На завтра'],['contact','☎','Бригада на связи','Выбрать заказ'],['photo','▧','Фотоотчёт','Частный / ГБУ'],['tea','₽','Чай по заказу','Добавить отчёт'],['close','✓','Закрыть состав','Сотрудники и время']];
+    root.innerHTML=`${ownerCabinetProfileHtml(data)}
+      <article class="cabinet-readiness"><div><small>Готовность на завтра · ${esc(fmtDate(data.tomorrow))}</small><strong class="${r.status==='ready'?'cabinet-done':''}">${esc(r.label)}</strong></div><button type="button" class="primary small" data-cabinet-action="readiness">Отписаться</button>${r.text?`<p>${esc(r.text)}</p>`:''}</article>
+      <div class="cabinet-actions">${actions.map(([key,icon,title,note])=>`<button type="button" class="cabinet-action" data-cabinet-action="${key}"><span aria-hidden="true">${icon}</span><b>${title}</b><small>${note}</small></button>`).join('')}<button type="button" class="cabinet-action" id="cabinetEarnings"><span aria-hidden="true">₽</span><b>Мой заработок</b><small>Мои таблицы</small></button></div>
+      <p class="cabinet-bot-hint">Отписка и отчёты откроются в личном чате с ботом.</p>
+      ${!Object.keys(data.actions).length?'<p class="cabinet-bot-hint">Связь с ботом ещё не настроена. Обновите кабинет чуть позже.</p>':''}
+      <section class="cabinet-my-orders"><div class="cabinet-date-row"><h2>Мои заказы</h2><label><span class="sr-only">Дата моих заказов</span><input id="cabinetDate" type="date" value="${esc(day)}" aria-label="Дата моих заказов"></label></div><div class="cabinet-day-shortcuts"><button type="button" data-cabinet-day="${data.today}" class="chip ${day===data.today?'active':''}">Сегодня</button><button type="button" data-cabinet-day="${data.tomorrow}" class="chip ${day===data.tomorrow?'active':''}">Завтра</button></div>${ownerCabinetCardsHtml(data)}</section>
+      <button type="button" class="secondary cabinet-control-link" id="cabinetControl">Контроль диспетчерской <span aria-hidden="true">›</span></button>`;
+    qsa('[data-cabinet-action]',root).forEach(btn=>{btn.disabled=!data.actions[btn.dataset.cabinetAction];btn.onclick=()=>ownerCabinetAction(btn.dataset.cabinetAction)});
+    qs('#cabinetEarnings',root).onclick=()=>{if(state.bootstrap?.can_use_owner_cabinet)openPersonalTables()};
+    qs('#cabinetDate',root).onchange=e=>{if(e.target.value)loadBootstrap(e.target.value).catch(e=>toast(e.message))};
+    qsa('[data-cabinet-day]',root).forEach(btn=>btn.onclick=()=>loadBootstrap(btn.dataset.cabinetDay).catch(e=>toast(e.message)));
+    qsa('[data-cabinet-order]',root).forEach(btn=>btn.onclick=()=>openOrder(Number(btn.dataset.cabinetOrder)).catch(e=>toast(e.message)));
+    qs('#cabinetControl',root).onclick=async()=>{
+      if(!state.bootstrap?.can_use_owner_cabinet)return;
+      const button=qs('#cabinetControl',root);button.disabled=true;
+      const stillHere=()=>currentViewId()==='ownerCabinetView'&&state.bootstrap?.can_use_owner_cabinet&&state.bootstrap?.user?.id===uid&&state.selectedDate===day&&root.contains(button);
+      try{await loadControl();if(stillHere())showModal('Контроль · '+fmtDate(day),qs('#controlContent').innerHTML)}catch(e){if(stillHere())toast(e.message)}finally{button.disabled=false}
+    };
+  }catch(e){if(active()){ownerCabinetData=null;ownerCabinetSignature='';root.innerHTML=`<div class="cabinet-empty" role="alert">${esc(e.message)}<br><button type="button" class="secondary" id="cabinetRetry">Повторить</button></div>`;qs('#cabinetRetry').onclick=()=>loadBootstrap(day).catch(e=>toast(e.message))}}
+}
+// Events''')
+    return html.replace('</head>', r'''
+<style id="owner-cabinet-style">
+.owner-cabinet-open #dateStrip,.owner-cabinet-open #selectedDayHeader,.owner-cabinet-open #selectedDayHeader+h3,.owner-cabinet-open #summary{display:none}
+.owner-cabinet-open main{padding-top:0}
+#ownerCabinetView{padding-bottom:12px}
+#ownerCabinetView button{touch-action:manipulation}
+#ownerCabinetView button:focus-visible,#cabinetDate:focus-visible{outline:2px solid var(--gold);outline-offset:3px}
+.cabinet-profile{display:flex;position:relative;gap:12px;align-items:center;border:1px solid #55452a;border-radius:20px;padding:24px 16px 18px;background:linear-gradient(125deg,#262116,#141416);margin:4px 0 14px}
+.cabinet-avatar{flex-shrink:0;width:52px;height:52px;display:grid;place-items:center;border:1px solid var(--gold);border-radius:50%;color:var(--gold);font-size:20px;font-weight:800;background:#17150f}
+.cabinet-profile-copy{min-width:0;flex:1}.cabinet-profile small{display:block;color:var(--muted);font-size:11px;margin:6px 0}.cabinet-profile h2{font-size:20px;margin:0;overflow-wrap:anywhere}.cabinet-profile p{color:#d3cec3;font-size:13px;margin:5px 0}.cabinet-text-link{border:0;padding:5px 0;background:none;color:var(--gold);font:inherit;font-size:12px;text-align:left}
+.cabinet-owner-badge{position:absolute;top:8px;right:12px;color:var(--gold);font-size:9px;letter-spacing:.03em}
+.cabinet-readiness{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:16px}.cabinet-readiness>div{min-width:0;flex:1}.cabinet-readiness small{display:block;font-size:11px;color:var(--muted);line-height:1.5}.cabinet-readiness strong{display:block;font-size:17px;margin-top:4px}.cabinet-readiness p{width:100%;margin:0;color:var(--muted);font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+.cabinet-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.cabinet-action{border:1px solid var(--line);border-radius:16px;background:var(--panel);color:var(--text);padding:14px;text-align:left;display:flex;flex-direction:column;align-items:flex-start;gap:5px;min-height:104px;min-width:0}.cabinet-action>span{color:var(--gold);font-size:22px;line-height:1.2}.cabinet-action b{font-size:14px;line-height:1.35}.cabinet-action small{font-size:11px;color:var(--muted)}.cabinet-action:disabled{opacity:.5}.cabinet-bot-hint{font-size:11px;color:var(--muted);line-height:1.5;margin:10px 1px 20px}
+.cabinet-date-row{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}.cabinet-date-row h2{font-size:21px;margin:0}.cabinet-date-row label{max-width:100%;min-width:0}.cabinet-date-row input{font-family:inherit;font-size:14px;max-width:165px;padding:7px 9px;border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--text);color-scheme:dark}.cabinet-day-shortcuts{display:flex;gap:7px;margin:12px 0}.cabinet-day-shortcuts .active{border-color:var(--gold);color:var(--gold)}
+.cabinet-my-orders h3{font-size:13px;color:var(--muted);margin:18px 0 10px}.cabinet-order{display:block;width:100%;padding:14px;background:var(--panel);border:1px solid var(--line);border-radius:16px;margin-bottom:10px;color:var(--text);text-align:left;overflow-wrap:anywhere}.cabinet-order-top{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:11px}.cabinet-order h4{font-size:16px;margin:10px 0}.cabinet-order p{font-size:13px;margin:8px 0;color:var(--muted)}.cabinet-order small{font-size:11px;color:var(--gold)}.cabinet-order-statuses{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--muted)}#ownerCabinetView .cabinet-done{color:var(--green)}.cabinet-empty{padding:22px 14px;border:1px dashed var(--line);border-radius:15px;color:var(--muted);font-size:13px;line-height:1.5;text-align:center}.cabinet-empty button{margin-top:12px}.cabinet-control-link{display:flex;width:100%;justify-content:space-between;align-items:center;font-size:14px;padding:15px;margin-top:20px;min-height:48px}
+#ownerCabinetView .sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
+@media(min-width:700px){.cabinet-actions{grid-template-columns:repeat(3,minmax(0,1fr))}#ownerCabinetView{max-width:780px;margin:auto}}
+</style></head>''', 1)
+
+
+INLINE_INDEX_HTML = _owner_brigadier_cabinet_html(INLINE_INDEX_HTML)
