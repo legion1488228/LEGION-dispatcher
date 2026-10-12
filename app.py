@@ -6132,7 +6132,7 @@ function ownerCabinetProfileHtml(data){
   return `<article class="cabinet-profile"><button type="button" class="cabinet-avatar" id="cabinetAvatar" aria-label="${avatar?'Изменить личное фото':'Добавить личное фото'}"><span class="cabinet-avatar-face">${avatar?`<img src="${esc(avatar)}" alt="Личное фото бригадира">`:esc(initials||'＋')}</span><span class="cabinet-avatar-camera">${cabinetIcon('camera')}</span></button><div class="cabinet-profile-copy"><h2>${esc(name)}${p?.has_car?' 🚗':''}</h2>${p?'':'<p>Заполните профиль бригадира</p>'}</div><button type="button" class="cabinet-edit-profile" data-cabinet-action="${p?'profile':'register'}" aria-label="${p?'Изменить профиль':'Заполнить профиль'}">${cabinetIcon(p?'edit':'plus')}</button></article>`;
 }
 function cabinetMoney(value){return Number(value||0).toLocaleString('ru-RU')}
-async function openCabinetFinance(onDate=ownerCabinetData?.today,tab='cash'){
+async function openCabinetFinance(onDate=ownerCabinetData?.today,tab='earnings'){
   if(!state.bootstrap?.can_use_owner_cabinet||currentViewId()!=='ownerCabinetView'||!onDate)return;
   const uid=state.bootstrap.user.id,root=qs('#ownerCabinetContent');
   root.dataset.cabinetView='finance';root.innerHTML='<section id="cabinetFinance"><p role="status">Загрузка кассы и заработка…</p></section>';
@@ -6145,8 +6145,9 @@ async function openCabinetFinance(onDate=ownerCabinetData?.today,tab='cash'){
     for(const row of rows.values()){
       try{const draft=JSON.parse(sessionStorage.getItem(draftKey(row.work_date))||'null');if(draft){row.salary=draft.salary;row.tea=draft.tea;row.version=draft.version;row.dirty=true}}catch{}
     }
-    const endDay=Number(data.end.slice(8)),second=Number(data.start.slice(8))===16;
-    panel.innerHTML=`<button type="button" class="cabinet-back" id="cabinetFinanceBack">${cabinetIcon('back')}Кабинет бригадира</button><h2>Касса и заработок</h2><label class="cabinet-finance-month">Месяц<input id="cabinetFinanceMonth" type="month" value="${esc(data.start.slice(0,7))}" aria-label="Месяц кассы и заработка"></label><div class="cabinet-finance-tabs" role="group" aria-label="Период"><button type="button" data-half="1" class="${second?'':'active'}" aria-pressed="${!second}">1–15</button><button type="button" data-half="16" class="${second?'active':''}" aria-pressed="${second}">16–${new Date(Number(data.start.slice(0,4)),Number(data.start.slice(5,7)),0).getDate()}</button></div><div class="cabinet-finance-tabs" role="tablist"><button type="button" data-finance-tab="cash" role="tab">Моя касса</button><button type="button" data-finance-tab="earnings" role="tab">Мой заработок</button></div><div id="cabinetFinanceBody"></div>`;
+    const endDay=Number(data.end.slice(8));
+    const halfLabel=half=>half===1?'1–15':`16–${endDay}`;
+    panel.innerHTML=`<button type="button" class="cabinet-back" id="cabinetFinanceBack">${cabinetIcon('back')}Кабинет бригадира</button><h2>Касса и заработок</h2><label class="cabinet-finance-month">Месяц<input id="cabinetFinanceMonth" type="month" value="${esc(data.start.slice(0,7))}" aria-label="Месяц кассы и заработка"></label><div class="cabinet-finance-tabs" role="tablist"><button type="button" data-finance-tab="earnings" role="tab">Мой заработок</button><button type="button" data-finance-tab="cash" role="tab">Моя касса</button></div><div id="cabinetFinanceBody"></div>`;
     const amount=value=>value===null||value===''?null:/^\d+$/.test(String(value))&&Number(value)<=10000000?Number(value):NaN;
     const valid=row=>!Number.isNaN(amount(row.salary))&&!Number.isNaN(amount(row.tea));
     function remember(row){sessionStorage.setItem(draftKey(row.work_date),JSON.stringify({salary:row.salary,tea:row.tea,version:row.version}))}
@@ -6155,9 +6156,16 @@ async function openCabinetFinance(onDate=ownerCabinetData?.today,tab='cash'){
       if(!active())return;
       const discard=qs('#cabinetDiscardEarnings',panel);if(discard)discard.hidden=![...rows.values()].some(row=>row.dirty||row.error);
       let salary=0,tea=0;
+      const halves={1:{salary:0,tea:0},2:{salary:0,tea:0}};
       for(const row of rows.values()){
         const a=amount(row.salary),b=amount(row.tea);salary+=Number.isFinite(a)?a:0;tea+=Number.isFinite(b)?b:0;
+        const half=halves[Number(row.work_date.slice(8))<=15?1:2];
+        half.salary+=Number.isFinite(a)?a:0;half.tea+=Number.isFinite(b)?b:0;
         const total=qs(`[data-day-total="${row.work_date}"]`,panel);if(total)total.textContent=cabinetMoney((a||0)+(b||0));
+      }
+      for(const half of [1,2])for(const field of ['salary','tea','total']){
+        const cell=qs(`[data-half-${field}="${half}"]`,panel);
+        if(cell)cell.textContent=cabinetMoney(field==='total'?halves[half].salary+halves[half].tea:halves[half][field]);
       }
       const a=qs('#cabinetSalaryTotal',panel),b=qs('#cabinetTeaTotal',panel),c=qs('#cabinetEarningsTotal',panel);
       if(a)a.textContent=cabinetMoney(salary);if(b)b.textContent=cabinetMoney(tea);if(c)c.textContent=cabinetMoney(salary+tea);
@@ -6199,7 +6207,12 @@ async function openCabinetFinance(onDate=ownerCabinetData?.today,tab='cash'){
       qsa('[data-finance-tab]',panel).forEach(b=>{b.classList.toggle('active',b.dataset.financeTab===tab);b.setAttribute('aria-selected',b.dataset.financeTab===tab)});
       const body=qs('#cabinetFinanceBody',panel);
       if(tab==='earnings'){
-        body.innerHTML=`<p class="cabinet-finance-hint">Оклад и личный чай вводите вручную. Итог считается автоматически. Все суммы в ₽.</p><table class="cabinet-earnings-table"><colgroup><col style="width:16%"><col style="width:28%"><col style="width:28%"><col style="width:28%"></colgroup><thead><tr><th>День</th><th>Оклад</th><th>Чай</th><th>Итог</th></tr></thead><tbody>${[...rows.values()].map(row=>`<tr><th scope="row">${row.work_date.slice(8)}.${row.work_date.slice(5,7)}</th>${['salary','tea'].map(k=>`<td><input type="text" inputmode="numeric" pattern="[0-9]*" data-earnings-day="${row.work_date}" data-field="${k}" value="${esc(row[k]??'')}" placeholder="—" autocomplete="off" aria-label="${k==='salary'?'Оклад':'Личный чай'} за ${row.work_date}" maxlength="8"></td>`).join('')}<td data-day-total="${row.work_date}"></td></tr>`).join('')}</tbody><tfoot><tr><th>Всего</th><td id="cabinetSalaryTotal"></td><td id="cabinetTeaTotal"></td><td id="cabinetEarningsTotal"></td></tr></tfoot></table><p id="cabinetEarningsStatus" role="status" aria-live="polite"></p><button type="button" class="cabinet-secondary cabinet-wide" id="cabinetSaveEarnings">Сохранить изменения</button><button type="button" class="cabinet-back" id="cabinetDiscardEarnings" hidden>Отменить несохранённые правки</button>`;
+        const subtotal=day=>{
+          const n=Number(day.slice(8));if(n!==15&&n!==endDay)return '';
+          const half=n===15?1:2;
+          return `<tr class="cabinet-period-total" data-earnings-half="${half}"><th scope="row"><span>${halfLabel(half)}</span><small>Итого</small></th><td data-half-salary="${half}"></td><td data-half-tea="${half}"></td><td data-half-total="${half}"></td></tr>`;
+        };
+        body.innerHTML=`<p class="cabinet-finance-hint">Оклад и личный чай вводите вручную. Итоги за 1–15 и 16–${endDay} считаются автоматически. Все суммы в ₽.</p><table class="cabinet-earnings-table"><colgroup><col style="width:16%"><col style="width:28%"><col style="width:28%"><col style="width:28%"></colgroup><thead><tr><th>День</th><th>Оклад</th><th>Чай</th><th>Итог</th></tr></thead><tbody>${[...rows.values()].map(row=>`<tr data-earnings-row="${row.work_date}"><th scope="row">${row.work_date.slice(8)}.${row.work_date.slice(5,7)}</th>${['salary','tea'].map(k=>`<td><input type="text" inputmode="numeric" pattern="[0-9]*" data-earnings-day="${row.work_date}" data-field="${k}" value="${esc(row[k]??'')}" placeholder="—" autocomplete="off" aria-label="${k==='salary'?'Оклад':'Личный чай'} за ${row.work_date}" maxlength="8"></td>`).join('')}<td data-day-total="${row.work_date}"></td></tr>${subtotal(row.work_date)}`).join('')}</tbody><tfoot><tr><th scope="row" title="Всего за месяц">Месяц</th><td id="cabinetSalaryTotal"></td><td id="cabinetTeaTotal"></td><td id="cabinetEarningsTotal"></td></tr></tfoot></table><p id="cabinetEarningsStatus" role="status" aria-live="polite"></p><button type="button" class="cabinet-secondary cabinet-wide" id="cabinetSaveEarnings">Сохранить изменения</button><button type="button" class="cabinet-back" id="cabinetDiscardEarnings" hidden>Отменить несохранённые правки</button>`;
         qsa('[data-earnings-day]',body).forEach(input=>{
           const row=rows.get(input.dataset.earningsDay);
           input.oninput=()=>{row[input.dataset.field]=input.value;row.dirty=true;row.error='';remember(row);updateTotals()};
@@ -6210,7 +6223,16 @@ async function openCabinetFinance(onDate=ownerCabinetData?.today,tab='cash'){
         updateTotals();
       }else{
         const groups=new Map();for(const entry of data.cash_entries){if(!groups.has(entry.work_date))groups.set(entry.work_date,[]);groups.get(entry.work_date).push(entry)}
-        body.innerHTML=`<div class="cabinet-finance-summary"><div><small>Личная касса, ₽</small><strong>${cabinetMoney(data.totals.cash)}</strong></div><div><small>Откат отдельно, ₽</small><b>${cabinetMoney(data.totals.kickback)}</b></div></div><p class="cabinet-finance-hint">Период ${data.start.slice(8)}–${data.end.slice(8)} · Заказов: ${data.totals.orders}. Касса равна комиссии.</p>${groups.size?[...groups].map(([day,entries])=>`<details class="cabinet-cash-day"><summary><b>${day.slice(8)}.${day.slice(5,7)}</b><span>${cabinetMoney(entries.reduce((n,r)=>n+r.cash,0))} ₽ ${cabinetIcon('chevron')}</span></summary><div>${entries.map(entry=>`<article><div class="cabinet-cash-line"><strong>ум: ${esc(entry.surname)}</strong><b>${cabinetMoney(entry.cash)} ₽</b></div><p>${esc(entry.category_label)} · ${entry.team_size} чел. · Резерв ${entry.reserve}</p><p>Откат: ${cabinetMoney(entry.kickback)} ₽</p>${entry.editable?`<button type="button" class="cabinet-back" data-edit-cash="${entry.event_id}">${cabinetIcon('edit')}Изменить кассу</button>`:'<small>Запись сохранена в вашей истории</small>'}</article>`).join('')}</div></details>`).join(''):'<div class="cabinet-empty">За этот период касса пока не заполнена.<br>Добавьте её в карточке частного заказа перед фото.</div>'}`;
+        const cashPeriods=new Map(data.period_totals.map(p=>[p.end,p]));
+        const entryHtml=entry=>`<article><div class="cabinet-cash-line"><strong>ум: ${esc(entry.surname)}</strong><b>${cabinetMoney(entry.cash)} ₽</b></div><p>${esc(entry.category_label)} · ${entry.team_size} чел. · Резерв ${entry.reserve}</p><p>Откат: ${cabinetMoney(entry.kickback)} ₽</p>${entry.editable?`<button type="button" class="cabinet-back" data-edit-cash="${entry.event_id}">${cabinetIcon('edit')}Изменить кассу</button>`:'<small>Запись сохранена в вашей истории</small>'}</article>`;
+        const cashRows=data.cash_days.map(row=>{
+          const day=row.work_date,entries=groups.get(day)||[],period=cashPeriods.get(day);
+          return `<tr data-cash-row="${day}"><th scope="row">${entries.length?`<button type="button" class="cabinet-cash-date" data-cash-day="${day}" aria-expanded="false" aria-controls="cashDay-${day}" aria-label="Показать заказы за ${day}">${day.slice(8)}.${day.slice(5,7)}${cabinetIcon('chevron')}</button>`:`${day.slice(8)}.${day.slice(5,7)}`}</th><td>${cabinetMoney(row.cash)}</td><td>${cabinetMoney(row.kickback)}</td></tr>${entries.length?`<tr id="cashDay-${day}" class="cabinet-cash-details" hidden><td colspan="3">${entries.map(entryHtml).join('')}</td></tr>`:''}${period?`<tr class="cabinet-period-total" data-cash-half="${Number(day.slice(8))===15?1:2}"><th scope="row"><span>${halfLabel(Number(day.slice(8))===15?1:2)}</span><small>Итого</small></th><td>${cabinetMoney(period.cash)}</td><td>${cabinetMoney(period.kickback)}</td></tr>`:''}`;
+        }).join('');
+        body.innerHTML=`<p class="cabinet-finance-hint">Касса заполняется автоматически из карточек заказов. Касса равна комиссии, откат учитывается отдельно. Все суммы в ₽.</p><table class="cabinet-earnings-table cabinet-cash-table"><colgroup><col style="width:24%"><col style="width:38%"><col style="width:38%"></colgroup><thead><tr><th>День</th><th>Касса</th><th>Откат</th></tr></thead><tbody>${cashRows}</tbody><tfoot><tr><th scope="row" title="Всего за месяц">Месяц</th><td id="cabinetCashTotal">${cabinetMoney(data.totals.cash)}</td><td id="cabinetKickbackTotal">${cabinetMoney(data.totals.kickback)}</td></tr></tfoot></table>`;
+        qsa('[data-cash-day]',body).forEach(button=>button.onclick=()=>{
+          const detail=qs('#cashDay-'+button.dataset.cashDay,body);detail.hidden=!detail.hidden;button.setAttribute('aria-expanded',String(!detail.hidden));
+        });
         qsa('[data-edit-cash]',body).forEach(button=>button.onclick=async()=>{
           const entry=data.cash_entries.find(r=>r.event_id===Number(button.dataset.editCash));
           if(!await flush())return;
@@ -6219,8 +6241,7 @@ async function openCabinetFinance(onDate=ownerCabinetData?.today,tab='cash'){
       }
     }
     qs('#cabinetFinanceBack').onclick=async()=>{if(await flush()){ownerCabinetSelectedCard=null;renderOwnerCabinet(ownerCabinetData)}};
-    qs('#cabinetFinanceMonth').onchange=async event=>{const month=event.target.value;if(/^\d{4}-\d{2}$/.test(month)&&await flush())await openCabinetFinance(month+(second?'-16':'-01'),tab);else event.target.value=data.start.slice(0,7)};
-    qsa('[data-half]',panel).forEach(button=>button.onclick=async()=>{if(await flush())await openCabinetFinance(data.start.slice(0,7)+'-'+(button.dataset.half==='1'?'01':'16'),tab)});
+    qs('#cabinetFinanceMonth').onchange=async event=>{const month=event.target.value;if(/^\d{4}-\d{2}$/.test(month)&&await flush())await openCabinetFinance(month+'-01',tab);else event.target.value=data.start.slice(0,7)};
     qsa('[data-finance-tab]',panel).forEach(button=>button.onclick=async()=>{if(button.dataset.financeTab===tab)return;if(await flush())renderTab(button.dataset.financeTab)});
     renderTab(tab);
   }catch(error){if(active()){panel.innerHTML=`<p role="alert">${esc(error.message)}</p><button type="button" id="cabinetFinanceRetry" class="cabinet-secondary">Повторить</button><button type="button" id="cabinetFinanceBack" class="cabinet-back">Кабинет бригадира</button>`;qs('#cabinetFinanceRetry').onclick=()=>openCabinetFinance(onDate,tab);qs('#cabinetFinanceBack').onclick=()=>renderOwnerCabinet(ownerCabinetData)}}
@@ -6322,7 +6343,6 @@ async function loadOwnerCabinet(){
 .cabinet-finance-tabs{display:flex;gap:6px;margin:14px 0;padding:4px;background:var(--panel);border-radius:14px;border:1px solid var(--line)}
 .cabinet-finance-tabs button{flex:1;border:0;border-radius:10px;min-height:42px;padding:8px;color:var(--muted);background:transparent;font-size:14px}
 .cabinet-finance-tabs button.active{color:var(--text);background:var(--panel2);font-weight:700}
-.cabinet-finance-tabs[role=group] button.active{background:rgba(212,177,97,.15);color:var(--gold)}
 .cabinet-finance-summary{display:flex;gap:12px;align-items:center;padding:20px 16px;background:var(--panel);border:1px solid var(--line);border-radius:16px}
 .cabinet-finance-summary>div{flex:1}.cabinet-finance-summary small{display:block;color:var(--muted);font-size:12px;margin-bottom:8px}
 .cabinet-finance-summary strong{font-size:28px;color:var(--gold)}.cabinet-finance-summary b{font-size:21px}
@@ -6335,11 +6355,16 @@ async function loadOwnerCabinet(){
 .cabinet-earnings-table tfoot td{font-weight:700;font-size:13px;padding-top:16px}
 .cabinet-earnings-table input:focus{outline:1px solid var(--gold);border-color:var(--gold)}
 #cabinetEarningsStatus{font-size:12px;color:var(--muted);line-height:1.5}#cabinetEarningsStatus.has-error{color:#ff7b7b}
-.cabinet-cash-day{border:1px solid var(--line);border-radius:14px;background:var(--panel);margin:10px 0;overflow:hidden}
-.cabinet-cash-day summary{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:50px;padding:8px 14px;list-style:none;cursor:pointer}
-.cabinet-cash-day summary::-webkit-details-marker{display:none}.cabinet-cash-day summary span{display:flex;align-items:center;gap:8px;color:var(--gold)}
-.cabinet-cash-day[open] summary .cabinet-icon{transform:rotate(90deg)}
-.cabinet-cash-day article{padding:12px 14px;border-top:1px solid var(--line)}.cabinet-cash-day p,.cabinet-cash-day small{font-size:13px;color:var(--muted);margin:8px 0}
+.cabinet-earnings-table .cabinet-period-total th,.cabinet-earnings-table .cabinet-period-total td{padding:12px 3px;font-weight:700;background:rgba(212,177,97,.1);border-top:1px solid rgba(212,177,97,.35);border-bottom:1px solid rgba(212,177,97,.35);color:var(--gold);font-size:13px}
+.cabinet-earnings-table .cabinet-period-total small{display:block;font-size:10px;font-weight:400;margin-top:4px;color:var(--muted)}
+.cabinet-cash-table td:nth-child(2){color:var(--gold);font-weight:700}.cabinet-cash-table td:last-child{color:var(--text);font-weight:400}
+.cabinet-cash-table .cabinet-period-total td,.cabinet-cash-table tfoot td{font-weight:700}
+.cabinet-cash-table [data-cash-row] th,.cabinet-cash-table [data-cash-row] td{height:44px;box-sizing:border-box}
+.cabinet-cash-date{display:flex;align-items:center;justify-content:flex-start;gap:2px;border:0;padding:0;min-height:44px;background:transparent;color:var(--gold);font:inherit}
+.cabinet-cash-date .cabinet-icon{width:13px;height:13px}.cabinet-cash-date[aria-expanded=true] .cabinet-icon{transform:rotate(90deg)}
+.cabinet-cash-details[hidden]{display:none}.cabinet-cash-details>td{white-space:normal;text-align:left;padding:0 10px;background:var(--panel)}
+.cabinet-cash-details article{padding:12px 0;border-bottom:1px solid var(--line)}.cabinet-cash-details article:last-child{border-bottom:0}
+.cabinet-cash-details p,.cabinet-cash-details small{font-size:13px;color:var(--muted);margin:8px 0}
 .cabinet-cash-line{display:flex;justify-content:space-between;gap:10px;font-size:14px}.cabinet-cash-line strong{overflow-wrap:anywhere}.cabinet-cash-line b{white-space:nowrap}
 
 .cabinet-native-form{display:grid;gap:14px;padding:8px 0}
@@ -6778,7 +6803,9 @@ def cabinet_earnings_save(work_date: date, data: CabinetEarningsInput,
 @app.get('/api/owner/brigadier-cabinet/finance')
 def cabinet_finance(on_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
     cabinet_finance_access(db, user.id)
-    start, end = _period_bounds(on_date)
+    import calendar
+    start = on_date.replace(day=1)
+    end = on_date.replace(day=calendar.monthrange(on_date.year, on_date.month)[1])
     earnings = {r.work_date: r for r in db.scalars(select(CabinetEarningsDay).where(
         CabinetEarningsDay.tg_id == user.id, CabinetEarningsDay.work_date.between(start, end)))}
     days = [cabinet_earnings_dict(start + timedelta(days=i), earnings.get(start + timedelta(days=i)))
@@ -6795,8 +6822,23 @@ def cabinet_finance(on_date: date, db: Session = Depends(get_db), user: Telegram
         if card:
             item['surname'] = card.surname
         entries.append(item)
+    cash_days = {r['work_date']: {'work_date': r['work_date'], 'cash': 0, 'kickback': 0, 'orders': 0} for r in days}
+    for entry in entries:
+        day = cash_days[entry['work_date']]
+        day['cash'] += entry['cash']
+        day['kickback'] += entry['kickback']
+        day['orders'] += 1
+    period_totals = []
+    for first, last in ((1, 15), (16, end.day)):
+        period_days = days[first-1:last]
+        period_cash = list(cash_days.values())[first-1:last]
+        period_totals.append({'start': start.replace(day=first).isoformat(),
+            'end': start.replace(day=last).isoformat(),
+            'salary': sum(r['salary'] or 0 for r in period_days), 'tea': sum(r['tea'] or 0 for r in period_days),
+            'total': sum(r['total'] for r in period_days), 'cash': sum(r['cash'] for r in period_cash),
+            'kickback': sum(r['kickback'] for r in period_cash), 'orders': sum(r['orders'] for r in period_cash)})
     return JSONResponse({'user_id': user.id, 'start': start.isoformat(), 'end': end.isoformat(),
-        'days': days, 'cash_entries': entries,
+        'days': days, 'cash_entries': entries, 'cash_days': list(cash_days.values()), 'period_totals': period_totals,
         'totals': {'salary': sum(r['salary'] or 0 for r in days), 'tea': sum(r['tea'] or 0 for r in days),
             'total': sum(r['total'] for r in days), 'cash': sum(r.commission for r in cash),
             'kickback': sum(r.kickback for r in cash), 'orders': len(cash)}},
