@@ -5617,6 +5617,23 @@ def _compact_personal_table_html(html):
 #personalGrid .personal-total th:first-child{background:#211d14;font-size:11px;line-height:1.2;overflow-wrap:normal}
 #personalGrid .personal-total td{font-size:13px;font-weight:700}
 @media(pointer:coarse){#personalGrid .personal-cell{min-height:44px}}
+@media(max-width:600px){
+ #modal:has(#personalGrid){left:6px;right:6px;width:auto;padding:12px 8px}
+ #personalGrid{max-width:100%;min-width:0}
+ #personalGrid table.personal-table{table-layout:fixed;width:100%;max-width:100%;min-width:0;font-size:clamp(8px,2.5vw,11px)}
+ #personalGrid .personal-table th,#personalGrid .personal-table td{padding:2px 1px;overflow-wrap:anywhere}
+ #personalGrid .personal-table th:not(:first-child),#personalGrid .personal-table td:not(:first-child){min-width:0}
+ #personalGrid .personal-table th:first-child{width:24px;min-width:24px;max-width:24px}
+ #personalGrid .personal-table thead th{height:42px;font-size:clamp(8.5px,2.55vw,11px);line-height:1.15}
+ #personalGrid .personal-table tbody th{height:30px;font-size:10px}
+ #personalGrid .personal-table tbody td{height:30px;white-space:normal}
+ #personalGrid .personal-column{width:100%;max-width:100%;min-width:0;min-height:38px;padding:2px 0;border-radius:4px;font-size:inherit;line-height:1.15}
+ #personalGrid .personal-column small{margin-top:1px;font-size:9px;line-height:1.1}
+ #personalGrid .personal-cell{min-height:28px;padding:2px 0;border-radius:5px;font-size:inherit;line-height:1.15;white-space:normal;overflow-wrap:anywhere}
+ #personalGrid .personal-total th:first-child{font-size:8px;line-height:1.2;overflow-wrap:anywhere}
+ #personalGrid .personal-total td{font-size:clamp(8px,2.3vw,10px)}
+ #personalGrid .gbu-comment-panel{max-width:100%}
+}
 </style>
 </head>''', 1)
 
