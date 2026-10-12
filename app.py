@@ -5696,6 +5696,58 @@ class OwnerCabinetConfig(Base):
     bot_username = Column(String(32), nullable=True)
 
 
+class CabinetProfilePhoto(Base):
+    __tablename__ = "owner_cabinet_profile_photos"
+    tg_id = Column(BigInteger, primary_key=True)
+    image = Column(String, nullable=False)
+
+
+class CabinetProfilePhotoInput(BaseModel):
+    image: str = Field(min_length=30, max_length=350000)
+
+
+@app.put("/api/owner/brigadier-cabinet/avatar")
+def cabinet_avatar_save(data: CabinetProfilePhotoInput, db: Session = Depends(get_db),
+                        user: TelegramUser = Depends(require_admin)):
+    if not _can_use_owner_cabinet(db, user.id):
+        raise HTTPException(403, "Кабинет недоступен")
+    import base64
+    import binascii
+    prefix = "data:image/jpeg;base64,"
+    if not data.image.startswith(prefix):
+        raise HTTPException(422, "Выберите фото из галереи")
+    try:
+        raw = base64.b64decode(data.image[len(prefix):], validate=True)
+    except (ValueError, binascii.Error):
+        raise HTTPException(422, "Не удалось прочитать фото. Выберите его заново")
+    if len(raw) > 256 * 1024:
+        raise HTTPException(413, "Фото слишком большое. Выберите другое фото")
+    if len(raw) < 32 or not raw.startswith(b"\xff\xd8\xff") or not raw.endswith(b"\xff\xd9"):
+        raise HTTPException(422, "Не удалось прочитать фото. Выберите его заново")
+    # The browser crops/re-encodes the avatar; keep it separate from bot profile sync.
+    image = prefix + base64.b64encode(raw).decode("ascii")
+    db.merge(CabinetProfilePhoto(tg_id=user.id, image=image))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        db.execute(update(CabinetProfilePhoto).where(
+            CabinetProfilePhoto.tg_id == user.id).values(image=image))
+        db.commit()
+    return JSONResponse({"ok": True}, headers={"Cache-Control": "private, no-store"})
+
+
+@app.delete("/api/owner/brigadier-cabinet/avatar")
+def cabinet_avatar_delete(db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    if not _can_use_owner_cabinet(db, user.id):
+        raise HTTPException(403, "Кабинет недоступен")
+    photo = db.get(CabinetProfilePhoto, user.id)
+    if photo:
+        db.delete(photo)
+        db.commit()
+    return JSONResponse({"ok": True}, headers={"Cache-Control": "private, no-store"})
+
+
 def _can_use_owner_cabinet(db: Session, tg_id: int) -> bool:
     config = db.get(OwnerCabinetConfig, 1)
     return bool(config and config.owner_tg_id == int(tg_id)
@@ -5750,6 +5802,7 @@ def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends
         Employee.tg_id == user.id, Employee.active.is_(True), _visible_employee(),
         Employee.group_code == "brigadier").order_by(Employee.id).limit(1))
     profile = _employee_dict(employee) if employee else None
+    avatar = db.get(CabinetProfilePhoto, user.id)
     orders = db.scalars(select(Order).join(Assignment, Assignment.order_id == Order.id).join(
         Employee, Employee.id == Assignment.employee_id).where(
         Employee.tg_id == user.id, Employee.active.is_(True), _visible_employee(),
@@ -5783,6 +5836,7 @@ def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends
                            for key in ("contact", "photo", "tea")} if actions else {}
     return JSONResponse({
         "user": {"id": user.id, "name": user.full_name}, "profile": profile,
+        "avatar": avatar.image if avatar else "",
         "today": today.isoformat(), "work_date": selected.isoformat(),
         "tomorrow": (today + timedelta(days=1)).isoformat(),
         "readiness": _owner_cabinet_readiness(db, employee, selected),
@@ -5807,8 +5861,9 @@ def _owner_brigadier_cabinet_html(html):
   const v = currentViewId();
   const personal=v==='ownerCabinetView'&&state.bootstrap?.can_use_owner_cabinet;
   document.body.classList.toggle('owner-cabinet-open',!!personal);
-  qs('.topbar h1').textContent=personal?'Мой кабинет':'Диспетчерская';
+  qs('.topbar h1').textContent=personal?'Кабинет бригадира':'Диспетчерская';
   if(personal)return loadOwnerCabinet();
+  if(qs('#cabinetAvatarForm')){closeModal();qs('#cabinetAvatarForm').remove()}
   ownerCabinetRequest++;
   ownerCabinetData=null;
   ownerCabinetSelectedCard=null;
@@ -5822,14 +5877,14 @@ function cabinetIcon(name){
 function updateOwnerCabinetNav(){
   const nav=qs('#ownerCabinetNav'),allowed=!!state.bootstrap?.can_use_owner_cabinet;
   const next=allowed?'ownerCabinetView':'controlView';
-  if(ownerCabinetData&&ownerCabinetData.user.id!==state.bootstrap?.user?.id){if(qs('#cabinetNativeForm')){closeModal();qs('#cabinetNativeForm').remove()}ownerCabinetData=null;ownerCabinetSignature=''}
+  if(ownerCabinetData&&ownerCabinetData.user.id!==state.bootstrap?.user?.id){if(qs('#cabinetNativeForm,#cabinetAvatarForm')){closeModal();qs('#cabinetNativeForm')?.remove();qs('#cabinetAvatarForm')?.remove()}ownerCabinetData=null;ownerCabinetSignature=''}
   if(nav.dataset.view===next)return;
   const wasActive=nav.classList.contains('active');
   nav.dataset.view=next;
   nav.innerHTML=allowed?`<span aria-hidden="true">${cabinetIcon('user')}</span><small>Кабинет</small>`:'<span aria-hidden="true">!</span><small>Контроль</small>';
   nav.setAttribute('aria-label',allowed?'Мой кабинет бригадира':'Контроль');
   if(wasActive){qsa('.view').forEach(x=>x.classList.remove('active'));qs('#'+next).classList.add('active')}
-  if(!allowed&&(qs('#cabinetDirectory')||qs('#cabinetNativeForm'))){closeModal();qs('#cabinetDirectory')?.remove();qs('#cabinetNativeForm')?.remove()}
+  if(!allowed&&(qs('#cabinetDirectory')||qs('#cabinetNativeForm')||qs('#cabinetAvatarForm'))){closeModal();qs('#cabinetDirectory')?.remove();qs('#cabinetNativeForm')?.remove();qs('#cabinetAvatarForm')?.remove()}
   if(!allowed){ownerCabinetRequest++;ownerCabinetData=null;ownerCabinetSignature='';ownerCabinetSelectedCard=null;qs('#ownerCabinetContent').innerHTML=''}
 }
 async function openCabinetEmployees(){
@@ -5897,6 +5952,62 @@ async function cabinetImage(file){
     return canvas.toDataURL('image/jpeg',.86).split(',')[1];
   }catch(e){throw new Error('Не удалось открыть фото. Выберите JPEG или PNG из галереи')}
   finally{URL.revokeObjectURL(url)}
+}
+function cabinetAvatarSource(data){
+  const value=String(data?.avatar||'');
+  return value.length<=350000&&/^data:image\/jpeg;base64,[A-Za-z0-9+/]+={0,2}$/.test(value)?value:'';
+}
+async function cabinetAvatarImage(file){
+  if(!file)throw new Error('Выберите фото');
+  if(file.size>30*1024*1024)throw new Error('Фото больше 30 МБ. Выберите уменьшенную копию');
+  const url=URL.createObjectURL(file),img=new Image();
+  try{
+    img.src=url;await img.decode();
+    const side=Math.min(img.naturalWidth,img.naturalHeight),canvas=document.createElement('canvas');
+    if(!side)throw new Error('empty image');
+    canvas.width=canvas.height=512;
+    const context=canvas.getContext('2d');
+    context.fillStyle='#141414';context.fillRect(0,0,512,512);
+    context.drawImage(img,(img.naturalWidth-side)/2,(img.naturalHeight-side)/2,side,side,0,0,512,512);
+    let result=canvas.toDataURL('image/jpeg',.88);
+    if(result.length>340000)result=canvas.toDataURL('image/jpeg',.7);
+    if(result.length>340000)throw new Error('large image');
+    return result;
+  }catch(e){throw new Error('Не удалось открыть фото. Выберите JPEG или PNG из галереи')}
+  finally{URL.revokeObjectURL(url)}
+}
+function openCabinetAvatar(){
+  if(!state.bootstrap?.can_use_owner_cabinet||currentViewId()!=='ownerCabinetView'||!ownerCabinetData)return;
+  const uid=state.bootstrap.user.id,current=cabinetAvatarSource(ownerCabinetData);
+  showModal('Фото профиля',`<form id="cabinetAvatarForm" class="cabinet-native-form"><div class="cabinet-avatar-preview">${current?`<img src="${esc(current)}" alt="Фото профиля">`:cabinetIcon('camera')}</div><p class="cabinet-avatar-note">Выберите личное фото. В профиле оно будет круглым.</p><label class="cabinet-avatar-picker">${cabinetIcon('camera')}<span>${current?'Выбрать другое фото':'Выбрать фото'}</span><input id="cabinetAvatarFile" type="file" accept="image/*" aria-label="Выбрать личное фото"></label><p id="cabinetAvatarStatus" role="status" aria-live="polite"></p><button type="submit" class="cabinet-primary" disabled>Сохранить фото</button>${current?'<button type="button" id="cabinetAvatarRemove" class="cabinet-secondary">Удалить фото</button>':''}</form>`);
+  const form=qs('#cabinetAvatarForm'),input=qs('#cabinetAvatarFile',form),save=qs('[type=submit]',form),remove=qs('#cabinetAvatarRemove',form),status=qs('#cabinetAvatarStatus',form);
+  const active=()=>state.bootstrap?.can_use_owner_cabinet&&state.bootstrap?.user?.id===uid&&currentViewId()==='ownerCabinetView'&&qs('#cabinetAvatarForm')===form&&!qs('#modal').classList.contains('hidden');
+  let selected='',busy=false,selection=0;
+  const lock=value=>{busy=value;input.disabled=value;save.disabled=value||!selected;if(remove)remove.disabled=value};
+  input.onchange=async()=>{
+    if(!active()||busy||!input.files[0])return;
+    const turn=++selection;selected='';lock(true);status.textContent='Подготавливаем фото…';
+    try{
+      const image=await cabinetAvatarImage(input.files[0]);
+      if(!active()||turn!==selection)return;
+      selected=image;qs('.cabinet-avatar-preview',form).innerHTML=`<img src="${esc(image)}" alt="Предпросмотр личного фото">`;
+      status.textContent='Фото готово к сохранению';
+    }catch(e){if(active())status.textContent=e.message}
+    finally{input.value='';lock(false)}
+  };
+  const persist=async deleting=>{
+    if(!active()||busy||(!deleting&&!selected))return;
+    lock(true);status.textContent=deleting?'Удаляем фото…':'Сохраняем фото…';
+    try{
+      await api('/api/owner/brigadier-cabinet/avatar',deleting?{method:'DELETE'}:{method:'PUT',body:JSON.stringify({image:selected})});
+      if(!active())return;
+      closeModal();form.remove();ownerCabinetSignature='';await loadOwnerCabinet();
+      toast(deleting?'Фото удалено':'Фото сохранено');
+    }catch(e){if(active())status.textContent=e.message}
+    finally{lock(false)}
+  };
+  form.onsubmit=e=>{e.preventDefault();return persist(false)};
+  if(remove)remove.onclick=()=>persist(true);
 }
 async function ownerCabinetAction(key,cardId=null){
   if(!state.bootstrap?.can_use_owner_cabinet||currentViewId()!=='ownerCabinetView')return;
@@ -5982,10 +6093,10 @@ function cabinetButton(key,label,icon,card=null,primary=false,disabled=false){
   return `<button type="button" class="${primary?'cabinet-primary':'cabinet-secondary'}" data-cabinet-action="${key}"${card?` data-cabinet-card="${Number(card.id)}"`:''}${disabled?' disabled':''}>${cabinetIcon(icon)}<span>${esc(label)}</span></button>`;
 }
 function ownerCabinetProfileHtml(data){
-  const p=data.profile,name=p?.full_name||data.user.name||'Ваш профиль';
-  const initials=name.trim().split(/\s+/).slice(0,2).map(x=>x[0]||'').join('');
-  const details=p?[p.metro,p.height_cm?`${p.height_cm} см`:'',p.has_car?'На авто':''].filter(Boolean).join(' · '):'Заполните профиль бригадира';
-  return `<article class="cabinet-profile"><div class="cabinet-avatar" aria-hidden="true">${esc(initials)}</div><div class="cabinet-profile-copy"><h2>${esc(name)}</h2><p>${esc(details)}</p></div><button type="button" class="cabinet-edit-profile" data-cabinet-action="${p?'profile':'register'}" aria-label="${p?'Изменить профиль':'Заполнить профиль'}">${cabinetIcon(p?'edit':'plus')}</button></article>`;
+  const p=data.profile,first=String(p?.full_name||data.user.name||'').trim().split(/\s+/)[0];
+  const name=p?[first,p.metro,p.height_cm].filter(Boolean).join(' '):(first||'Ваш профиль');
+  const initials=[first,p?.metro].filter(Boolean).map(x=>x.trim()[0]||'').join(''),avatar=cabinetAvatarSource(data);
+  return `<article class="cabinet-profile"><button type="button" class="cabinet-avatar" id="cabinetAvatar" aria-label="${avatar?'Изменить личное фото':'Добавить личное фото'}"><span class="cabinet-avatar-face">${avatar?`<img src="${esc(avatar)}" alt="Личное фото бригадира">`:esc(initials||'＋')}</span><span class="cabinet-avatar-camera">${cabinetIcon('camera')}</span></button><div class="cabinet-profile-copy"><h2>${esc(name)}${p?.has_car?' 🚗':''}</h2>${p?'':'<p>Заполните профиль бригадира</p>'}</div><button type="button" class="cabinet-edit-profile" data-cabinet-action="${p?'profile':'register'}" aria-label="${p?'Изменить профиль':'Заполнить профиль'}">${cabinetIcon(p?'edit':'plus')}</button></article>`;
 }
 function cabinetPhotoInfo(c){
   const total=c.source==='gbu'?2:1,received=Number(!!c.first_received)+(c.source==='gbu'?Number(!!c.second_received):0);
@@ -6024,23 +6135,17 @@ function renderOwnerCabinet(data){
   }else{
     root.dataset.cabinetView='home';
     const r=data.tomorrow_readiness;
-    root.innerHTML=`${sessionStorage.getItem('cabinet-pending:'+uid)?'<button type="button" id="cabinetPending" class="cabinet-secondary cabinet-wide">Проверить последнее действие</button>':''}<div class="cabinet-owner-badge">${cabinetIcon('lock')}Только вы</div>${ownerCabinetProfileHtml(data)}
+    root.innerHTML=`${sessionStorage.getItem('cabinet-pending:'+uid)?'<button type="button" id="cabinetPending" class="cabinet-secondary cabinet-wide">Проверить последнее действие</button>':''}${ownerCabinetProfileHtml(data)}
       <article class="cabinet-readiness"><div><small>Готовность на завтра · ${esc(fmtDate(data.tomorrow))}</small><strong class="${r.status==='ready'?'cabinet-done':''}">${esc(r.label)}</strong></div><button type="button" class="cabinet-secondary" data-cabinet-action="readiness">${r.status==='no_response'?'Выбрать':'Изменить'}</button>${r.text?`<p>${esc(r.text)}</p>`:''}</article>
       <section class="cabinet-my-orders"><div class="cabinet-section-heading"><h2>Мои заказы</h2><button type="button" class="cabinet-number-link" data-cabinet-action="number">${cabinetIcon('plus')}Номер в группу</button></div><div class="cabinet-day-shortcuts"><button type="button" data-cabinet-day="${data.today}" class="${day===data.today?'active':''}" aria-pressed="${day===data.today}">Сегодня</button><button type="button" data-cabinet-day="${data.tomorrow}" class="${day===data.tomorrow?'active':''}" aria-pressed="${day===data.tomorrow}">Завтра</button><label class="cabinet-date-picker">${cabinetIcon('calendar')}<input id="cabinetDate" type="date" value="${esc(day)}" aria-label="Дата моих заказов"></label></div>${day!==data.today&&day!==data.tomorrow?`<p class="cabinet-selected-date">${esc(fmtDate(day))}</p>`:''}${ownerCabinetCardsHtml(data)}</section>
-      <div class="cabinet-personal-links"><button type="button" id="cabinetEmployees">${cabinetIcon('team')}<span>Сотрудники</span>${cabinetIcon('chevron')}</button><button type="button" id="cabinetEarnings">${cabinetIcon('wallet')}<span>Мой заработок</span>${cabinetIcon('chevron')}</button><button type="button" id="cabinetControl">${cabinetIcon('control')}<span>Контроль диспетчерской</span>${cabinetIcon('chevron')}</button></div>`;
+      <div class="cabinet-personal-links"><button type="button" id="cabinetEmployees">${cabinetIcon('team')}<span>Сотрудники</span>${cabinetIcon('chevron')}</button></div>`;
     if(qs('#cabinetPending',root))qs('#cabinetPending',root).onclick=cabinetResumePending;
+    qs('#cabinetAvatar',root).onclick=openCabinetAvatar;
     qs('#cabinetEmployees',root).onclick=openCabinetEmployees;
-    qs('#cabinetEarnings',root).onclick=()=>{if(state.bootstrap?.can_use_owner_cabinet)openPersonalTables()};
     qs('#cabinetDate',root).onchange=e=>{if(e.target.value){ownerCabinetSelectedCard=null;loadBootstrap(e.target.value).catch(e=>toast(e.message))}};
     qsa('[data-cabinet-day]',root).forEach(btn=>btn.onclick=()=>{ownerCabinetSelectedCard=null;loadBootstrap(btn.dataset.cabinetDay).catch(e=>toast(e.message))});
     qsa('[data-cabinet-detail]',root).forEach(btn=>btn.onclick=()=>{ownerCabinetSelectedCard=Number(btn.dataset.cabinetDetail);renderOwnerCabinet(data)});
     qsa('[data-cabinet-order]',root).forEach(btn=>btn.onclick=()=>openOrder(Number(btn.dataset.cabinetOrder)).catch(e=>toast(e.message)));
-    qs('#cabinetControl',root).onclick=async()=>{
-      if(!state.bootstrap?.can_use_owner_cabinet)return;
-      const button=qs('#cabinetControl',root);button.disabled=true;
-      const stillHere=()=>currentViewId()==='ownerCabinetView'&&state.bootstrap?.can_use_owner_cabinet&&state.bootstrap?.user?.id===uid&&state.selectedDate===day&&root.contains(button);
-      try{await loadControl();if(stillHere())showModal('Контроль · '+fmtDate(day),qs('#controlContent').innerHTML)}catch(e){if(stillHere())toast(e.message)}finally{button.disabled=false}
-    };
   }
   qsa('[data-cabinet-action]',root).forEach(btn=>{
     const cardId=btn.dataset.cabinetCard,card=cardId?(data.number_cards||[]).find(c=>Number(c.id)===Number(cardId)):null;
@@ -6104,8 +6209,21 @@ async function loadOwnerCabinet(){
 .cabinet-icon{width:20px;height:20px;flex:none;vertical-align:middle}
 .cabinet-owner-badge{display:flex;align-items:center;justify-content:flex-end;gap:5px;color:var(--muted);font-size:11px;margin:0 1px 12px}
 .cabinet-owner-badge .cabinet-icon{width:13px;height:13px}
-.cabinet-profile{display:flex;gap:12px;align-items:center;margin:0 2px 20px}
-.cabinet-avatar{flex-shrink:0;width:44px;height:44px;display:grid;place-items:center;border-radius:50%;color:var(--gold);font-size:16px;font-weight:700;background:#272216}
+.cabinet-profile{display:flex;gap:14px;align-items:center;margin:14px 2px 22px}
+.cabinet-avatar{position:relative;flex:none;width:64px;height:64px;display:grid;place-items:center;padding:0;border:1px solid #433923;border-radius:50%;color:var(--gold);font-size:21px;font-weight:700;background:#272216}
+.cabinet-avatar-face{display:grid;place-items:center;width:100%;height:100%;border-radius:50%;overflow:hidden}
+.cabinet-avatar-face img{width:100%;height:100%;object-fit:cover;display:block}
+.cabinet-avatar-camera{position:absolute;right:-3px;bottom:-2px;width:24px;height:24px;display:grid;place-items:center;background:var(--gold);color:#17130b;border:2px solid var(--panel);border-radius:50%}
+.cabinet-avatar-camera .cabinet-icon{width:14px;height:14px}
+.cabinet-avatar-preview{width:144px;height:144px;display:grid;place-items:center;justify-self:center;border-radius:50%;overflow:hidden;background:#272216;color:var(--gold);border:1px solid #433923}
+.cabinet-avatar-preview img{width:100%;height:100%;object-fit:cover;display:block}
+.cabinet-avatar-preview>.cabinet-icon{width:38px;height:38px}
+.cabinet-native-form .cabinet-avatar-note{text-align:center}
+.cabinet-native-form .cabinet-avatar-picker{position:relative;display:flex;align-items:center;justify-content:center;gap:8px;min-height:48px;border:1px solid var(--line);border-radius:12px;background:var(--panel2);color:var(--text);overflow:hidden}
+.cabinet-avatar-picker input{position:absolute;inset:0;opacity:0;margin:0;cursor:pointer}
+.cabinet-avatar-picker:focus-within{outline:2px solid var(--gold);outline-offset:2px}
+#cabinetAvatarStatus{color:var(--gold)}
+#cabinetAvatarForm button:disabled{opacity:.45;cursor:default}
 .cabinet-profile-copy{min-width:0;flex:1}
 .cabinet-profile h2{font-size:17px;line-height:1.35;margin:0;overflow-wrap:anywhere}
 .cabinet-profile p{color:var(--muted);font-size:13px;margin:4px 0 0;line-height:1.45;overflow-wrap:anywhere}
