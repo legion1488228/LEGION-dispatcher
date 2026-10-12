@@ -4471,6 +4471,8 @@ def edit_number_card(data: NumberCardInput, db: Session = Depends(get_db)):
     photo = db.get(PhotoReportEvent, f'card:{row.chat_id}:{row.message_id}')
     if row.source != data.source and photo and photo.active:
         return {'saved': False, 'error': 'Категорию можно изменить до отправки фото по заказу.'}
+    if row.source != data.source and db.scalar(select(CabinetOrderCash.event_id).where(CabinetOrderCash.event_id == row.id).limit(1)) is not None:
+        return {'saved': False, 'error': 'После заполнения кассы тип заказа менять нельзя.'}
     surname = data.surname.strip().upper()
     if not surname:
         return {'saved': False, 'error': 'Укажите фамилию умершего.'}
@@ -6014,19 +6016,30 @@ async function ownerCabinetAction(key,cardId=null){
   const data=ownerCabinetData,uid=data?.user.id;
   const card=cardId===null?null:data?.number_cards?.find(c=>Number(c.id)===Number(cardId));
   if(cardId!==null&&!card)return;
+  const prepared=card&&(card.prepared??card.composition_closed);
+  if(key==='photo'&&(!prepared||data.work_date!==data.today||(card.source==='private'&&!card.cash))){toast('Сначала заполните кассу. Фото доступно в день заказа.');return}
+  if(key==='cash'&&(!prepared||card.source!=='private')){toast('Сначала отправьте отчёт о закрытии заказа');return}
+  if(key==='tea'&&(!prepared||!cabinetPhotoInfo(card).complete)){toast('Сначала отправьте все фото по заказу');return} 
   const input=(name,label,value='',type='text',extra='')=>`<label>${label}<input name="${name}" type="${type}" value="${esc(value??'')}" ${extra}></label>`;
-  const source=value=>`<label>Тип заказа<select name="source" ${card?.first_received?'disabled':''}><option value="private" ${value==='private'?'selected':''}>Частный</option><option value="gbu" ${value==='gbu'?'selected':''}>ГБУ</option></select></label>`;
+  const source=value=>`<label>Тип заказа<select name="source" ${card?.first_received||card?.cash?'disabled':''}><option value="private" ${value==='private'?'selected':''}>Частный</option><option value="gbu" ${value==='gbu'?'selected':''}>ГБУ</option></select></label>`;
   let title='',fields='',submit='Сохранить';
   if(key==='number'){
     title='Новый заказ';submit='Отправить номер в группу';
-    fields=input('surname','Фамилия умершего','','text','required maxlength="100" autocomplete="off"')+source('private')+input('work_date','Дата заказа',data.work_date,'date','required')+'<p>После отправки продолжите оформление в этой же карточке.</p>';
+    fields=input('surname','Фамилия умершего','','text','required maxlength="100" autocomplete="off"')+source('private')+input('work_date','Дата заказа',data.work_date,'date','required')+`<p>В группу будет отправлен ваш номер: ${esc(data.profile?.phone||'укажите телефон в профиле')}.</p>`;
   }else if(key==='edit'){
-    title='Изменить заказ';fields=input('surname','Фамилия умершего',card.surname,'text','required maxlength="100"')+source(card.source)+input('photo_time','Время фото',card.photo_time,'time')+((card.prepared??card.composition_closed)?input('contact_time','Время связи с бригадой',card.contact_time,'time'):'')+'<p>Изменится существующая карточка. После первого фото тип заказа менять нельзя.</p>';
+    title='Изменить заказ';fields=input('surname','Фамилия умершего',card.surname,'text','required maxlength="100"')+source(card.source)+input('photo_time','Время фото',card.photo_time,'time')+((card.prepared??card.composition_closed)?input('contact_time','Время связи с бригадой',card.contact_time,'time'):'')+'<p>Изменится существующая карточка. После сохранения кассы или первого фото тип заказа менять нельзя.</p>';
   }else if(key==='schedule'){
     title='Время фото';fields=input('photo_time',card.source==='gbu'?'Время первого фото':'Время фото',card.photo_time,'time','required');
   }else if(key==='close'){
     title='Отчёт о закрытии заказа';submit='Подтвердить закрытие';
-    fields='<label>Связь с агентом<select name="agent_status"><option value="yes">Связался с агентом</option><option value="sms">Написал СМС — агент не на связи</option><option value="missing">Номер агента не указан</option></select></label>'+input('contact_time','Во сколько бригада выйдет на связь',card.contact_time,'time','required')+`<p>Фото запланировано на ${esc(card.photo_time)}. После сохранения станет доступна загрузка фото в день заказа.</p>`;
+    fields='<label>Связь с агентом<select name="agent_status"><option value="yes">Связался с агентом</option><option value="sms">Написал СМС — агент не на связи</option><option value="missing">Номер агента не указан</option></select></label>'+input('contact_time','Во сколько бригада выйдет на связь',card.contact_time,'time','required')+`<p>Фото запланировано на ${esc(card.photo_time)}. ${card.source==='private'?'Далее заполните кассу.':'Далее — фото в день заказа.'} Сотрудников назначает диспетчер.</p>`;
+  }else if(key==='cash'){
+    const cash=card.cash||{};title=cash.version?'Изменить кассу':'Касса по заказу';submit='Сохранить кассу';
+    fields=`<div class="cabinet-form-pair"><label>Категория<select name="category"><option value="standard" ${cash.category==='standard'?'selected':''}>Стандарт</option><option value="vip" ${cash.category==='vip'?'selected':''}>Вип</option><option value="elite" ${cash.category==='elite'?'selected':''}>Элит</option></select></label><label>Бригада<select name="team_size"><option value="4" ${cash.team_size===4?'selected':''}>4 человека</option><option value="6" ${cash.team_size===6?'selected':''}>6 человек</option></select></label></div>`+
+      input('commission','Комиссия, ₽',cash.commission??'','number','required min="0" max="10000000" step="1" inputmode="numeric"')+
+      input('kickback','Откат, ₽',cash.kickback??0,'number','required min="0" max="10000000" step="1" inputmode="numeric"')+
+      input('reserve','Сотрудников из резерва',cash.reserve??0,'number','required min="0" max="6" step="1" inputmode="numeric"')+
+      `<div class="cabinet-cash-result"><span>В личную кассу</span><strong id="cabinetCashPreview">${cabinetMoney(cash.commission??0)} ₽</strong></div><p>Откат учитывается отдельно. После сохранения кассы откроется фото в день заказа.</p>`;
   }else if(key==='photo'){
     title=card.source==='gbu'?(card.first_received?'Второе фото · конечная точка':'Первое фото'):'Фото по заказу';submit='Отправить фото';
     fields='<label>Фото<input name="photo" type="file" accept="image/*" required></label><img id="cabinetPhotoPreview" alt="Выбранное фото" hidden style="max-width:100%;max-height:240px;border-radius:12px">'+(card.source==='gbu'&&card.first_received?'<p>Второе фото сохранится. Два фото и итоговый отчёт появятся в группе после всех первых фото ГБУ.</p>':'');
@@ -6042,10 +6055,24 @@ async function ownerCabinetAction(key,cardId=null){
     title='Готовность на завтра';submit='Сохранить готовность';
     fields=`<p>${esc(fmtDate(data.tomorrow))}</p><label>Статус<select name="status"><option value="ready">Готов</option><option value="car">Готов на авто</option><option value="main">На основной</option><option value="off">Выходной согласован</option></select></label><label>Комментарий<textarea name="comment" maxlength="500" rows="3" placeholder="Например: готов после 15:00"></textarea></label>`;
   }else return;
-  showModal(title,`<form id="cabinetNativeForm" class="cabinet-native-form">${card?`<p class="cabinet-form-order">ум: ${esc(card.surname)} · ${esc(fmtDate(card.work_date))}</p>`:''}${fields}<p id="cabinetActionStatus" role="status" aria-live="polite"></p><button class="cabinet-primary" type="submit">${submit}</button></form>`);
+  const formHtml=`<form id="cabinetNativeForm" class="cabinet-native-form">${card?`<p class="cabinet-form-order">ум: ${esc(card.surname)} · ${esc(fmtDate(card.work_date))}</p>`:''}${fields}<p id="cabinetActionStatus" role="status" aria-live="polite"></p><button class="cabinet-primary" type="submit">${submit}</button></form>`;
+  const inline=['number','edit','schedule','close','cash','photo','tea','contact'].includes(key);
+  if(inline){
+    const root=qs('#ownerCabinetContent');
+    if(card){ownerCabinetSelectedCard=card.id;renderOwnerCabinet(data)}
+    else{ownerCabinetSelectedCard=null;root.dataset.cabinetView='new';root.innerHTML=`<button type="button" class="cabinet-back" id="cabinetBack">${cabinetIcon('back')}Мои заказы</button><article class="cabinet-order"><div class="cabinet-kind">Новый заказ · шаг 1</div><div data-stage-host="number"></div></article>`}
+    const host=qs(`[data-stage-host="${key}"]`,root)||qs('[data-stage-host="edit"]',root);
+    host.innerHTML=`<h3>${esc(title)}</h3>${formHtml}<button type="button" id="cabinetFormCancel" class="cabinet-back">Отмена</button>`;
+    host.closest('.cabinet-stage')?.querySelector('[data-cabinet-action]')?.setAttribute('hidden','');
+    const cancel=()=>{renderOwnerCabinet(ownerCabinetData||data)};
+    qs('#cabinetFormCancel').onclick=cancel;
+    if(!card)qs('#cabinetBack').onclick=()=>{ownerCabinetSelectedCard=null;cancel()};
+    host.scrollIntoView?.({behavior:'smooth',block:'nearest'});
+  }else showModal(title,formHtml);
   const form=qs('#cabinetNativeForm'),button=qs('button[type=submit]',form),status=qs('#cabinetActionStatus',form);
   let requestId=crypto.randomUUID(),body=null,posted=false,busy=false,previewUrl=null;
   const fileInput=qs('input[type=file]',form);
+  if(key==='cash')qs('[name=commission]',form).oninput=e=>{qs('#cabinetCashPreview').textContent=cabinetMoney(Number(e.target.value)||0)+' ₽'};
   if(fileInput)fileInput.onchange=()=>{if(previewUrl)URL.revokeObjectURL(previewUrl);const img=qs('#cabinetPhotoPreview',form);if(fileInput.files[0]){previewUrl=URL.createObjectURL(fileInput.files[0]);img.src=previewUrl;img.hidden=false;img.onload=()=>URL.revokeObjectURL(previewUrl)}};
   form.onsubmit=async e=>{
     e.preventDefault();if(busy||state.bootstrap?.user?.id!==uid||!state.bootstrap?.can_use_owner_cabinet)return;
@@ -6053,7 +6080,8 @@ async function ownerCabinetAction(key,cardId=null){
     try{
       if(!body){
         const values=Object.fromEntries(new FormData(form));
-        if(key==='edit'&&card.first_received)values.source=card.source;
+        if(key==='edit'&&(card.first_received||card.cash))values.source=card.source;
+        if(key==='cash'){for(const k of ['team_size','commission','kickback','reserve'])values[k]=Number(values[k]);values.version=card.cash?.version||0;if(values.reserve>values.team_size)throw Error('Резерва не может быть больше состава бригады')}
         if(key==='photo'){values.image=await cabinetImage(fileInput.files[0]);delete values.photo;values.ordinal=card.source==='gbu'&&card.first_received?2:1}
         if(key==='tea')values.amount=Number(values.amount);
         if(key==='readiness')values.work_date=data.tomorrow;
@@ -6068,17 +6096,22 @@ async function ownerCabinetAction(key,cardId=null){
         if(result.status==='error'){
           sessionStorage.removeItem('cabinet-pending:'+uid);body=null;posted=false;requestId=crypto.randomUUID();
           qsa('input,select,textarea',form).forEach(el=>el.disabled=false);
-          if(key==='edit'&&card.first_received)qs('[name=source]',form).disabled=true;
+          if(key==='edit'&&(card.first_received||card.cash))qs('[name=source]',form).disabled=true;
           await loadOwnerCabinet();throw new Error(result.error||'Не удалось сохранить');
         }
         if(result.status==='done'){
           sessionStorage.removeItem('cabinet-pending:'+uid);
           const values=JSON.parse(body).values;
-          if(form.isConnected)closeModal();
+          const stillHere=form.isConnected&&currentViewId()==='ownerCabinetView';
+          if(stillHere){if(inline)form.remove();else closeModal()}
           if(values.work_date&&key==='number'&&values.work_date!==state.selectedDate)await loadBootstrap(values.work_date);
           await loadOwnerCabinet();
           const found=ownerCabinetData?.number_cards?.find(c=>c.report_key===result.report_key);
-          if(found){ownerCabinetSelectedCard=found.id;renderOwnerCabinet(ownerCabinetData)}
+          if(found&&stillHere){
+            ownerCabinetSelectedCard=found.id;renderOwnerCabinet(ownerCabinetData);
+            const next=cabinetNextAction(found,ownerCabinetData);
+            if(next&&!result.duplicate&&['number','schedule','close','cash','photo'].includes(key))await ownerCabinetAction(next.key,found.id);
+          }
           toast(result.message||'Сохранено',5000);return;
         }
         status.textContent='Обрабатываем действие… Повторно отправлять не нужно.';
@@ -6098,6 +6131,101 @@ function ownerCabinetProfileHtml(data){
   const initials=[first,p?.metro].filter(Boolean).map(x=>x.trim()[0]||'').join(''),avatar=cabinetAvatarSource(data);
   return `<article class="cabinet-profile"><button type="button" class="cabinet-avatar" id="cabinetAvatar" aria-label="${avatar?'Изменить личное фото':'Добавить личное фото'}"><span class="cabinet-avatar-face">${avatar?`<img src="${esc(avatar)}" alt="Личное фото бригадира">`:esc(initials||'＋')}</span><span class="cabinet-avatar-camera">${cabinetIcon('camera')}</span></button><div class="cabinet-profile-copy"><h2>${esc(name)}${p?.has_car?' 🚗':''}</h2>${p?'':'<p>Заполните профиль бригадира</p>'}</div><button type="button" class="cabinet-edit-profile" data-cabinet-action="${p?'profile':'register'}" aria-label="${p?'Изменить профиль':'Заполнить профиль'}">${cabinetIcon(p?'edit':'plus')}</button></article>`;
 }
+function cabinetMoney(value){return Number(value||0).toLocaleString('ru-RU')}
+async function openCabinetFinance(onDate=ownerCabinetData?.today,tab='cash'){
+  if(!state.bootstrap?.can_use_owner_cabinet||currentViewId()!=='ownerCabinetView'||!onDate)return;
+  const uid=state.bootstrap.user.id,root=qs('#ownerCabinetContent');
+  root.dataset.cabinetView='finance';root.innerHTML='<section id="cabinetFinance"><p role="status">Загрузка кассы и заработка…</p></section>';
+  const panel=qs('#cabinetFinance'),active=()=>panel.isConnected&&qs('#cabinetFinance')===panel&&state.bootstrap?.user?.id===uid&&state.bootstrap?.can_use_owner_cabinet&&currentViewId()==='ownerCabinetView';
+  try{
+    const data=await api('/api/owner/brigadier-cabinet/finance?on_date='+encodeURIComponent(onDate),{cache:'no-store'});
+    if(!active()||data.user_id!==uid)return;
+    const rows=new Map(data.days.map(row=>[row.work_date,{...row,saving:null,error:'',dirty:false}]));
+    const draftKey=day=>'cabinet-earnings-draft:'+uid+':'+day;
+    for(const row of rows.values()){
+      try{const draft=JSON.parse(sessionStorage.getItem(draftKey(row.work_date))||'null');if(draft){row.salary=draft.salary;row.tea=draft.tea;row.version=draft.version;row.dirty=true}}catch{}
+    }
+    const endDay=Number(data.end.slice(8)),second=Number(data.start.slice(8))===16;
+    panel.innerHTML=`<button type="button" class="cabinet-back" id="cabinetFinanceBack">${cabinetIcon('back')}Кабинет бригадира</button><h2>Касса и заработок</h2><label class="cabinet-finance-month">Месяц<input id="cabinetFinanceMonth" type="month" value="${esc(data.start.slice(0,7))}" aria-label="Месяц кассы и заработка"></label><div class="cabinet-finance-tabs" role="group" aria-label="Период"><button type="button" data-half="1" class="${second?'':'active'}" aria-pressed="${!second}">1–15</button><button type="button" data-half="16" class="${second?'active':''}" aria-pressed="${second}">16–${new Date(Number(data.start.slice(0,4)),Number(data.start.slice(5,7)),0).getDate()}</button></div><div class="cabinet-finance-tabs" role="tablist"><button type="button" data-finance-tab="cash" role="tab">Моя касса</button><button type="button" data-finance-tab="earnings" role="tab">Мой заработок</button></div><div id="cabinetFinanceBody"></div>`;
+    const amount=value=>value===null||value===''?null:/^\d+$/.test(String(value))&&Number(value)<=10000000?Number(value):NaN;
+    const valid=row=>!Number.isNaN(amount(row.salary))&&!Number.isNaN(amount(row.tea));
+    function remember(row){sessionStorage.setItem(draftKey(row.work_date),JSON.stringify({salary:row.salary,tea:row.tea,version:row.version}))}
+    function inputValues(row){return {salary:amount(row.salary),tea:amount(row.tea),version:row.version}}
+    function updateTotals(){
+      if(!active())return;
+      const discard=qs('#cabinetDiscardEarnings',panel);if(discard)discard.hidden=![...rows.values()].some(row=>row.dirty||row.error);
+      let salary=0,tea=0;
+      for(const row of rows.values()){
+        const a=amount(row.salary),b=amount(row.tea);salary+=Number.isFinite(a)?a:0;tea+=Number.isFinite(b)?b:0;
+        const total=qs(`[data-day-total="${row.work_date}"]`,panel);if(total)total.textContent=cabinetMoney((a||0)+(b||0));
+      }
+      const a=qs('#cabinetSalaryTotal',panel),b=qs('#cabinetTeaTotal',panel),c=qs('#cabinetEarningsTotal',panel);
+      if(a)a.textContent=cabinetMoney(salary);if(b)b.textContent=cabinetMoney(tea);if(c)c.textContent=cabinetMoney(salary+tea);
+      const status=qs('#cabinetEarningsStatus',panel);if(status){
+        const failed=[...rows.values()].find(row=>row.error),pending=[...rows.values()].some(row=>row.dirty||row.saving);
+        status.textContent=failed?failed.error:pending?'Есть изменения. Сохраняем при выходе из поля…':'Все изменения сохранены';
+        status.classList.toggle('has-error',!!failed);
+      }
+    }
+    async function saveRow(row){
+      if(row.saving)return row.saving;
+      if(!row.dirty)return true;
+      if(!valid(row)){row.error='Введите целые суммы от 0 до 10 000 000 ₽. Черновик сохранён.';updateTotals();return false}
+      row.saving=(async()=>{
+        try{
+          while(row.dirty){
+            if(!active())return false;
+            const values=inputValues(row);
+            if(!valid(row))throw Error('Проверьте суммы: только целые числа от 0 до 10 000 000 ₽');
+            const response=await api('/api/owner/brigadier-cabinet/earnings/'+row.work_date,{method:'PUT',body:JSON.stringify(values)});
+            if(!active())return false;
+            row.version=response.version;row.error='';
+            const latest=inputValues(row);
+            row.dirty=latest.salary!==values.salary||latest.tea!==values.tea;
+            if(row.dirty)remember(row);else sessionStorage.removeItem(draftKey(row.work_date));
+          }
+          return true;
+        }catch(error){row.error=error.message+' Черновик сохранён в этом окне.';remember(row);return false}
+        finally{row.saving=null;updateTotals()}
+      })();
+      updateTotals();return row.saving;
+    }
+    async function flush(){
+      for(const row of rows.values())if(!(await saveRow(row))){toast('Не все суммы сохранены. Проверьте таблицу заработка.');return false}
+      return active();
+    }
+    function renderTab(next){
+      if(!active())return;tab=next;
+      qsa('[data-finance-tab]',panel).forEach(b=>{b.classList.toggle('active',b.dataset.financeTab===tab);b.setAttribute('aria-selected',b.dataset.financeTab===tab)});
+      const body=qs('#cabinetFinanceBody',panel);
+      if(tab==='earnings'){
+        body.innerHTML=`<p class="cabinet-finance-hint">Оклад и личный чай вводите вручную. Итог считается автоматически. Все суммы в ₽.</p><table class="cabinet-earnings-table"><colgroup><col style="width:16%"><col style="width:28%"><col style="width:28%"><col style="width:28%"></colgroup><thead><tr><th>День</th><th>Оклад</th><th>Чай</th><th>Итог</th></tr></thead><tbody>${[...rows.values()].map(row=>`<tr><th scope="row">${row.work_date.slice(8)}.${row.work_date.slice(5,7)}</th>${['salary','tea'].map(k=>`<td><input type="text" inputmode="numeric" pattern="[0-9]*" data-earnings-day="${row.work_date}" data-field="${k}" value="${esc(row[k]??'')}" placeholder="—" autocomplete="off" aria-label="${k==='salary'?'Оклад':'Личный чай'} за ${row.work_date}" maxlength="8"></td>`).join('')}<td data-day-total="${row.work_date}"></td></tr>`).join('')}</tbody><tfoot><tr><th>Всего</th><td id="cabinetSalaryTotal"></td><td id="cabinetTeaTotal"></td><td id="cabinetEarningsTotal"></td></tr></tfoot></table><p id="cabinetEarningsStatus" role="status" aria-live="polite"></p><button type="button" class="cabinet-secondary cabinet-wide" id="cabinetSaveEarnings">Сохранить изменения</button><button type="button" class="cabinet-back" id="cabinetDiscardEarnings" hidden>Отменить несохранённые правки</button>`;
+        qsa('[data-earnings-day]',body).forEach(input=>{
+          const row=rows.get(input.dataset.earningsDay);
+          input.oninput=()=>{row[input.dataset.field]=input.value;row.dirty=true;row.error='';remember(row);updateTotals()};
+          input.onchange=()=>saveRow(row);
+        });
+        qs('#cabinetSaveEarnings').onclick=()=>flush();
+        qs('#cabinetDiscardEarnings').onclick=()=>{if([...rows.values()].some(row=>row.saving)){toast('Дождитесь сохранения');return}for(const row of rows.values())sessionStorage.removeItem(draftKey(row.work_date));openCabinetFinance(onDate,'earnings')};
+        updateTotals();
+      }else{
+        const groups=new Map();for(const entry of data.cash_entries){if(!groups.has(entry.work_date))groups.set(entry.work_date,[]);groups.get(entry.work_date).push(entry)}
+        body.innerHTML=`<div class="cabinet-finance-summary"><div><small>Личная касса, ₽</small><strong>${cabinetMoney(data.totals.cash)}</strong></div><div><small>Откат отдельно, ₽</small><b>${cabinetMoney(data.totals.kickback)}</b></div></div><p class="cabinet-finance-hint">Период ${data.start.slice(8)}–${data.end.slice(8)} · Заказов: ${data.totals.orders}. Касса равна комиссии.</p>${groups.size?[...groups].map(([day,entries])=>`<details class="cabinet-cash-day"><summary><b>${day.slice(8)}.${day.slice(5,7)}</b><span>${cabinetMoney(entries.reduce((n,r)=>n+r.cash,0))} ₽ ${cabinetIcon('chevron')}</span></summary><div>${entries.map(entry=>`<article><div class="cabinet-cash-line"><strong>ум: ${esc(entry.surname)}</strong><b>${cabinetMoney(entry.cash)} ₽</b></div><p>${esc(entry.category_label)} · ${entry.team_size} чел. · Резерв ${entry.reserve}</p><p>Откат: ${cabinetMoney(entry.kickback)} ₽</p>${entry.editable?`<button type="button" class="cabinet-back" data-edit-cash="${entry.event_id}">${cabinetIcon('edit')}Изменить кассу</button>`:'<small>Запись сохранена в вашей истории</small>'}</article>`).join('')}</div></details>`).join(''):'<div class="cabinet-empty">За этот период касса пока не заполнена.<br>Добавьте её в карточке частного заказа перед фото.</div>'}`;
+        qsa('[data-edit-cash]',body).forEach(button=>button.onclick=async()=>{
+          const entry=data.cash_entries.find(r=>r.event_id===Number(button.dataset.editCash));
+          if(!await flush())return;
+          try{await loadBootstrap(entry.work_date);await loadOwnerCabinet();if(state.bootstrap?.user?.id!==uid||!state.bootstrap?.can_use_owner_cabinet||currentViewId()!=='ownerCabinetView')return;await ownerCabinetAction('cash',entry.event_id)}catch(error){toast(error.message)}
+        });
+      }
+    }
+    qs('#cabinetFinanceBack').onclick=async()=>{if(await flush()){ownerCabinetSelectedCard=null;renderOwnerCabinet(ownerCabinetData)}};
+    qs('#cabinetFinanceMonth').onchange=async event=>{const month=event.target.value;if(/^\d{4}-\d{2}$/.test(month)&&await flush())await openCabinetFinance(month+(second?'-16':'-01'),tab);else event.target.value=data.start.slice(0,7)};
+    qsa('[data-half]',panel).forEach(button=>button.onclick=async()=>{if(await flush())await openCabinetFinance(data.start.slice(0,7)+'-'+(button.dataset.half==='1'?'01':'16'),tab)});
+    qsa('[data-finance-tab]',panel).forEach(button=>button.onclick=async()=>{if(button.dataset.financeTab===tab)return;if(await flush())renderTab(button.dataset.financeTab)});
+    renderTab(tab);
+  }catch(error){if(active()){panel.innerHTML=`<p role="alert">${esc(error.message)}</p><button type="button" id="cabinetFinanceRetry" class="cabinet-secondary">Повторить</button><button type="button" id="cabinetFinanceBack" class="cabinet-back">Кабинет бригадира</button>`;qs('#cabinetFinanceRetry').onclick=()=>openCabinetFinance(onDate,tab);qs('#cabinetFinanceBack').onclick=()=>renderOwnerCabinet(ownerCabinetData)}}
+}
+
 function cabinetPhotoInfo(c){
   const total=c.source==='gbu'?2:1,received=Number(!!c.first_received)+(c.source==='gbu'?Number(!!c.second_received):0);
   return {total,received,complete:received===total,label:received===total?'Фото получены':received?`Фото ${received}/${total}`:(c.photo_time?`Фото в ${c.photo_time}`:'Фото ожидается')};
@@ -6105,6 +6233,7 @@ function cabinetPhotoInfo(c){
 function cabinetNextAction(c,data){
   if(!c.photo_time)return {key:'schedule',title:'Указать время фото',icon:'clock'};
   if(!(c.prepared??c.composition_closed))return {key:'close',title:'Отчёт о закрытии заказа',icon:'check'};
+  if(c.source==='private'&&!c.cash&&!c.first_received)return {key:'cash',title:'Заполнить кассу',icon:'wallet'};
   if(data.work_date>data.today)return null;
   const photo=cabinetPhotoInfo(c);
   if(!photo.complete)return data.work_date===data.today?{key:'photo',title:c.source==='gbu'?(c.first_received?'Отправить второе фото':'Отправить первое фото'):'Отправить фото',icon:'camera'}:null;
@@ -6121,9 +6250,9 @@ function ownerCabinetCardsHtml(data){
   return `${cardRows}${orders.length?`<details class="cabinet-assignments"${cards.length?'':' open'}><summary>Назначения из диспетчерской <span>${orders.length}</span></summary><div>${assigned}</div></details>`:''}${!cards.length&&!orders.length?'<div class="cabinet-empty">На эту дату у вас пока нет заказов.</div>':''}`;
 }
 function ownerCabinetDetailHtml(c,data){
-  const photo=cabinetPhotoInfo(c),today=data.work_date===data.today,next=cabinetNextAction(c,data),prepared=(c.prepared??c.composition_closed);
-  const stage=(icon,title,subtitle,done,action)=>`<section class="cabinet-stage ${done?'is-done':action?.key===next?.key?'is-next':''}"><div class="cabinet-stage-head">${cabinetIcon(done?'check':icon)}<div><h3>${title}</h3><p>${esc(subtitle)}</p></div></div>${action?cabinetButton(action.key,action.title,icon,c,action.key===next?.key,!!action.disabled):''}</section>`;
-  return `<button type="button" class="cabinet-back" id="cabinetBack">${cabinetIcon('back')}Мои заказы</button><div class="cabinet-detail-head"><div class="cabinet-order-top"><span class="cabinet-kind">${c.source==='gbu'?'ГБУ':'Частный'}</span>${cabinetButton('edit','Изменить','edit',c)}</div><h2>ум: ${esc(c.surname)}</h2><p>${esc(fmtDate(data.work_date))}</p></div><div class="cabinet-stages">${stage('check','1. Номер в группу','Карточка отправлена',true,null)}${stage('clock','2. Время фото',c.photo_time||'Укажите плановое время',!!c.photo_time,c.photo_time?null:{key:'schedule',title:'Указать время фото'})}${stage('check','3. Отчёт о закрытии',prepared?'Сохранён. Сотрудников назначает диспетчер':'Подтвердите связь с агентом и время связи с бригадой',prepared,prepared?null:{key:'close',title:'Отчёт о закрытии',disabled:!c.photo_time})}${stage('camera','4. Фотоотчёт',`${photo.received} из ${photo.total} · ${c.source==='gbu'?(c.first_received?'✅':'⬜️')+(c.second_received?'✅':'⬜️'):(c.first_received?'✅':'⬜️')}`,photo.complete,photo.complete?null:{key:'photo',title:today?(c.source==='gbu'&&c.first_received?'Отправить второе фото':'Отправить фото'):'Доступно в день заказа',disabled:!prepared||!today})}${stage('tea','5. Итоговый отчёт',c.tea_received?`Заказ завершён ✅ · Чай ${c.tea_amount} ₽`:'Откроется после всех фото',photo.complete&&c.tea_received,{key:'tea',title:c.tea_received?'Изменить отчёт':'Завершить заказ',disabled:!prepared||!photo.complete||data.work_date>data.today})}${stage('phone','Связь с бригадой',c.on_contact?'Бригада на связи':`План: ${c.contact_time||'не указан'}`,c.on_contact,c.on_contact?null:{key:'contact',title:'Бригада на связи',disabled:!today})}</div>`;
+  const photo=cabinetPhotoInfo(c),today=data.work_date===data.today,next=cabinetNextAction(c,data),prepared=(c.prepared??c.composition_closed),privateOrder=c.source==='private';
+  const stage=(key,icon,title,subtitle,done,action)=>`<section class="cabinet-stage ${done?'is-done':action?.key===next?.key?'is-next':''}"><div class="cabinet-stage-head">${cabinetIcon(done?'check':icon)}<div><h3>${title}</h3><p>${esc(subtitle)}</p></div></div>${action?cabinetButton(action.key,action.title,icon,c,action.key===next?.key,!!action.disabled):''}<div data-stage-host="${key}"></div></section>`;
+  return `<button type="button" class="cabinet-back" id="cabinetBack">${cabinetIcon('back')}Мои заказы</button><article class="cabinet-order cabinet-detail"><div class="cabinet-detail-head"><div class="cabinet-order-top"><span class="cabinet-kind">${privateOrder?'Частный':'ГБУ'}</span>${cabinetButton('edit','Изменить','edit',c)}</div><h2>ум: ${esc(c.surname)}</h2><p>${esc(fmtDate(data.work_date))} · Фото ${esc(c.photo_time||'⏳')}</p>${photo.complete&&c.tea_received?'<p class="cabinet-done">✅ Заказ завершён</p>':''}</div><div data-stage-host="edit"></div><div class="cabinet-stages">${stage('number','check','1. Номер в группу','Карточка отправлена',true,null)}${stage('schedule','clock','2. Время фото',c.photo_time||'Укажите плановое время',!!c.photo_time,c.photo_time?null:{key:'schedule',title:'Указать время фото'})}${stage('close','check','3. Отчёт о закрытии',prepared?'Сохранён. Сотрудников назначает диспетчер':'Связь с агентом и время связи с бригадой',prepared,prepared?null:{key:'close',title:'Отчёт о закрытии',disabled:!c.photo_time})}${privateOrder?stage('cash','wallet','4. Касса',c.cash?`${cabinetMoney(c.cash.commission)} ₽ · Откат ${cabinetMoney(c.cash.kickback)} ₽`:'Заполните перед отправкой фото',!!c.cash,{key:'cash',title:c.cash?'Изменить кассу':'Заполнить кассу',disabled:!prepared}):''}${stage('photo','camera',`${privateOrder?5:4}. Фотоотчёт`,`${photo.received} из ${photo.total} · ${c.source==='gbu'?(c.first_received?'✅':'⬜️')+(c.second_received?'✅':'⬜️'):(c.first_received?'✅':'⬜️')}`,photo.complete,photo.complete?null:{key:'photo',title:privateOrder&&!c.cash?'Фото — после кассы':today?(c.source==='gbu'&&c.first_received?'Отправить второе фото':'Отправить фото'):'Доступно в день заказа',disabled:!prepared||!today||(privateOrder&&!c.cash)})}${stage('tea','tea',`${privateOrder?6:5}. Итоговый отчёт`,c.tea_received?`Заказ завершён ✅ · Чай ${cabinetMoney(c.tea_amount)} ₽`:'Откроется после всех фото',photo.complete&&c.tea_received,{key:'tea',title:c.tea_received?'Изменить отчёт':'Завершить заказ',disabled:!prepared||!photo.complete||data.work_date>data.today})}${stage('contact','phone','Связь с бригадой',c.on_contact?'Бригада на связи':`План: ${c.contact_time||'не указан'}`,c.on_contact,c.on_contact?null:{key:'contact',title:'Бригада на связи',disabled:!today})}</div></article>`;
 }
 function renderOwnerCabinet(data){
   const root=qs('#ownerCabinetContent'),day=data.work_date,uid=state.bootstrap?.user?.id;
@@ -6138,10 +6267,11 @@ function renderOwnerCabinet(data){
     root.innerHTML=`${sessionStorage.getItem('cabinet-pending:'+uid)?'<button type="button" id="cabinetPending" class="cabinet-secondary cabinet-wide">Проверить последнее действие</button>':''}${ownerCabinetProfileHtml(data)}
       <article class="cabinet-readiness"><div><small>Готовность на завтра · ${esc(fmtDate(data.tomorrow))}</small><strong class="${r.status==='ready'?'cabinet-done':''}">${esc(r.label)}</strong></div><button type="button" class="cabinet-secondary" data-cabinet-action="readiness">${r.status==='no_response'?'Выбрать':'Изменить'}</button>${r.text?`<p>${esc(r.text)}</p>`:''}</article>
       <section class="cabinet-my-orders"><div class="cabinet-section-heading"><h2>Мои заказы</h2><button type="button" class="cabinet-number-link" data-cabinet-action="number">${cabinetIcon('plus')}Номер в группу</button></div><div class="cabinet-day-shortcuts"><button type="button" data-cabinet-day="${data.today}" class="${day===data.today?'active':''}" aria-pressed="${day===data.today}">Сегодня</button><button type="button" data-cabinet-day="${data.tomorrow}" class="${day===data.tomorrow?'active':''}" aria-pressed="${day===data.tomorrow}">Завтра</button><label class="cabinet-date-picker">${cabinetIcon('calendar')}<input id="cabinetDate" type="date" value="${esc(day)}" aria-label="Дата моих заказов"></label></div>${day!==data.today&&day!==data.tomorrow?`<p class="cabinet-selected-date">${esc(fmtDate(day))}</p>`:''}${ownerCabinetCardsHtml(data)}</section>
-      <div class="cabinet-personal-links"><button type="button" id="cabinetEmployees">${cabinetIcon('team')}<span>Сотрудники</span>${cabinetIcon('chevron')}</button></div>`;
+      <div class="cabinet-personal-links"><button type="button" id="cabinetFinanceLink">${cabinetIcon('wallet')}<span>Касса и заработок</span>${cabinetIcon('chevron')}</button><button type="button" id="cabinetEmployees">${cabinetIcon('team')}<span>Сотрудники</span>${cabinetIcon('chevron')}</button></div>`;
     if(qs('#cabinetPending',root))qs('#cabinetPending',root).onclick=cabinetResumePending;
     qs('#cabinetAvatar',root).onclick=openCabinetAvatar;
     qs('#cabinetEmployees',root).onclick=openCabinetEmployees;
+    qs('#cabinetFinanceLink',root).onclick=()=>openCabinetFinance();
     qs('#cabinetDate',root).onchange=e=>{if(e.target.value){ownerCabinetSelectedCard=null;loadBootstrap(e.target.value).catch(e=>toast(e.message))}};
     qsa('[data-cabinet-day]',root).forEach(btn=>btn.onclick=()=>{ownerCabinetSelectedCard=null;loadBootstrap(btn.dataset.cabinetDay).catch(e=>toast(e.message))});
     qsa('[data-cabinet-detail]',root).forEach(btn=>btn.onclick=()=>{ownerCabinetSelectedCard=Number(btn.dataset.cabinetDetail);renderOwnerCabinet(data)});
@@ -6165,7 +6295,8 @@ async function loadOwnerCabinet(){
     ownerCabinetData=data;
     const signature=JSON.stringify(data);
     if(signature===ownerCabinetSignature&&root.children.length)return;
-    // Background refresh must not dismiss the native date picker.
+    // Keep open order forms, unsaved earnings and their focus during background refresh.
+    if(qs('#cabinetNativeForm,#cabinetFinance',root))return;
     if(root.contains(document.activeElement)&&document.activeElement?.tagName==='INPUT')return;
     ownerCabinetSignature=signature;
     const y=window.scrollY;
@@ -6174,11 +6305,43 @@ async function loadOwnerCabinet(){
     if(otherOpen&&qs('.cabinet-other-actions',root))qs('.cabinet-other-actions',root).open=true;
     if(assignmentsOpen&&qs('.cabinet-assignments',root))qs('.cabinet-assignments',root).open=true;
     window.scrollTo({top:y,behavior:'instant'});
-  }catch(e){if(active()){ownerCabinetData=null;ownerCabinetSignature='';ownerCabinetSelectedCard=null;root.innerHTML=`<div class="cabinet-empty" role="alert">${esc(e.message)}<br><button type="button" class="cabinet-secondary" id="cabinetRetry">Повторить</button></div>`;qs('#cabinetRetry').onclick=()=>loadBootstrap(day).catch(e=>toast(e.message))}}
+  }catch(e){if(active()){if(qs('#cabinetNativeForm,#cabinetFinance',root)){toast(e.message);return}ownerCabinetData=null;ownerCabinetSignature='';ownerCabinetSelectedCard=null;root.innerHTML=`<div class="cabinet-empty" role="alert">${esc(e.message)}<br><button type="button" class="cabinet-secondary" id="cabinetRetry">Повторить</button></div>`;qs('#cabinetRetry').onclick=()=>loadBootstrap(day).catch(e=>toast(e.message))}}
 }
 // Events''')
     return html.replace('</head>', r'''
 <style id="owner-cabinet-style">
+.cabinet-detail .cabinet-stage{border:0;border-top:1px solid var(--line);border-radius:0;padding:16px 0;background:transparent}
+.cabinet-detail .cabinet-stages{gap:0}.cabinet-detail .cabinet-stage.is-next{background:transparent}
+.cabinet-detail [data-stage-host] h3{font-size:17px;margin:14px 0 4px}
+.cabinet-stage button[hidden]{display:none!important}
+.cabinet-form-pair{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.cabinet-cash-result{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:14px;border-radius:12px;background:rgba(212,177,97,.12);font-size:14px}
+.cabinet-cash-result strong{font-size:20px;color:var(--gold)}
+.cabinet-finance-month{display:flex;align-items:center;justify-content:space-between;gap:12px;color:var(--muted);font-size:14px}
+.cabinet-finance-month input{min-height:44px;max-width:70%;border:1px solid var(--line);background:var(--panel2);color:var(--text);border-radius:12px;padding:8px;font-size:16px;color-scheme:dark}
+.cabinet-finance-tabs{display:flex;gap:6px;margin:14px 0;padding:4px;background:var(--panel);border-radius:14px;border:1px solid var(--line)}
+.cabinet-finance-tabs button{flex:1;border:0;border-radius:10px;min-height:42px;padding:8px;color:var(--muted);background:transparent;font-size:14px}
+.cabinet-finance-tabs button.active{color:var(--text);background:var(--panel2);font-weight:700}
+.cabinet-finance-tabs[role=group] button.active{background:rgba(212,177,97,.15);color:var(--gold)}
+.cabinet-finance-summary{display:flex;gap:12px;align-items:center;padding:20px 16px;background:var(--panel);border:1px solid var(--line);border-radius:16px}
+.cabinet-finance-summary>div{flex:1}.cabinet-finance-summary small{display:block;color:var(--muted);font-size:12px;margin-bottom:8px}
+.cabinet-finance-summary strong{font-size:28px;color:var(--gold)}.cabinet-finance-summary b{font-size:21px}
+.cabinet-finance-hint{font-size:13px;color:var(--muted);line-height:1.5;margin:14px 0}
+.cabinet-earnings-table{table-layout:fixed;width:100%;border-collapse:collapse;min-width:0;font-variant-numeric:tabular-nums}
+.cabinet-earnings-table th,.cabinet-earnings-table td{border-bottom:1px solid var(--line);padding:8px 3px;text-align:right;white-space:nowrap;font-size:14px}
+.cabinet-earnings-table th:first-child{text-align:left;font-size:12px}.cabinet-earnings-table tbody th{font-weight:400;color:var(--muted)}
+.cabinet-earnings-table td:last-child{color:var(--gold);font-weight:700}
+.cabinet-earnings-table input{box-sizing:border-box;width:100%;min-width:0;min-height:42px;border:1px solid var(--line);border-radius:9px;background:var(--panel2);color:var(--text);font-size:16px;text-align:right;padding:7px 5px}
+.cabinet-earnings-table tfoot td{font-weight:700;font-size:13px;padding-top:16px}
+.cabinet-earnings-table input:focus{outline:1px solid var(--gold);border-color:var(--gold)}
+#cabinetEarningsStatus{font-size:12px;color:var(--muted);line-height:1.5}#cabinetEarningsStatus.has-error{color:#ff7b7b}
+.cabinet-cash-day{border:1px solid var(--line);border-radius:14px;background:var(--panel);margin:10px 0;overflow:hidden}
+.cabinet-cash-day summary{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:50px;padding:8px 14px;list-style:none;cursor:pointer}
+.cabinet-cash-day summary::-webkit-details-marker{display:none}.cabinet-cash-day summary span{display:flex;align-items:center;gap:8px;color:var(--gold)}
+.cabinet-cash-day[open] summary .cabinet-icon{transform:rotate(90deg)}
+.cabinet-cash-day article{padding:12px 14px;border-top:1px solid var(--line)}.cabinet-cash-day p,.cabinet-cash-day small{font-size:13px;color:var(--muted);margin:8px 0}
+.cabinet-cash-line{display:flex;justify-content:space-between;gap:10px;font-size:14px}.cabinet-cash-line strong{overflow-wrap:anywhere}.cabinet-cash-line b{white-space:nowrap}
+
 .cabinet-native-form{display:grid;gap:14px;padding:8px 0}
 .cabinet-native-form label{display:grid;gap:7px;font-size:14px;color:var(--muted)}
 .cabinet-native-form input,.cabinet-native-form select,.cabinet-native-form textarea{box-sizing:border-box;width:100%;min-height:46px;border:1px solid var(--line);border-radius:12px;background:var(--panel2);color:var(--text);padding:10px;font-size:16px}
@@ -6323,14 +6486,15 @@ class CabinetOrderState(Base):
 
 class CabinetCommandInput(BaseModel):
     request_id: str = Field(min_length=32, max_length=64, pattern=r'^[a-zA-Z0-9-]+$')
-    action: Literal['number','edit','schedule','close','contact','photo','tea','profile','register','readiness']
+    action: Literal['number','edit','schedule','close','cash','contact','photo','tea','profile','register','readiness']
     card_id: int | None = None
     values: dict = Field(default_factory=dict)
 
 
 def cabinet_extra_state(db, card):
     row = db.get(CabinetOrderState, f'card:{card.chat_id}:{card.message_id}')
-    return json.loads(row.payload) if row and row.tg_id == card.tg_id else {}
+    meta = json.loads(row.payload) if row and row.tg_id == card.tg_id else {}
+    return {**meta, 'cash': cabinet_cash_for_card(db, card)}
 
 
 @app.post('/api/owner/brigadier-cabinet/actions')
@@ -6338,7 +6502,7 @@ def cabinet_command_create(data: CabinetCommandInput, db: Session = Depends(get_
     if not _can_use_owner_cabinet(db, user.id):
         raise HTTPException(403, 'Кабинет недоступен')
     payload = {'action': data.action, 'values': data.values, 'tg_id': user.id}
-    if data.action in {'edit','schedule','close','contact','photo','tea'}:
+    if data.action in {'edit','schedule','close','cash','contact','photo','tea'}:
         card = db.scalar(select(NumberCardEvent).where(NumberCardEvent.id == data.card_id,
             NumberCardEvent.tg_id == user.id, _visible_number_card()))
         if not card:
@@ -6432,3 +6596,208 @@ def cabinet_state_sync(data: list[dict], db: Session = Depends(get_db)):
         row.payload=json.dumps({k:item.get(k) for k in ('prepared','tea_received','tea_amount')})
     db.commit()
     return {'ok':True}
+
+# Personal brigadier finance is separate from the dispatcher's/company cash ledger.
+# In particular, the legacy demo/owner cash purge must never touch these records.
+class CabinetOrderCash(Base):
+    __tablename__ = 'cabinet_order_cash'
+    event_id = Column(Integer, primary_key=True)
+    tg_id = Column(BigInteger, primary_key=True)
+    work_date = Column(Date, nullable=False, index=True)
+    surname = Column(String(100), nullable=False)
+    category = Column(String(20), nullable=False)
+    team_size = Column(Integer, nullable=False)
+    commission = Column(Integer, nullable=False)
+    kickback = Column(Integer, nullable=False)
+    reserve = Column(Integer, nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class CabinetEarningsDay(Base):
+    __tablename__ = 'cabinet_earnings_days'
+    tg_id = Column(BigInteger, primary_key=True)
+    work_date = Column(Date, primary_key=True)
+    salary = Column(Integer, nullable=True)
+    tea = Column(Integer, nullable=True)
+    version = Column(Integer, nullable=False, default=1)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class CabinetCashReceipt(Base):
+    __tablename__ = 'cabinet_cash_receipts'
+    request_id = Column(String(64), primary_key=True)
+    fingerprint = Column(String(64), nullable=False)
+    response = Column(String, nullable=False)
+
+
+class CabinetCashInput(BaseModel):
+    request_id: str = Field(min_length=1, max_length=64)
+    tg_id: StrictInt
+    report_key: str = Field(pattern=r'^card:-?\d+:\d+$')
+    category: Literal['standard','vip','elite']
+    team_size: StrictInt = Field(ge=4, le=6)
+    commission: StrictInt = Field(ge=0, le=10000000)
+    kickback: StrictInt = Field(ge=0, le=10000000)
+    reserve: StrictInt = Field(ge=0, le=6)
+    version: StrictInt = Field(ge=0)
+
+
+class CabinetEarningsInput(BaseModel):
+    salary: StrictInt | None = Field(default=None, ge=0, le=10000000)
+    tea: StrictInt | None = Field(default=None, ge=0, le=10000000)
+    version: StrictInt = Field(ge=0)
+
+
+def cabinet_finance_access(db, uid):
+    if not _can_use_owner_cabinet(db, uid):
+        raise HTTPException(403, 'Кабинет недоступен')
+    employee = db.scalar(select(Employee.id).where(Employee.tg_id == uid,
+        Employee.active.is_(True), Employee.group_code == 'brigadier', _visible_employee()).limit(1))
+    if employee is None:
+        raise HTTPException(403, 'Сначала заполните профиль бригадира')
+
+
+def cabinet_cash_dict(row):
+    return {'event_id': row.event_id, 'work_date': row.work_date.isoformat(), 'surname': row.surname,
+        'category': row.category, 'category_label': {'standard':'Стандарт','vip':'Вип','elite':'Элит'}[row.category],
+        'team_size': row.team_size, 'commission': row.commission, 'kickback': row.kickback,
+        'reserve': row.reserve, 'cash': row.commission, 'version': row.version}
+
+
+def cabinet_cash_for_card(db, card):
+    row = db.get(CabinetOrderCash, (card.id, card.tg_id))
+    return cabinet_cash_dict(row) if row else None
+
+
+def cabinet_finance_card(db, uid, key):
+    cabinet_finance_access(db, uid)
+    if not re.fullmatch(r'card:-?\d+:\d+', key):
+        raise HTTPException(404, 'Заказ недоступен')
+    _, chat, message = key.split(':')
+    card = db.scalar(select(NumberCardEvent).where(NumberCardEvent.chat_id == int(chat),
+        NumberCardEvent.message_id == int(message), NumberCardEvent.tg_id == uid,
+        _visible_number_card()).with_for_update())
+    if not card:
+        raise HTTPException(404, 'Заказ удалён или передан другому бригадиру')
+    return card
+
+
+@app.get('/api/bot/cabinet/cash', dependencies=[Depends(_bot_key)])
+def cabinet_cash_status(tg_id: int, report_key: str, db: Session = Depends(get_db)):
+    card = cabinet_finance_card(db, tg_id, report_key)
+    return {'cash': cabinet_cash_for_card(db, card)}
+
+
+@app.post('/api/bot/cabinet/cash', dependencies=[Depends(_bot_key)])
+def cabinet_cash_save(data: CabinetCashInput, db: Session = Depends(get_db)):
+    card = cabinet_finance_card(db, data.tg_id, data.report_key)
+    if card.source != 'private':
+        raise HTTPException(422, 'Касса на этом этапе заполняется только для частного заказа')
+    if data.team_size not in (4, 6) or data.reserve > data.team_size:
+        raise HTTPException(422, 'Проверьте состав бригады и количество резерва')
+    meta = cabinet_extra_state(db, card)
+    if not meta.get('prepared') and not number_card_statuses(db, [card])[card.id]['closed']:
+        raise HTTPException(409, 'Сначала отправьте отчёт о закрытии заказа')
+    fingerprint = hashlib.sha256(json.dumps(data.model_dump(), sort_keys=True).encode()).hexdigest()
+    receipt = db.get(CabinetCashReceipt, data.request_id)
+    if receipt:
+        if receipt.fingerprint != fingerprint:
+            raise HTTPException(409, 'Этот запрос уже использован')
+        return json.loads(receipt.response)
+    row = db.get(CabinetOrderCash, (card.id, data.tg_id))
+    values = {k: getattr(data, k) for k in ('category','team_size','commission','kickback','reserve')}
+    if (row.version if row else 0) != data.version:
+        raise HTTPException(409, 'Касса уже изменена. Обновите карточку и проверьте суммы')
+    try:
+        if row:
+            changed = db.execute(update(CabinetOrderCash).where(CabinetOrderCash.event_id == card.id,
+                CabinetOrderCash.tg_id == data.tg_id, CabinetOrderCash.version == data.version).values(
+                **values, surname=card.surname, version=data.version + 1, updated_at=datetime.utcnow()))
+            if changed.rowcount != 1:
+                db.rollback()
+                raise HTTPException(409, 'Касса уже изменена. Обновите карточку')
+            db.refresh(row)
+        else:
+            row = CabinetOrderCash(event_id=card.id, tg_id=data.tg_id, work_date=card.work_date,
+                surname=card.surname, version=1, **values)
+            db.add(row)
+            db.flush()
+        response = {'saved': True, 'cash': cabinet_cash_dict(row)}
+        db.add(CabinetCashReceipt(request_id=data.request_id, fingerprint=fingerprint,
+            response=json.dumps(response, ensure_ascii=False)))
+        db.commit()
+        return response
+    except IntegrityError:
+        db.rollback()
+        receipt = db.get(CabinetCashReceipt, data.request_id)
+        if receipt and receipt.fingerprint == fingerprint:
+            return json.loads(receipt.response)
+        raise HTTPException(409, 'Касса уже сохранена. Обновите карточку')
+
+
+def cabinet_earnings_dict(day, row):
+    salary = row.salary if row else None
+    tea = row.tea if row else None
+    return {'work_date': day.isoformat(), 'salary': salary, 'tea': tea,
+        'total': (salary or 0) + (tea or 0), 'version': row.version if row else 0}
+
+
+@app.put('/api/owner/brigadier-cabinet/earnings/{work_date}')
+def cabinet_earnings_save(work_date: date, data: CabinetEarningsInput,
+        db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    cabinet_finance_access(db, user.id)
+    row = db.get(CabinetEarningsDay, (user.id, work_date))
+    # An identical retry is safe, even if the first response was lost.
+    if row and row.salary == data.salary and row.tea == data.tea:
+        return cabinet_earnings_dict(work_date, row)
+    if (row.version if row else 0) != data.version:
+        raise HTTPException(409, 'Суммы за день уже изменены. Обновите таблицу и проверьте запись')
+    try:
+        if row:
+            changed = db.execute(update(CabinetEarningsDay).where(CabinetEarningsDay.tg_id == user.id,
+                CabinetEarningsDay.work_date == work_date, CabinetEarningsDay.version == data.version).values(
+                salary=data.salary, tea=data.tea, version=data.version + 1, updated_at=datetime.utcnow()))
+            if changed.rowcount != 1:
+                db.rollback()
+                raise HTTPException(409, 'Суммы за день уже изменены. Обновите таблицу')
+            db.refresh(row)
+        else:
+            row = CabinetEarningsDay(tg_id=user.id, work_date=work_date, salary=data.salary, tea=data.tea, version=1)
+            db.add(row)
+        db.commit()
+        return cabinet_earnings_dict(work_date, row)
+    except IntegrityError:
+        db.rollback()
+        row = db.get(CabinetEarningsDay, (user.id, work_date))
+        if row and row.salary == data.salary and row.tea == data.tea:
+            return cabinet_earnings_dict(work_date, row)
+        raise HTTPException(409, 'Суммы за день уже сохранены. Обновите таблицу')
+
+
+@app.get('/api/owner/brigadier-cabinet/finance')
+def cabinet_finance(on_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    cabinet_finance_access(db, user.id)
+    start, end = _period_bounds(on_date)
+    earnings = {r.work_date: r for r in db.scalars(select(CabinetEarningsDay).where(
+        CabinetEarningsDay.tg_id == user.id, CabinetEarningsDay.work_date.between(start, end)))}
+    days = [cabinet_earnings_dict(start + timedelta(days=i), earnings.get(start + timedelta(days=i)))
+        for i in range((end-start).days + 1)]
+    cash = db.scalars(select(CabinetOrderCash).where(CabinetOrderCash.tg_id == user.id,
+        CabinetOrderCash.work_date.between(start, end)).order_by(CabinetOrderCash.work_date, CabinetOrderCash.event_id)).all()
+    cards = {r.id: r for r in db.scalars(select(NumberCardEvent).where(NumberCardEvent.tg_id == user.id,
+        NumberCardEvent.id.in_([r.event_id for r in cash]), _visible_number_card()))} if cash else {}
+    entries = []
+    for row in cash:
+        item = cabinet_cash_dict(row)
+        card = cards.get(row.event_id)
+        item['editable'] = bool(card and card.source == 'private')
+        if card:
+            item['surname'] = card.surname
+        entries.append(item)
+    return JSONResponse({'user_id': user.id, 'start': start.isoformat(), 'end': end.isoformat(),
+        'days': days, 'cash_entries': entries,
+        'totals': {'salary': sum(r['salary'] or 0 for r in days), 'tea': sum(r['tea'] or 0 for r in days),
+            'total': sum(r['total'] for r in days), 'cash': sum(r.commission for r in cash),
+            'kickback': sum(r.kickback for r in cash), 'orders': len(cash)}},
+        headers={'Cache-Control':'private, no-store'})
