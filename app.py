@@ -6399,12 +6399,12 @@ async function openCabinetFinance(onDate=ownerCabinetData?.today,tab='earnings')
       }else{
         const groups=new Map();for(const entry of data.cash_entries){if(!groups.has(entry.work_date))groups.set(entry.work_date,[]);groups.get(entry.work_date).push(entry)}
         const cashPeriods=new Map(data.period_totals.map(p=>[p.end,p]));
-        const entryHtml=entry=>`<article><div class="cabinet-cash-line"><strong>ум: ${esc(entry.surname)}</strong><b>${cabinetMoney(entry.cash)} ₽</b></div><p>${esc(entry.category_label)} · ${entry.team_size} чел. · Резерв ${entry.reserve}</p><p>Откат: ${cabinetMoney(entry.kickback)} ₽</p>${entry.editable?`<button type="button" class="cabinet-back" data-edit-cash="${entry.event_id}">${cabinetIcon('edit')}Изменить кассу</button>`:'<small>Запись сохранена в вашей истории</small>'}</article>`;
+        const entryHtml=entry=>`<article><div class="cabinet-cash-line"><strong>${entry.surname?'ум: '+esc(entry.surname):'Касса из бота'}</strong><b>${cabinetMoney(entry.cash)} ₽</b></div><p>${esc(entry.category_label)} · ${entry.team_size} чел. · Резерв ${entry.reserve}</p><p>Откат: ${cabinetMoney(entry.kickback)} ₽</p>${entry.editable?`<button type="button" class="cabinet-back" data-edit-cash="${entry.event_id}">${cabinetIcon('edit')}Изменить кассу</button>`:entry.source==='bot'?'<small>Прежняя запись из бота</small>':'<small>Запись сохранена в вашей истории</small>'}</article>`;
         const cashRows=data.cash_days.map(row=>{
           const day=row.work_date,entries=groups.get(day)||[],period=cashPeriods.get(day);
           return `<tr data-cash-row="${day}"><th scope="row">${entries.length?`<button type="button" class="cabinet-cash-date" data-cash-day="${day}" aria-expanded="false" aria-controls="cashDay-${day}" aria-label="Показать заказы за ${day}">${day.slice(8)}.${day.slice(5,7)}${cabinetIcon('chevron')}</button>`:`${day.slice(8)}.${day.slice(5,7)}`}</th><td>${cabinetMoney(row.cash)}</td><td>${cabinetMoney(row.kickback)}</td></tr>${entries.length?`<tr id="cashDay-${day}" class="cabinet-cash-details" hidden><td colspan="3">${entries.map(entryHtml).join('')}</td></tr>`:''}${period?`<tr class="cabinet-period-total" data-cash-half="${Number(day.slice(8))===15?1:2}"><th scope="row"><span>${halfLabel(Number(day.slice(8))===15?1:2)}</span><small>Итого</small></th><td>${cabinetMoney(period.cash)}</td><td>${cabinetMoney(period.kickback)}</td></tr>`:''}`;
         }).join('');
-        body.innerHTML=`<p class="cabinet-finance-hint">Касса заполняется автоматически из карточек заказов. Касса равна комиссии, откат учитывается отдельно. Все суммы в ₽.</p><div class="cabinet-finance-scroll" role="region" aria-label="Касса по дням" tabindex="0"><table class="cabinet-earnings-table cabinet-cash-table"><colgroup><col style="width:24%"><col style="width:38%"><col style="width:38%"></colgroup><thead><tr><th>День</th><th>Касса</th><th>Откат</th></tr></thead><tbody>${cashRows}</tbody><tfoot><tr><th scope="row" title="Всего за месяц">Месяц</th><td id="cabinetCashTotal">${cabinetMoney(data.totals.cash)}</td><td id="cabinetKickbackTotal">${cabinetMoney(data.totals.kickback)}</td></tr></tfoot></table></div>`;
+        body.innerHTML=`<p class="cabinet-finance-hint">Касса — из карточек заказов и прежних записей бота. Касса равна комиссии, откат отдельно. Все суммы в ₽.</p><div class="cabinet-finance-scroll" role="region" aria-label="Касса по дням" tabindex="0"><table class="cabinet-earnings-table cabinet-cash-table"><colgroup><col style="width:24%"><col style="width:38%"><col style="width:38%"></colgroup><thead><tr><th>День</th><th>Касса</th><th>Откат</th></tr></thead><tbody>${cashRows}</tbody><tfoot><tr><th scope="row" title="Всего за месяц">Месяц</th><td id="cabinetCashTotal">${cabinetMoney(data.totals.cash)}</td><td id="cabinetKickbackTotal">${cabinetMoney(data.totals.kickback)}</td></tr></tfoot></table></div>`;
         qsa('[data-cash-day]',body).forEach(button=>button.onclick=()=>{
           const detail=qs('#cashDay-'+button.dataset.cashDay,body);detail.hidden=!detail.hidden;button.setAttribute('aria-expanded',String(!detail.hidden));
         });
@@ -6867,10 +6867,24 @@ def cabinet_finance_access(db, uid):
 
 
 def cabinet_cash_dict(row):
-    return {'event_id': row.event_id, 'work_date': row.work_date.isoformat(), 'surname': row.surname,
+    return {'entry_key': f'cabinet:{row.event_id}:{row.tg_id}', 'source': 'cabinet',
+        'event_id': row.event_id, 'work_date': row.work_date.isoformat(), 'surname': row.surname,
         'category': row.category, 'category_label': {'standard':'Стандарт','vip':'Вип','elite':'Элит'}[row.category],
         'team_size': row.team_size, 'commission': row.commission, 'kickback': row.kickback,
         'reserve': row.reserve, 'cash': row.commission, 'version': row.version}
+
+
+def cabinet_legacy_cash_dict(row):
+    # Read the original ledger: old edits/deletions stay in sync and reopening
+    # the cabinet cannot create copies. Amounts in both ledgers are whole RUB.
+    commission = int(row.commission_rub or 0)
+    return {'entry_key': f'bot:{row.id}', 'source': 'bot', 'cash_entry_id': row.id,
+        'event_id': None, 'work_date': row.work_date.isoformat(), 'surname': '',
+        'category': row.category,
+        'category_label': {'standard':'Стандарт','vip':'Вип','elite':'Элит'}.get(row.category, 'Заказ'),
+        'team_size': row.team_size, 'commission': commission,
+        'kickback': int(row.kickback_rub or 0), 'reserve': int(row.reserve_count or 0),
+        'cash': commission, 'version': None, 'editable': False}
 
 
 def cabinet_cash_for_card(db, card):
@@ -7005,6 +7019,14 @@ def cabinet_finance(on_date: date, db: Session = Depends(get_db), user: Telegram
         if card:
             item['surname'] = card.surname
         entries.append(item)
+    # Cash entered through the bot before cabinet access was granted belongs
+    # to the same Telegram account. Never infer ownership from a display name.
+    legacy_cash = db.scalars(select(CashEntry).where(CashEntry.brigadier_tg_id == user.id,
+        CashEntry.work_date.between(start, end)).order_by(CashEntry.work_date, CashEntry.id)).all()
+    entries.extend(cabinet_legacy_cash_dict(row) for row in legacy_cash)
+    # Source-qualified keys keep independent rows with equal IDs/amounts distinct.
+    entries.sort(key=lambda item: (item['work_date'], 0 if item['source'] == 'cabinet' else 1,
+        item['event_id'] if item['source'] == 'cabinet' else item['cash_entry_id']))
     cash_days = {r['work_date']: {'work_date': r['work_date'], 'cash': 0, 'kickback': 0, 'orders': 0} for r in days}
     for entry in entries:
         day = cash_days[entry['work_date']]
@@ -7023,8 +7045,8 @@ def cabinet_finance(on_date: date, db: Session = Depends(get_db), user: Telegram
     return JSONResponse({'user_id': user.id, 'start': start.isoformat(), 'end': end.isoformat(),
         'days': days, 'cash_entries': entries, 'cash_days': list(cash_days.values()), 'period_totals': period_totals,
         'totals': {'salary': sum(r['salary'] or 0 for r in days), 'tea': sum(r['tea'] or 0 for r in days),
-            'total': sum(r['total'] for r in days), 'cash': sum(r.commission for r in cash),
-            'kickback': sum(r.kickback for r in cash), 'orders': len(cash)}},
+            'total': sum(r['total'] for r in days), 'cash': sum(r['cash'] for r in entries),
+            'kickback': sum(r['kickback'] for r in entries), 'orders': len(entries)}},
         headers={'Cache-Control':'private, no-store'})
 
 
