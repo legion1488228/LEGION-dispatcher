@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel, Field, StrictInt
+from pydantic import BaseModel, Field, StrictInt, StrictBool
 from sqlalchemy import and_, func, or_, select, update, inspect as sa_inspect, text
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import Column, Integer, BigInteger, String, Date, DateTime, Boolean, UniqueConstraint
@@ -24,7 +24,7 @@ from database import Base, engine, get_db
 from models import AccessUser, Agent, Assignment, CashEntry, Employee, GbuAgentContact, ImportLog, Order, Readiness
 from parsers import parse_agent_ready_form, parse_gbu_ocr_text
 from gbu_tools import best_agent_match, parse_gbu_table_image
-from telegram_auth import TelegramUser, require_admin, require_bot_key
+from telegram_auth import TelegramUser, require_admin, require_bot_key, validate_init_data, allowed_ids
 from telegram_notify import agent_brigadier_text, brigadier_order_text, send_telegram_message
 
 APP_DIR = Path(__file__).resolve().parent
@@ -76,6 +76,30 @@ def _visible_employee():
     )
 
 app = FastAPI(title="ЛЕГИОН — Диспетчерская", version="1.0.1")
+
+
+async def require_app_user(db: Session = Depends(get_db),
+        x_telegram_init_data: str | None = Header(default=None),
+        x_dev_telegram_id: str | None = Header(default=None)) -> TelegramUser:
+    """Validate Telegram, then allow dispatcher access OR an individual cabinet grant.
+
+    Dispatcher endpoints keep require_admin; a cabinet grant never adds an admin ID.
+    """
+    try:
+        if os.getenv("DEV_MODE", "0") == "1" and x_dev_telegram_id:
+            user = TelegramUser(id=int(x_dev_telegram_id), first_name="DEV")
+        else:
+            token = os.getenv("BOT_TOKEN", "").strip()
+            if not token:
+                raise HTTPException(500, "BOT_TOKEN is not configured")
+            user = validate_init_data(x_telegram_init_data or "", token)
+    except (ValueError, TypeError):
+        raise HTTPException(401, "Откройте приложение заново через Telegram")
+    if user.id in HIDDEN_TG_IDS:
+        raise HTTPException(403, "Доступ закрыт")
+    if user.id not in allowed_ids() and not _can_use_owner_cabinet(db, user.id):
+        raise HTTPException(403, "Кабинет не подключён или доступ отключён. Обратитесь к владельцу «ЛЕГИОН»")
+    return user
 
 
 def _seed_gbu_agents():
@@ -1099,13 +1123,22 @@ def api_me(user: TelegramUser = Depends(require_admin)):
 
 
 @app.get("/api/bootstrap")
-def bootstrap(work_date: date | None = None, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+def bootstrap(work_date: date | None = None, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     selected = work_date or datetime.now(MOSCOW).date()
+    if user.id not in allowed_ids():
+        # Never calculate or expose dispatcher summaries to a brigadier.
+        return JSONResponse({"user": {"id": user.id, "name": user.full_name},
+            "cabinet_only": True, "is_owner": False, "can_manage_cabinets": False,
+            "can_use_owner_cabinet": True, "can_view_vlad_allowance": False,
+            "selected_date": selected.isoformat(), "today": datetime.now(MOSCOW).date().isoformat()},
+            headers={"Cache-Control": "private, no-store"})
     dates = _date_folders(db, selected)
     summary = _day_summary(db, selected)
     return {
         "user": {"id": user.id, "name": user.full_name},
         "is_owner": _is_owner(db, user.id),
+        "cabinet_only": False,
+        "can_manage_cabinets": _is_cabinet_owner(db, user.id),
         "can_use_owner_cabinet": _can_use_owner_cabinet(db, user.id),
         "can_view_vlad_allowance": _can_view_vlad_allowance(db, user),
         "selected_date": selected.isoformat(),
@@ -2215,7 +2248,9 @@ def list_employees(group: str | None = None, db: Session = Depends(get_db), user
     if group and group != "all":
         q = q.where(Employee.group_code == group)
     rows = db.execute(q.order_by(Employee.full_name)).scalars().all()
-    return [_employee_dict(x) for x in rows]
+    manage = _is_cabinet_owner(db, user.id)
+    return [{**_employee_dict(x), **({"cabinet_access": cabinet_access_info(db, x)} if manage else {})}
+            for x in rows]
 
 
 @app.post("/api/employees/bulk")
@@ -5698,6 +5733,91 @@ class OwnerCabinetConfig(Base):
     bot_username = Column(String(32), nullable=True)
 
 
+class BrigadierCabinetAccess(Base):
+    __tablename__ = "brigadier_cabinet_access"
+    tg_id = Column(BigInteger, primary_key=True)
+    employee_id = Column(Integer, nullable=False)
+    active = Column(Boolean, nullable=False, default=False)
+    version = Column(Integer, nullable=False, default=1)
+    granted_by = Column(BigInteger, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class CabinetAccessInput(BaseModel):
+    active: StrictBool
+    version: StrictInt = Field(ge=0)
+
+
+def _is_cabinet_owner(db: Session, tg_id: int) -> bool:
+    config = db.get(OwnerCabinetConfig, 1)
+    return bool(config and config.owner_tg_id == int(tg_id)
+                and int(tg_id) not in HIDDEN_TG_IDS and _is_owner(db, tg_id))
+
+
+def cabinet_access_info(db: Session, employee):
+    if employee.group_code != "brigadier" or not employee.tg_id or not employee.active:
+        return None
+    if _is_cabinet_owner(db, employee.tg_id):
+        return {"owner": True, "active": True, "version": 0}
+    grant = db.get(BrigadierCabinetAccess, employee.tg_id)
+    return {"owner": False, "active": _can_use_owner_cabinet(db, employee.tg_id),
+            "version": grant.version if grant else 0}
+
+
+@app.put("/api/employees/{employee_id}/cabinet-access")
+def set_cabinet_access(employee_id: int, data: CabinetAccessInput,
+        db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    if not _is_cabinet_owner(db, user.id):
+        raise HTTPException(403, "Подключать кабинеты может только владелец «ЛЕГИОН»")
+    employee = db.scalar(select(Employee).where(Employee.id == employee_id,
+        Employee.active.is_(True), Employee.group_code == "brigadier", _visible_employee()))
+    if not employee or not employee.tg_id:
+        raise HTTPException(409, "Сначала нужна регистрация бригадира в боте")
+    if employee.tg_id == user.id:
+        raise HTTPException(409, "Ваш кабинет уже подключён")
+    grant = db.get(BrigadierCabinetAccess, employee.tg_id)
+    if (grant.version if grant else 0) != data.version:
+        raise HTTPException(409, "Доступ уже изменён. Обновите список бригадиров")
+    values = dict(employee_id=employee.id, active=data.active, version=data.version + 1,
+                  granted_by=user.id, updated_at=datetime.utcnow())
+    try:
+        if grant:
+            result = db.execute(update(BrigadierCabinetAccess).where(
+                BrigadierCabinetAccess.tg_id == employee.tg_id,
+                BrigadierCabinetAccess.version == data.version).values(**values))
+            if result.rowcount != 1:
+                db.rollback()
+                raise HTTPException(409, "Доступ уже изменён. Обновите список бригадиров")
+        else:
+            db.add(BrigadierCabinetAccess(tg_id=employee.tg_id, **values))
+        if not data.active:
+            db.execute(update(CabinetCommand).where(CabinetCommand.tg_id == employee.tg_id,
+                CabinetCommand.status == "queued").values(status="error", payload="{}",
+                result=json.dumps({"error": "Доступ к кабинету отключён"}, ensure_ascii=False)))
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "Доступ уже изменён. Обновите список бригадиров")
+    return {"employee_id": employee.id, "cabinet_access": cabinet_access_info(db, employee)}
+
+
+def bot_cabinet_access_data(db, tg_id):
+    grant = db.get(BrigadierCabinetAccess, tg_id)
+    return {"tg_id": tg_id, "allowed": _can_use_owner_cabinet(db, tg_id),
+            "version": grant.version if grant else 0}
+
+
+@app.get("/api/bot/cabinet/access", dependencies=[Depends(_bot_key)])
+def bot_cabinet_access_list(db: Session = Depends(get_db)):
+    return {"items": [bot_cabinet_access_data(db, row.tg_id)
+                      for row in db.scalars(select(BrigadierCabinetAccess))]}
+
+
+@app.get("/api/bot/cabinet/access/{tg_id}", dependencies=[Depends(_bot_key)])
+def bot_cabinet_access_check(tg_id: int, db: Session = Depends(get_db)):
+    return bot_cabinet_access_data(db, tg_id)
+
+
 class CabinetProfilePhoto(Base):
     __tablename__ = "owner_cabinet_profile_photos"
     tg_id = Column(BigInteger, primary_key=True)
@@ -5710,7 +5830,7 @@ class CabinetProfilePhotoInput(BaseModel):
 
 @app.put("/api/owner/brigadier-cabinet/avatar")
 def cabinet_avatar_save(data: CabinetProfilePhotoInput, db: Session = Depends(get_db),
-                        user: TelegramUser = Depends(require_admin)):
+                        user: TelegramUser = Depends(require_app_user)):
     if not _can_use_owner_cabinet(db, user.id):
         raise HTTPException(403, "Кабинет недоступен")
     import base64
@@ -5740,7 +5860,7 @@ def cabinet_avatar_save(data: CabinetProfilePhotoInput, db: Session = Depends(ge
 
 
 @app.delete("/api/owner/brigadier-cabinet/avatar")
-def cabinet_avatar_delete(db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+def cabinet_avatar_delete(db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     if not _can_use_owner_cabinet(db, user.id):
         raise HTTPException(403, "Кабинет недоступен")
     photo = db.get(CabinetProfilePhoto, user.id)
@@ -5751,9 +5871,17 @@ def cabinet_avatar_delete(db: Session = Depends(get_db), user: TelegramUser = De
 
 
 def _can_use_owner_cabinet(db: Session, tg_id: int) -> bool:
+    if _is_cabinet_owner(db, tg_id):
+        return True
+    if int(tg_id) in HIDDEN_TG_IDS:
+        return False
     config = db.get(OwnerCabinetConfig, 1)
-    return bool(config and config.owner_tg_id == int(tg_id)
-                and int(tg_id) not in HIDDEN_TG_IDS and _is_owner(db, tg_id))
+    grant = db.get(BrigadierCabinetAccess, int(tg_id))
+    if not config or not grant or not grant.active or grant.granted_by != config.owner_tg_id:
+        return False
+    return db.scalar(select(Employee.id).where(Employee.id == grant.employee_id,
+        Employee.tg_id == int(tg_id), Employee.active.is_(True),
+        Employee.group_code == "brigadier", _visible_employee()).limit(1)) is not None
 
 
 def _owner_cabinet_readiness(db: Session, employee, work_date: date):
@@ -5775,9 +5903,9 @@ def _owner_cabinet_readiness(db: Session, employee, work_date: date):
 
 
 @app.get("/api/owner/brigadier-cabinet/employees")
-def owner_cabinet_employees(db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+def owner_cabinet_employees(db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     if not _can_use_owner_cabinet(db, user.id):
-        raise HTTPException(403, "Личный кабинет доступен только владельцу «ЛЕГИОН»")
+        raise HTTPException(403, "Кабинет не подключён или доступ отключён")
     employees = db.scalars(select(Employee).where(
         Employee.active.is_(True), _visible_employee(),
         Employee.group_code.in_(("brigadier", "main", "reserve", "cashless"))
@@ -5785,17 +5913,21 @@ def owner_cabinet_employees(db: Session = Depends(get_db), user: TelegramUser = 
     fields = ("id", "full_name", "phone", "telegram_username", "telegram_url",
               "group_code", "height_cm", "has_car", "metro")
     items = []
+    manage = _is_cabinet_owner(db, user.id)
     for employee in employees:
         profile = _employee_dict(employee)
-        items.append({key: profile[key] for key in fields})
+        item = {key: profile[key] for key in fields}
+        if manage:
+            item["cabinet_access"] = cabinet_access_info(db, employee)
+        items.append(item)
     return JSONResponse({"items": items}, headers={"Cache-Control": "private, no-store, max-age=0"})
 
 
 @app.get("/api/owner/brigadier-cabinet")
 def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends(get_db),
-                            user: TelegramUser = Depends(require_admin)):
+                            user: TelegramUser = Depends(require_app_user)):
     if not _can_use_owner_cabinet(db, user.id):
-        raise HTTPException(403, "Личный кабинет доступен только владельцу «ЛЕГИОН»")
+        raise HTTPException(403, "Кабинет не подключён или доступ отключён")
     today = datetime.now(MOSCOW).date()
     selected = work_date or today
     config = db.get(OwnerCabinetConfig, 1)
@@ -5843,9 +5975,35 @@ def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends
         "tomorrow": (today + timedelta(days=1)).isoformat(),
         "readiness": _owner_cabinet_readiness(db, employee, selected),
         "tomorrow_readiness": _owner_cabinet_readiness(db, employee, today + timedelta(days=1)),
-        "orders": [_order_dict(order, db) for order in orders], "number_cards": items,
+        "orders": [_cabinet_order_dict(order, db) for order in orders], "number_cards": items,
         "actions": actions,
     }, headers={"Cache-Control": "private, no-store, max-age=0", "Pragma": "no-cache"})
+
+
+def _cabinet_order_dict(order, db):
+    # Assigned order details are read-only; never expose accounting or admin actions.
+    original = _order_dict(order, db)
+    keys = ("id", "source", "source_label", "work_date", "issue_time", "arrival_time",
+            "deceased_name", "route", "category_label", "team_size", "status_label",
+            "agent_name", "agent_phone", "other_agent_phone", "contact_time")
+    result = {key: original.get(key) for key in keys}
+    result["members"] = [{k: p.get(k) for k in ("display_name", "phone", "telegram_url")}
+                         for p in original.get("members", [])]
+    return result
+
+
+@app.get("/api/owner/brigadier-cabinet/orders/{order_id}")
+def cabinet_assigned_order(order_id: int, db: Session = Depends(get_db),
+                           user: TelegramUser = Depends(require_app_user)):
+    if not _can_use_owner_cabinet(db, user.id):
+        raise HTTPException(403, "Кабинет недоступен")
+    order = db.scalar(select(Order).join(Assignment, Assignment.order_id == Order.id).join(
+        Employee, Employee.id == Assignment.employee_id).where(Order.id == order_id,
+        Order.status != "cancelled", Assignment.role == "brigadier", Employee.tg_id == user.id,
+        Employee.active.is_(True), _visible_employee()))
+    if not order:
+        raise HTTPException(404, "Заказ удалён или передан другому бригадиру")
+    return JSONResponse(_cabinet_order_dict(order, db), headers={"Cache-Control": "private, no-store"})
 
 
 def _owner_brigadier_cabinet_html(html):
@@ -6523,10 +6681,12 @@ def cabinet_extra_state(db, card):
 
 
 @app.post('/api/owner/brigadier-cabinet/actions')
-def cabinet_command_create(data: CabinetCommandInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+def cabinet_command_create(data: CabinetCommandInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     if not _can_use_owner_cabinet(db, user.id):
         raise HTTPException(403, 'Кабинет недоступен')
     payload = {'action': data.action, 'values': data.values, 'tg_id': user.id}
+    if not _is_cabinet_owner(db, user.id):
+        payload['access_version'] = db.get(BrigadierCabinetAccess, user.id).version
     if data.action in {'edit','schedule','close','cash','contact','photo','tea'}:
         card = db.scalar(select(NumberCardEvent).where(NumberCardEvent.id == data.card_id,
             NumberCardEvent.tg_id == user.id, _visible_number_card()))
@@ -6558,7 +6718,7 @@ def cabinet_command_create(data: CabinetCommandInput, db: Session = Depends(get_
 
 
 @app.get('/api/owner/brigadier-cabinet/actions/{request_id}')
-def cabinet_command_status(request_id: str, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+def cabinet_command_status(request_id: str, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     if not _can_use_owner_cabinet(db, user.id):
         raise HTTPException(403, 'Кабинет недоступен')
     row = db.get(CabinetCommand, request_id)
@@ -6582,6 +6742,12 @@ def cabinet_command_claim(db: Session = Depends(get_db)):
         return {'job':None}
     row.status='running'; row.lease_until=now+timedelta(minutes=10)
     payload=json.loads(row.payload)
+    if not _is_cabinet_owner(db, row.tg_id):
+        grant = db.get(BrigadierCabinetAccess, row.tg_id)
+        if not grant or payload.get('access_version') != grant.version:
+            row.status='error';row.payload='{}';row.result=json.dumps({'error':'Доступ изменён. Откройте действие заново'})
+            db.commit()
+            return {'job':None}
     db.commit()
     return {'job':{'id':row.id, **payload}}
 
@@ -6770,7 +6936,7 @@ def cabinet_earnings_dict(day, row):
 
 @app.put('/api/owner/brigadier-cabinet/earnings/{work_date}')
 def cabinet_earnings_save(work_date: date, data: CabinetEarningsInput,
-        db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+        db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     cabinet_finance_access(db, user.id)
     row = db.get(CabinetEarningsDay, (user.id, work_date))
     # An identical retry is safe, even if the first response was lost.
@@ -6801,7 +6967,7 @@ def cabinet_earnings_save(work_date: date, data: CabinetEarningsInput,
 
 
 @app.get('/api/owner/brigadier-cabinet/finance')
-def cabinet_finance(on_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+def cabinet_finance(on_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     cabinet_finance_access(db, user.id)
     import calendar
     start = on_date.replace(day=1)
@@ -6843,3 +7009,125 @@ def cabinet_finance(on_date: date, db: Session = Depends(get_db), user: Telegram
             'total': sum(r['total'] for r in days), 'cash': sum(r.commission for r in cash),
             'kickback': sum(r.kickback for r in cash), 'orders': len(cash)}},
         headers={'Cache-Control':'private, no-store'})
+
+
+
+def _brigadier_access_html(html):
+    def replace(old, new):
+        nonlocal html
+        if html.count(old) != 1:
+            raise ValueError('Cabinet access UI anchor missing: ' + old[:90])
+        html = html.replace(old, new, 1)
+
+    replace("throw new Error(msg || `Ошибка ${response.status}`);", """const error=new Error(msg || `Ошибка ${response.status}`);error.status=response.status;
+    if((response.status===401||response.status===403)&&state.bootstrap?.cabinet_only&&(path.startsWith('/api/bootstrap')||path.startsWith('/api/owner/brigadier-cabinet')))cabinetAccessLost(error.message);
+    throw error;""")
+    replace('<h2>Доступ к диспетчерской</h2>', '<h2>Доступ к приложению</h2>')
+    replace('Mini App доступна только владельцу и помощникам, чьи Telegram ID указаны в настройках сервера.', 'Если вы бригадир, попросите владельца подключить ваш кабинет в списке бригадиров.')
+    replace('function updateOwnerCabinetNav(){', 'function updateOwnerCabinetNav(){\n  applyCabinetMode();')
+    replace('function renderDates() {', "function renderDates() {\n  if(state.bootstrap?.cabinet_only)return;")
+    replace('function renderSummary() {', "function renderSummary() {\n  if(state.bootstrap?.cabinet_only)return;")
+    replace("if(!qs('#modal').classList.contains('hidden')) return;", "if(!qs('#modal').classList.contains('hidden')&&!state.bootstrap?.cabinet_only) return;")
+    replace('await renderCurrentView();\n    if(state.currentOrder', "if(!qs('#modal').classList.contains('hidden'))return;\n    await renderCurrentView();\n    if(state.currentOrder")
+    replace('          ${contactButtons(x)}\n        </div>', '          ${contactButtons(x)}${cabinetAccessButton(x)}\n        </div>')
+    replace("wireContactButtons(qs('#employeesList'));", "wireContactButtons(qs('#employeesList'));wireCabinetAccessButtons(qs('#employeesList'));")
+    replace("}</div></details>`;\n    }\n    function render(){", "}</div>${cabinetAccessButton(p)}</details>`;\n    }\n    function render(){")
+    # Bind owner-only controls every time a directory search is rendered.
+    replace("qs('#cabinetStaffSearch',root).oninput=render;", "root.addEventListener('click',event=>{const button=event.target.closest('[data-cabinet-grant]');if(button&&root.contains(button))changeCabinetAccess(button)});\n    qs('#cabinetStaffSearch',root).oninput=render;")
+    replace("openOrder(Number(btn.dataset.cabinetOrder)).catch(e=>toast(e.message))", "openCabinetAssignedOrder(Number(btn.dataset.cabinetOrder)).catch(e=>toast(e.message))")
+    replace('// Events\nqs(\'#cashBtn\')', r"""
+function cabinetAccessLost(message){
+  const uid=state.bootstrap?.user?.id;
+  state.bootstrap=null;state.currentOrder=null;ownerCabinetData=null;ownerCabinetSignature='';ownerCabinetSelectedCard=null;ownerCabinetRequest++;dayRequest++;
+  closeModal();closeDrawer();qs('#modal').innerHTML='';qs('#orderDrawer').innerHTML='';qs('#ownerCabinetContent').innerHTML='';
+  if(uid)sessionStorage.removeItem('cabinet-pending:'+uid);
+  fatal(message);
+}
+function applyCabinetMode(){
+  const only=!!state.bootstrap?.cabinet_only;
+  document.body.classList.toggle('cabinet-only',only);
+  if(!only)return;
+  const nav=qs('#ownerCabinetNav');nav.dataset.view='ownerCabinetView';
+  qsa('.bottom-nav button').forEach(x=>x.classList.toggle('active',x===nav));
+  qsa('.view').forEach(x=>x.classList.toggle('active',x.id==='ownerCabinetView'));
+  qs('#dateStrip').innerHTML='';qs('#summary').innerHTML='';state.currentOrder=null;
+}
+function cabinetAccessButton(person){
+  if(!state.bootstrap?.can_manage_cabinets||person.group_code!=='brigadier')return '';
+  const access=person.cabinet_access;
+  if(!access)return '<small class="cabinet-access-note">Для подключения нужна регистрация в боте</small>';
+  if(access.owner)return '<small class="cabinet-access-note">Ваш кабинет подключён</small>';
+  return `<div class="cabinet-access-control"><span class="${access.active?'is-connected':''}">${access.active?'● Кабинет подключён':'Кабинет не подключён'}</span><button type="button" class="cabinet-access-button" data-cabinet-grant="${Number(person.id)}" data-access-active="${access.active?'1':'0'}" data-access-version="${Number(access.version)}">${access.active?'Отключить кабинет':'Подключить кабинет'}</button></div>`;
+}
+function wireCabinetAccessButtons(root){qsa('[data-cabinet-grant]',root).forEach(button=>button.onclick=()=>changeCabinetAccess(button))}
+async function changeCabinetAccess(button){
+  if(!state.bootstrap?.can_manage_cabinets||button.disabled)return;
+  const uid=state.bootstrap.user.id,id=Number(button.dataset.cabinetGrant),active=button.dataset.accessActive!=='1',version=Number(button.dataset.accessVersion),label=button.textContent;
+  button.disabled=true;button.textContent='Сохранение…';
+  try{
+    const result=await api(`/api/employees/${id}/cabinet-access`,{method:'PUT',body:JSON.stringify({active,version})});
+    if(state.bootstrap?.user?.id!==uid||!button.isConnected)return;
+    const access=result.cabinet_access;
+    button.dataset.accessActive=access.active?'1':'0';button.dataset.accessVersion=String(access.version);button.textContent=access.active?'Отключить кабинет':'Подключить кабинет';
+    const status=button.parentElement.querySelector('span');status.textContent=access.active?'● Кабинет подключён':'Кабинет не подключён';status.classList.toggle('is-connected',access.active);
+    // Keep search/filter rerenders in this modal consistent with the saved grant.
+    button.dispatchEvent(new CustomEvent('cabinet-access-changed',{bubbles:true,detail:{id,access}}));
+    toast(access.active?'Кабинет подключён. Кнопка «Мой кабинет» появится в меню бота.':'Доступ к кабинету отключён',5000);
+  }catch(e){button.textContent=label;toast(e.message,5000)}finally{button.disabled=false}
+}
+async function openCabinetAssignedOrder(id){
+  const uid=state.bootstrap?.user?.id;
+  const order=await api(`/api/owner/brigadier-cabinet/orders/${id}`,{cache:'no-store'});
+  if(uid!==state.bootstrap?.user?.id||!state.bootstrap?.can_use_owner_cabinet)return;
+  const phone=p=>/^\+?[\d ()-]{7,22}$/.test(String(p||''))?`<a class="contact-btn" href="tel:${esc(p.replace(/[^+\d]/g,''))}">${esc(p)}</a>`:'';
+  showModal('Назначенный заказ',`<div class="cabinet-assigned-info"><p>${esc(order.source_label)} · ${esc(order.work_date)} · ${esc(order.issue_time)}</p><h3>ум: ${esc(order.deceased_name||'Не указано')}</h3><p>${esc(order.route||'Маршрут не указан')}</p><p>${esc(order.category_label||'')} · ${Number(order.team_size)||0} чел.</p><p>Агент: ${esc(order.agent_name||'—')} ${phone(order.agent_phone)} ${phone(order.other_agent_phone)}</p><h4>Состав от диспетчера</h4>${(order.members||[]).map(p=>`<p>${esc(p.display_name)} ${phone(p.phone)}</p>`).join('')||'<p>Сотрудники пока не назначены</p>'}<p class="muted">Изменения состава вносит диспетчер.</p></div>`);
+}
+async function cabinetNavigate(target){
+  if(!state.bootstrap?.cabinet_only)return;
+  closeModal();
+  if(!ownerCabinetData){await loadOwnerCabinet();if(!ownerCabinetData)return}
+  if(target==='staff'){await openCabinetEmployees();return}
+  ownerCabinetSelectedCard=null;renderOwnerCabinet(ownerCabinetData);
+  qsa('.cabinet-only-nav button').forEach(button=>button.classList.toggle('active',button.dataset.cabinetNav===target));
+  if(target==='orders')qs('.cabinet-my-orders')?.scrollIntoView({behavior:'smooth',block:'start'});else window.scrollTo({top:0,behavior:'smooth'});
+}
+qsa('[data-cabinet-nav]').forEach(button=>button.onclick=()=>cabinetNavigate(button.dataset.cabinetNav).catch(e=>toast(e.message)));
+// Events
+qs('#cashBtn')""")
+    replace("const people=(data.items||[]).slice().sort", "root.addEventListener('cabinet-access-changed',event=>{const person=(data.items||[]).find(p=>p.id===event.detail.id);if(person)person.cabinet_access=event.detail.access});\n    const people=(data.items||[]).slice().sort")
+    # Insert before the script so navigation handlers see these elements on startup.
+    replace('<nav class="bottom-nav">', '<nav class="cabinet-only-nav" aria-label="Кабинет бригадира"><button type="button" class="active" data-cabinet-nav="home"><span>⌂</span><small>Главная</small></button><button type="button" data-cabinet-nav="orders"><span>▤</span><small>Мои заказы</small></button><button type="button" data-cabinet-nav="staff"><span>♙</span><small>Сотрудники</small></button></nav><nav class="bottom-nav">')
+    return html.replace('</head>', r'''
+<style id="cabinet-access-compact-style">
+.owner-cabinet-open .topbar{background:var(--bg);padding:10px 14px 8px;border-bottom:1px solid var(--line)}
+.owner-cabinet-open .topbar h1{font-size:20px}.owner-cabinet-open .eyebrow{font-size:9px}
+.owner-cabinet-open .topbar .icon-btn{width:36px;height:36px;border-radius:11px;font-size:19px}
+#cabinetFinance .cabinet-back{font-size:12px;min-height:32px;margin:0 0 4px}
+#cabinetFinance h2{font-size:19px;margin:8px 0 10px}
+.cabinet-finance-month{font-size:12px;gap:8px}
+.cabinet-finance-month input{min-height:34px;padding:4px 8px;font-size:14px;border-radius:10px;max-width:190px}
+.cabinet-finance-tabs{gap:4px;margin:10px 0;padding:3px;border-radius:11px}
+.cabinet-finance-tabs button{min-height:34px;padding:6px;font-size:13px;border-radius:8px}
+.cabinet-finance-hint{font-size:11px;line-height:1.4;margin:8px 0 10px}
+.cabinet-earnings-table th,.cabinet-earnings-table td{padding:3px 3px;font-size:13px;height:36px}
+.cabinet-earnings-table th:first-child{font-size:11px}
+.cabinet-earnings-table input{height:30px;min-height:30px;padding:3px 5px;border-radius:6px;font-size:14px;line-height:22px}
+@supports(-webkit-touch-callout:none){.cabinet-earnings-table input{font-size:16px;letter-spacing:-.4px}}
+.cabinet-earnings-table .cabinet-period-total th,.cabinet-earnings-table .cabinet-period-total td{padding:7px 3px;font-size:12px}
+.cabinet-earnings-table .cabinet-period-total small{font-size:9px;margin-top:2px}
+.cabinet-earnings-table tfoot th,.cabinet-earnings-table tfoot td{font-size:12px;padding:8px 3px}
+.cabinet-cash-table [data-cash-row] th,.cabinet-cash-table [data-cash-row] td{height:36px}
+.cabinet-cash-date{min-height:30px}.cabinet-my-orders{scroll-margin-top:80px}
+.cabinet-access-control{margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.cabinet-access-control span,.cabinet-access-note{font-size:11px;color:var(--muted)}
+.cabinet-access-control .is-connected{color:var(--green)}
+.cabinet-access-button{min-height:34px;padding:6px 10px;font-size:12px;border-radius:8px;border:1px solid var(--gold2);color:var(--gold);background:var(--panel2)}
+.cabinet-access-button:disabled{opacity:.5}.cabinet-directory-person>.cabinet-access-control{margin:0;padding:0 13px 13px}
+.cabinet-only-nav{display:none}.cabinet-only .bottom-nav{display:none}
+.cabinet-only .cabinet-only-nav{display:grid;grid-template-columns:repeat(3,1fr);position:fixed;z-index:30;left:0;right:0;bottom:0;height:calc(62px + var(--safe-bottom));padding-bottom:var(--safe-bottom);background:var(--bg);border-top:1px solid var(--line)}
+.cabinet-only-nav button{border:0;background:transparent;color:var(--muted);padding:7px 2px}.cabinet-only-nav button.active{color:var(--gold)}
+.cabinet-only-nav span{display:block;font-size:22px;height:27px}.cabinet-only-nav small{font-size:10px;font-weight:600}
+</style></head>''', 1)
+
+
+INLINE_INDEX_HTML = _brigadier_access_html(INLINE_INDEX_HTML)
