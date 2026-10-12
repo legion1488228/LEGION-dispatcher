@@ -6073,7 +6073,7 @@ async function openCabinetEmployees(){
   try{
     const data=await api('/api/owner/brigadier-cabinet/employees',{cache:'no-store'});
     if(!active())return;
-    const groups=[['brigadier','Бригадиры'],['main','Основа'],['reserve','Резерв'],['cashless','Безнал']];
+    const groups=[['brigadier','Бригадиры'],['main','Основа'],['cashless','Безнал'],['reserve','Резерв']];
     const norm=s=>String(s||'').toLocaleLowerCase('ru').replace(/ё/g,'е').trim();
     const personLabel=p=>[String(p.full_name||'').trim().split(/\s+/)[0]||'Без имени',String(p.metro||'').trim(),p.height_cm?String(p.height_cm):''].filter(Boolean).join(' ');
     const people=(data.items||[]).slice().sort((a,b)=>personLabel(a).localeCompare(personLabel(b),'ru')||Number(a.id)-Number(b.id));
@@ -6320,8 +6320,6 @@ async function openCabinetFinance(onDate=ownerCabinetData?.today,tab='earnings')
     for(const row of rows.values()){
       try{const draft=JSON.parse(sessionStorage.getItem(draftKey(row.work_date))||'null');if(draft){row.salary=draft.salary;row.tea=draft.tea;row.version=draft.version;row.dirty=true}}catch{}
     }
-    const cashByDay=new Map(data.cash_days.map(row=>[row.work_date,row.cash]));
-    const cashByPeriod=new Map(data.period_totals.map(period=>[period.end,period.cash]));
     const endDay=Number(data.end.slice(8));
     const halfLabel=half=>half===1?'1–15':`16–${endDay}`;
     panel.innerHTML=`<button type="button" class="cabinet-back" id="cabinetFinanceBack">${cabinetIcon('back')}Кабинет бригадира</button><h2>Касса и заработок</h2><label class="cabinet-finance-month">Месяц<input id="cabinetFinanceMonth" type="month" value="${esc(data.start.slice(0,7))}" aria-label="Месяц кассы и заработка"></label><div class="cabinet-finance-tabs" role="tablist"><button type="button" data-finance-tab="earnings" role="tab">Мой заработок</button><button type="button" data-finance-tab="cash" role="tab">Моя касса</button></div><div id="cabinetFinanceBody"></div>`;
@@ -6387,9 +6385,9 @@ async function openCabinetFinance(onDate=ownerCabinetData?.today,tab='earnings')
         const subtotal=day=>{
           const n=Number(day.slice(8));if(n!==15&&n!==endDay)return '';
           const half=n===15?1:2;
-          return `<tr class="cabinet-period-total" data-earnings-half="${half}"><th scope="row"><span>${halfLabel(half)}</span><small>Итого</small></th><td data-half-salary="${half}"></td><td data-half-tea="${half}"></td><td data-half-total="${half}"></td><td class="cabinet-cash-column" data-earnings-cash-half="${half}">${cabinetMoney(cashByPeriod.get(day))}</td></tr>`;
+          return `<tr class="cabinet-period-total" data-earnings-half="${half}"><th scope="row"><span>${halfLabel(half)}</span><small>Итого</small></th><td data-half-salary="${half}"></td><td data-half-tea="${half}"></td><td data-half-total="${half}"></td></tr>`;
         };
-        body.innerHTML=`<p class="cabinet-finance-hint">Оклад и чай — вручную. Касса — из заказов. Итоги за 1–15 и 16–${endDay} — автоматически. Суммы в ₽.</p><div class="cabinet-finance-scroll" role="region" aria-label="Заработок и касса по дням" tabindex="0"><table class="cabinet-earnings-table cabinet-earnings-with-cash"><colgroup><col style="width:44px"><col style="width:76px"><col style="width:76px"><col style="width:76px"><col style="width:84px"></colgroup><thead><tr><th scope="col">Дата</th><th scope="col">Оклад</th><th scope="col">Чай</th><th scope="col">Итог</th><th scope="col" class="cabinet-cash-column" title="Касса за день из карточек заказов">Касса</th></tr></thead><tbody>${[...rows.values()].map(row=>`<tr data-earnings-row="${row.work_date}"><th scope="row">${row.work_date.slice(8)}.${row.work_date.slice(5,7)}</th>${['salary','tea'].map(k=>`<td><input type="text" inputmode="numeric" pattern="[0-9]*" data-earnings-day="${row.work_date}" data-field="${k}" value="${esc(row[k]??'')}" placeholder="—" autocomplete="off" aria-label="${k==='salary'?'Оклад':'Личный чай'} за ${row.work_date}" maxlength="8"></td>`).join('')}<td data-day-total="${row.work_date}"></td><td class="cabinet-cash-column" data-day-cash="${row.work_date}">${cabinetMoney(cashByDay.get(row.work_date))}</td></tr>${subtotal(row.work_date)}`).join('')}</tbody><tfoot><tr><th scope="row" title="Всего за месяц">Месяц</th><td id="cabinetSalaryTotal"></td><td id="cabinetTeaTotal"></td><td id="cabinetEarningsTotal"></td><td class="cabinet-cash-column" id="cabinetEarningsCashTotal">${cabinetMoney(data.totals.cash)}</td></tr></tfoot></table></div><p id="cabinetEarningsStatus" role="status" aria-live="polite"></p><button type="button" class="cabinet-secondary cabinet-wide" id="cabinetSaveEarnings">Сохранить изменения</button><button type="button" class="cabinet-back" id="cabinetDiscardEarnings" hidden>Отменить несохранённые правки</button>`;
+        body.innerHTML=`<p class="cabinet-finance-hint">Оклад и чай — вручную. Итоги за 1–15 и 16–${endDay} — автоматически. Суммы в ₽.</p><div class="cabinet-finance-scroll" role="region" aria-label="Заработок по дням" tabindex="0"><table class="cabinet-earnings-table"><colgroup><col style="width:16%"><col style="width:30%"><col style="width:30%"><col style="width:24%"></colgroup><thead><tr><th scope="col">Дата</th><th scope="col">Оклад</th><th scope="col">Чай</th><th scope="col">Итог</th></tr></thead><tbody>${[...rows.values()].map(row=>`<tr data-earnings-row="${row.work_date}"><th scope="row">${row.work_date.slice(8)}.${row.work_date.slice(5,7)}</th>${['salary','tea'].map(k=>`<td><input type="text" inputmode="numeric" pattern="[0-9]*" data-earnings-day="${row.work_date}" data-field="${k}" value="${esc(row[k]??'')}" placeholder="—" autocomplete="off" aria-label="${k==='salary'?'Оклад':'Личный чай'} за ${row.work_date}" maxlength="8"></td>`).join('')}<td data-day-total="${row.work_date}"></td></tr>${subtotal(row.work_date)}`).join('')}</tbody><tfoot><tr><th scope="row" title="Всего за месяц">Месяц</th><td id="cabinetSalaryTotal"></td><td id="cabinetTeaTotal"></td><td id="cabinetEarningsTotal"></td></tr></tfoot></table></div><p id="cabinetEarningsStatus" role="status" aria-live="polite"></p><button type="button" class="cabinet-secondary cabinet-wide" id="cabinetSaveEarnings">Сохранить изменения</button><button type="button" class="cabinet-back" id="cabinetDiscardEarnings" hidden>Отменить несохранённые правки</button>`;
         qsa('[data-earnings-day]',body).forEach(input=>{
           const row=rows.get(input.dataset.earningsDay);
           input.oninput=()=>{row[input.dataset.field]=input.value;row.dirty=true;row.error='';remember(row);updateTotals()};
@@ -7118,6 +7116,13 @@ qs('#cashBtn')""")
     replace('<nav class="bottom-nav">', '<nav class="cabinet-only-nav" aria-label="Кабинет бригадира"><button type="button" class="active" data-cabinet-nav="home"><span>⌂</span><small>Главная</small></button><button type="button" data-cabinet-nav="orders"><span>▤</span><small>Мои заказы</small></button><button type="button" data-cabinet-nav="staff"><span>♙</span><small>Сотрудники</small></button></nav><nav class="bottom-nav">')
     return html.replace('</head>', r'''
 <style id="cabinet-access-compact-style">
+#modal>.modal-head{position:sticky;top:16px;z-index:20;background:#111114;isolation:isolate}
+#modal>.modal-head::before{content:"";position:absolute;top:-16px;left:-16px;right:-16px;bottom:0;z-index:-1;background:#111114;pointer-events:none}
+#modal>.modal-head .close-btn{flex-shrink:0}
+@media(max-width:600px){
+ #modal:has(#personalGrid)>.modal-head{top:12px}
+ #modal:has(#personalGrid)>.modal-head::before{top:-12px;left:-8px;right:-8px}
+}
 .owner-cabinet-open .topbar{background:var(--bg);padding:10px 14px 8px;border-bottom:1px solid var(--line)}
 .owner-cabinet-open .topbar h1{font-size:20px}.owner-cabinet-open .eyebrow{font-size:9px}
 .owner-cabinet-open .topbar .icon-btn{width:36px;height:36px;border-radius:11px;font-size:19px}
@@ -7136,6 +7141,8 @@ qs('#cashBtn')""")
 .cabinet-earnings-table .cabinet-period-total small{font-size:9px;margin-top:2px}
 .cabinet-earnings-table tfoot th,.cabinet-earnings-table tfoot td{font-size:11px;padding:6px 2px}
 .cabinet-cash-table [data-cash-row] th,.cabinet-cash-table [data-cash-row] td{height:28px}
+.cabinet-cash-table thead th:nth-child(n+2),.cabinet-cash-table tbody tr:not(.cabinet-cash-details) td,.cabinet-cash-table tfoot td{text-align:center}
+.cabinet-cash-table tr>:nth-child(3){border-left:1px solid var(--line)}
 .cabinet-finance-scroll{max-height:60vh;max-height:60dvh;overflow:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;isolation:isolate;border-radius:6px}
 .cabinet-finance-scroll:focus-visible{outline:1px solid var(--gold);outline-offset:2px}
 .cabinet-finance-scroll .cabinet-earnings-table{border-collapse:separate;border-spacing:0}
@@ -7143,12 +7150,7 @@ qs('#cashBtn')""")
 .cabinet-finance-scroll .cabinet-earnings-table th:first-child{position:sticky;left:0;z-index:2;background:var(--bg);box-shadow:1px 0 0 var(--line)}
 .cabinet-finance-scroll .cabinet-earnings-table thead th:first-child{z-index:4;background:var(--panel2)}
 .cabinet-finance-scroll .cabinet-period-total th:first-child{background:#211d14}
-.cabinet-earnings-with-cash{min-width:356px}
-.cabinet-earnings-with-cash td:nth-child(4){color:var(--gold);font-weight:700}
-.cabinet-earnings-with-cash .cabinet-cash-column{border-left:8px solid var(--bg);padding-left:4px;color:var(--text)}
-.cabinet-earnings-with-cash tbody [data-day-cash]{font-weight:400}
-.cabinet-earnings-with-cash .cabinet-period-total .cabinet-cash-column{color:var(--gold)}
-.cabinet-earnings-with-cash thead th{font-size:11px}
+.cabinet-finance-scroll .cabinet-earnings-table thead th{font-size:11px}
 .cabinet-cash-date{min-height:26px}.cabinet-my-orders{scroll-margin-top:80px}
 .cabinet-access-control{margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .cabinet-access-control span,.cabinet-access-note{font-size:11px;color:var(--muted)}
