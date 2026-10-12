@@ -5843,16 +5843,16 @@ async function openCabinetEmployees(){
     if(!active())return;
     const groups=[['brigadier','Бригадиры'],['main','Основа'],['reserve','Резерв'],['cashless','Безнал']];
     const norm=s=>String(s||'').toLocaleLowerCase('ru').replace(/ё/g,'е').trim();
-    const people=(data.items||[]).slice().sort((a,b)=>String(a.full_name||'').localeCompare(String(b.full_name||''),'ru')||Number(a.id)-Number(b.id));
+    const personLabel=p=>[String(p.full_name||'').trim().split(/\s+/)[0]||'Без имени',String(p.metro||'').trim(),p.height_cm?String(p.height_cm):''].filter(Boolean).join(' ');
+    const people=(data.items||[]).slice().sort((a,b)=>personLabel(a).localeCompare(personLabel(b),'ru')||Number(a.id)-Number(b.id));
     root.innerHTML=`<label class="cabinet-directory-search">Поиск по имени и метро<input id="cabinetStaffSearch" type="search" placeholder="Имя или метро" autocomplete="off"></label><label class="cabinet-directory-filter">Раздел<select id="cabinetStaffGroup"><option value="all">Все сотрудники</option>${groups.map(([code,label])=>`<option value="${code}">${label}</option>`).join('')}</select></label><p id="cabinetStaffCount" class="muted" role="status"></p><div id="cabinetStaffList"></div>`;
     function personHtml(p){
-      const details=[p.metro,p.height_cm?`${p.height_cm} см`:'',p.has_car?'🚗':''].filter(Boolean).join(' · ');
       let phone=String(p.phone||'').replace(/\D/g,'');
       if(phone.length===11&&phone.startsWith('8'))phone='7'+phone.slice(1);
       const phoneLink=/^\d{7,15}$/.test(phone)?`<a href="tel:+${phone}">${cabinetIcon('phone')}${esc(p.phone)}</a>`:'<span>Телефон не указан</span>';
       const username=String(p.telegram_username||'').replace(/^@/,'');
       const tgUrl=/^[A-Za-z0-9_]{5,32}$/.test(username)?`https://t.me/${username}`:(/^tg:\/\/user\?id=[1-9]\d*$/.test(p.telegram_url||'')?p.telegram_url:'');
-      return `<details class="cabinet-directory-person"><summary><span><b>${esc(p.full_name||'Без имени')}</b>${details?`<small>${esc(details)}</small>`:''}</span>${cabinetIcon('chevron')}</summary><div class="cabinet-directory-contacts">${phoneLink}${tgUrl?`<a href="${esc(tgUrl)}" data-staff-telegram>Telegram${username?' · @'+esc(username):''}</a>`:'<span>Telegram не указан — связь по телефону</span>'}</div></details>`;
+      return `<details class="cabinet-directory-person"><summary><span><b>${esc(personLabel(p))}${p.has_car?' 🚗':''}</b></span>${cabinetIcon('chevron')}</summary><div class="cabinet-directory-contacts">${phoneLink}${tgUrl?`<a href="${esc(tgUrl)}" data-staff-telegram>Telegram${username?' · @'+esc(username):''}</a>`:'<span>Telegram не указан — связь по телефону</span>'}</div></details>`;
     }
     function render(){
       if(!active())return;
