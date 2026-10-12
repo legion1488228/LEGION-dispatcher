@@ -6130,6 +6130,7 @@ async function cabinetResumePending(){
     if(state.bootstrap?.user?.id!==uid)return;
     if(r.status==='done'||r.status==='error'){
       sessionStorage.removeItem('cabinet-pending:'+uid);ownerCabinetSignature='';
+      if(r.status==='done'&&r.completed)ownerCabinetSelectedCard=null;
       if(r.status==='done'&&!r.deleted&&r.work_date&&r.work_date!==state.selectedDate)await loadBootstrap(r.work_date);
       await loadOwnerCabinet();
       toast(r.error||r.message||'Сохранено',6000);
@@ -6303,11 +6304,12 @@ async function ownerCabinetAction(key,cardId=null){
           const values=JSON.parse(body).values;
           const stillHere=form.isConnected&&currentViewId()==='ownerCabinetView';
           if(stillHere){if(inline)form.remove();else closeModal()}
+          if(stillHere&&(key==='tea'||result.completed))ownerCabinetSelectedCard=null;
           const resultDate=result.work_date||values.work_date;
           if(resultDate&&key==='number'&&resultDate!==state.selectedDate)await loadBootstrap(resultDate);
           await loadOwnerCabinet();
           const found=ownerCabinetData?.number_cards?.find(c=>c.report_key===result.report_key);
-          if(found&&stillHere){
+          if(found&&stillHere&&!found.tea_received&&key!=='tea'&&!result.completed){
             ownerCabinetSelectedCard=found.id;renderOwnerCabinet(ownerCabinetData);
             const next=cabinetNextAction(found,ownerCabinetData);
             if(next&&!result.duplicate&&['number','schedule','close','cash','photo'].includes(key))await ownerCabinetAction(next.key,found.id);
@@ -6465,13 +6467,13 @@ function cabinetNextAction(c,data){
   return null;
 }
 function ownerCabinetCardsHtml(data){
-  const cards=data.number_cards||[],orders=data.orders||[];
+  const cards=(data.number_cards||[]).filter(c=>!c.tea_received),orders=data.orders||[];
   const cardRows=cards.map(c=>{
     const photo=cabinetPhotoInfo(c),next=cabinetNextAction(c,data),done=photo.complete&&c.tea_received;
     return `<article class="cabinet-order"><div class="cabinet-order-top"><span class="cabinet-kind ${c.source==='gbu'?'gbu':''}">${c.source==='gbu'?'ГБУ':'Частный'}</span>${cabinetOrderTools(c)}</div><button type="button" class="cabinet-order-open" data-cabinet-detail="${Number(c.id)}"><h3>ум: ${esc(c.surname)}</h3></button><div class="cabinet-order-statuses"><span class="${(c.prepared??c.composition_closed)?'cabinet-done':''}">${cabinetIcon((c.prepared??c.composition_closed)?'check':'clock')}${(c.prepared??c.composition_closed)?'Закрытие подтверждено':'Оформление заказа'}</span><span>${esc(photo.label)} · ${photo.received}/${photo.total}</span></div>${done?'<p class="cabinet-done">✅ Заказ завершён</p>':next?cabinetButton(next.key,next.title,next.icon,c,true):'<p>Фото доступно в день заказа</p>'}<button type="button" class="cabinet-back" data-cabinet-detail="${Number(c.id)}">Все этапы заказа ${cabinetIcon('chevron')}</button></article>`;
   }).join('');
   const assigned=orders.map(o=>`<button type="button" class="cabinet-order cabinet-assigned" data-cabinet-order="${Number(o.id)}"><div class="cabinet-order-top"><span class="cabinet-kind">${esc(o.source_label)}</span><b>${esc(o.issue_time)}</b></div><h3>ум: ${esc(o.deceased_name||'Не указано')}</h3><p>${esc(o.route||'Маршрут не указан')}</p><small>${esc(o.status_label)}</small></button>`).join('');
-  return `${cardRows}${orders.length?`<details class="cabinet-assignments"${cards.length?'':' open'}><summary>Назначения из диспетчерской <span>${orders.length}</span></summary><div>${assigned}</div></details>`:''}${!cards.length&&!orders.length?'<div class="cabinet-empty">На эту дату у вас пока нет заказов.</div>':''}`;
+  return `${cardRows}${orders.length?`<details class="cabinet-assignments"${cards.length?'':' open'}><summary>Назначения из диспетчерской <span>${orders.length}</span></summary><div>${assigned}</div></details>`:''}${!cards.length&&!orders.length?'<div class="cabinet-empty">Активных заказов на эту дату нет.</div>':''}`;
 }
 function ownerCabinetDetailHtml(c,data){
   const photo=cabinetPhotoInfo(c),today=data.work_date===data.today,next=cabinetNextAction(c,data),prepared=(c.prepared??c.composition_closed),privateOrder=c.source==='private';
@@ -6521,6 +6523,7 @@ async function loadOwnerCabinet(){
     if(signature===ownerCabinetSignature&&root.children.length)return;
     // Keep open order forms, unsaved earnings and their focus during background refresh.
     if(qs('#cabinetNativeForm,#cabinetFinance',root))return;
+    if(root.dataset.cabinetView==='order'&&data.number_cards.some(c=>Number(c.id)===Number(ownerCabinetSelectedCard)&&c.tea_received))ownerCabinetSelectedCard=null;
     if(root.contains(document.activeElement)&&document.activeElement?.tagName==='INPUT')return;
     ownerCabinetSignature=signature;
     const y=window.scrollY;
@@ -6845,7 +6848,26 @@ def cabinet_command_finish(data: CabinetCommandResult, db: Session = Depends(get
     if not row:
         raise HTTPException(404,'Действие не найдено')
     if row.status not in {'done','error'}:
-        row.status=data.status;row.result=json.dumps(data.result,ensure_ascii=False);row.payload='{}'
+        result = dict(data.result)
+        intent = json.loads(row.payload)
+        if data.status == 'done' and intent.get('action') == 'tea':
+            key = str(intent.get('report_key') or '')
+            if re.fullmatch(r'card:-?\d+:\d+', key):
+                _, chat, message = key.split(':')
+                card = db.scalar(select(NumberCardEvent).where(NumberCardEvent.chat_id == int(chat),
+                    NumberCardEvent.message_id == int(message), NumberCardEvent.tg_id == row.tg_id,
+                    _visible_number_card()).with_for_update())
+                if card:
+                    state_row = db.get(CabinetOrderState, key)
+                    meta = json.loads(state_row.payload) if state_row and state_row.tg_id == row.tg_id else {}
+                    if state_row is None:
+                        state_row = CabinetOrderState(report_key=key, tg_id=row.tg_id)
+                        db.add(state_row)
+                    state_row.tg_id = row.tg_id
+                    state_row.payload = json.dumps(dict(meta, prepared=True, tea_received=True,
+                        tea_amount=int(intent['values']['amount'])))
+                    result['completed'] = True
+        row.status=data.status;row.result=json.dumps(result,ensure_ascii=False);row.payload='{}'
         db.commit()
     return {'ok':True}
 
@@ -6865,8 +6887,13 @@ def cabinet_state_sync(data: list[dict], db: Session = Depends(get_db)):
         row=db.get(CabinetOrderState,key)
         if not row:
             row=CabinetOrderState(report_key=key);db.add(row)
+        previous = json.loads(row.payload) if row.payload and row.tg_id == card.tg_id else {}
+        values = {k:item.get(k) for k in ('prepared','tea_received','tea_amount')}
+        if previous.get('tea_received') and not values['tea_received']:
+            values.update(prepared=previous.get('prepared'), tea_received=True,
+                tea_amount=previous.get('tea_amount'))
         row.tg_id=card.tg_id
-        row.payload=json.dumps({k:item.get(k) for k in ('prepared','tea_received','tea_amount')})
+        row.payload=json.dumps(values)
     db.commit()
     return {'ok':True}
 
