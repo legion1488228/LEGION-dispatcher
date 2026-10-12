@@ -5720,6 +5720,23 @@ def _owner_cabinet_readiness(db: Session, employee, work_date: date):
             "label": labels.get(status, "Ещё не отмечена"), "text": raw_text or ""}
 
 
+@app.get("/api/owner/brigadier-cabinet/employees")
+def owner_cabinet_employees(db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    if not _can_use_owner_cabinet(db, user.id):
+        raise HTTPException(403, "Личный кабинет доступен только владельцу «ЛЕГИОН»")
+    employees = db.scalars(select(Employee).where(
+        Employee.active.is_(True), _visible_employee(),
+        Employee.group_code.in_(("brigadier", "main", "reserve", "cashless"))
+    ).order_by(Employee.full_name, Employee.id)).all()
+    fields = ("id", "full_name", "phone", "telegram_username", "telegram_url",
+              "group_code", "height_cm", "has_car", "metro")
+    items = []
+    for employee in employees:
+        profile = _employee_dict(employee)
+        items.append({key: profile[key] for key in fields})
+    return JSONResponse({"items": items}, headers={"Cache-Control": "private, no-store, max-age=0"})
+
+
 @app.get("/api/owner/brigadier-cabinet")
 def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends(get_db),
                             user: TelegramUser = Depends(require_admin)):
@@ -5759,11 +5776,11 @@ def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends
     username = config.bot_username or ""
     valid_username = bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", username))
     actions = {key: f"https://t.me/{username}?start=ownercab_{key}" for key in
-               ("profile", "register", "readiness", "number", "contact", "photo", "tea", "close")} if valid_username else {}
+               ("profile", "register", "readiness", "number", "contact", "photo", "tea")} if valid_username else {}
     for item in items:
         reference = item.pop("_action_ref")
         item["actions"] = {key: f"{actions[key]}_{reference}"
-                           for key in ("contact", "photo", "tea", "close")} if actions else {}
+                           for key in ("contact", "photo", "tea")} if actions else {}
     return JSONResponse({
         "user": {"id": user.id, "name": user.full_name}, "profile": profile,
         "today": today.isoformat(), "work_date": selected.isoformat(),
@@ -5811,9 +5828,52 @@ function updateOwnerCabinetNav(){
   nav.innerHTML=allowed?`<span aria-hidden="true">${cabinetIcon('user')}</span><small>Кабинет</small>`:'<span aria-hidden="true">!</span><small>Контроль</small>';
   nav.setAttribute('aria-label',allowed?'Мой кабинет бригадира':'Контроль');
   if(wasActive){qsa('.view').forEach(x=>x.classList.remove('active'));qs('#'+next).classList.add('active')}
+  if(!allowed&&qs('#cabinetDirectory')){closeModal();qs('#cabinetDirectory').remove()}
   if(!allowed){ownerCabinetRequest++;ownerCabinetData=null;ownerCabinetSignature='';ownerCabinetSelectedCard=null;qs('#ownerCabinetContent').innerHTML=''}
 }
+async function openCabinetEmployees(){
+  if(!state.bootstrap?.can_use_owner_cabinet||currentViewId()!=='ownerCabinetView')return;
+  const uid=state.bootstrap.user.id;
+  showModal('Сотрудники','<div id="cabinetDirectory"><p role="status">Загрузка сотрудников…</p></div>');
+  const root=qs('#cabinetDirectory');
+  const active=()=>state.bootstrap?.can_use_owner_cabinet&&state.bootstrap?.user?.id===uid&&currentViewId()==='ownerCabinetView'&&qs('#cabinetDirectory')===root&&!qs('#modal').classList.contains('hidden');
+  try{
+    const data=await api('/api/owner/brigadier-cabinet/employees',{cache:'no-store'});
+    if(!active())return;
+    const groups=[['brigadier','Бригадиры'],['main','Основа'],['reserve','Резерв'],['cashless','Безнал']];
+    const norm=s=>String(s||'').toLocaleLowerCase('ru').replace(/ё/g,'е').trim();
+    const people=(data.items||[]).slice().sort((a,b)=>String(a.full_name||'').localeCompare(String(b.full_name||''),'ru')||Number(a.id)-Number(b.id));
+    root.innerHTML=`<label class="cabinet-directory-search">Поиск по имени и метро<input id="cabinetStaffSearch" type="search" placeholder="Имя или метро" autocomplete="off"></label><label class="cabinet-directory-filter">Раздел<select id="cabinetStaffGroup"><option value="all">Все сотрудники</option>${groups.map(([code,label])=>`<option value="${code}">${label}</option>`).join('')}</select></label><p id="cabinetStaffCount" class="muted" role="status"></p><div id="cabinetStaffList"></div>`;
+    function personHtml(p){
+      const details=[p.metro,p.height_cm?`${p.height_cm} см`:'',p.has_car?'🚗':''].filter(Boolean).join(' · ');
+      let phone=String(p.phone||'').replace(/\D/g,'');
+      if(phone.length===11&&phone.startsWith('8'))phone='7'+phone.slice(1);
+      const phoneLink=/^\d{7,15}$/.test(phone)?`<a href="tel:+${phone}">${cabinetIcon('phone')}${esc(p.phone)}</a>`:'<span>Телефон не указан</span>';
+      const username=String(p.telegram_username||'').replace(/^@/,'');
+      const tgUrl=/^[A-Za-z0-9_]{5,32}$/.test(username)?`https://t.me/${username}`:(/^tg:\/\/user\?id=[1-9]\d*$/.test(p.telegram_url||'')?p.telegram_url:'');
+      return `<details class="cabinet-directory-person"><summary><span><b>${esc(p.full_name||'Без имени')}</b>${details?`<small>${esc(details)}</small>`:''}</span>${cabinetIcon('chevron')}</summary><div class="cabinet-directory-contacts">${phoneLink}${tgUrl?`<a href="${esc(tgUrl)}" data-staff-telegram>Telegram${username?' · @'+esc(username):''}</a>`:'<span>Telegram не указан — связь по телефону</span>'}</div></details>`;
+    }
+    function render(){
+      if(!active())return;
+      const words=norm(qs('#cabinetStaffSearch',root).value).split(/\s+/).filter(Boolean),group=qs('#cabinetStaffGroup',root).value;
+      const rows=people.filter(p=>(group==='all'||p.group_code===group)&&words.every(word=>norm(`${p.full_name} ${p.metro||''}`).includes(word)));
+      qs('#cabinetStaffCount',root).textContent=`Найдено: ${rows.length} из ${people.length}`;
+      qs('#cabinetStaffList',root).innerHTML=rows.length?groups.map(([code,label])=>{
+        const members=rows.filter(p=>p.group_code===code);
+        return members.length?`<section class="cabinet-directory-group"><h4>${label} · ${members.length}</h4>${members.map(personHtml).join('')}</section>`:'';
+      }).join(''):'<p class="cabinet-empty">Сотрудники не найдены. Попробуйте другое имя или метро.</p>';
+      qsa('[data-staff-telegram]',root).forEach(link=>link.onclick=e=>{
+        if(!active()){e.preventDefault();return}
+        if(link.href.startsWith('https://t.me/')&&tg?.openTelegramLink){e.preventDefault();tg.openTelegramLink(link.href)}
+      });
+    }
+    qs('#cabinetStaffSearch',root).oninput=render;
+    qs('#cabinetStaffGroup',root).onchange=render;
+    render();
+  }catch(e){if(active()){root.innerHTML=`<p role="alert">${esc(e.message)}</p><button type="button" class="cabinet-secondary" id="cabinetStaffRetry">Повторить</button>`;qs('#cabinetStaffRetry',root).onclick=openCabinetEmployees}}
+}
 function ownerCabinetAction(key,cardId=null){
+  if(key==='close')return;
   if(!state.bootstrap?.can_use_owner_cabinet||currentViewId()!=='ownerCabinetView')return;
   const card=cardId===null?null:ownerCabinetData?.number_cards?.find(c=>Number(c.id)===Number(cardId));
   if(cardId!==null&&!card)return;
@@ -5838,7 +5898,6 @@ function cabinetPhotoInfo(c){
   return {total,received,complete:received===total,label:received===total?'Фото получены':received?`Фото ${received}/${total}`:(c.photo_time?`Фото в ${c.photo_time}`:'Фото ожидается')};
 }
 function cabinetNextAction(c,data){
-  if(!c.composition_closed)return {key:'close',title:'Закрыть состав',icon:'team'};
   if(data.work_date!==data.today)return null;
   if(!c.on_contact)return {key:'contact',title:'Бригада на связи',icon:'phone'};
   const photo=cabinetPhotoInfo(c);
@@ -5857,7 +5916,7 @@ function ownerCabinetCardsHtml(data){
 function ownerCabinetDetailHtml(c,data){
   const photo=cabinetPhotoInfo(c),today=data.work_date===data.today,next=cabinetNextAction(c,data);
   const stage=(icon,title,subtitle,done,action)=>`<section class="cabinet-stage ${done?'is-done':action?.key===next?.key?'is-next':''}"><div class="cabinet-stage-head">${cabinetIcon(done?'check':icon)}<div><h3>${title}</h3><p>${esc(subtitle)}</p></div></div>${action?cabinetButton(action.key,action.title,icon,c,action.key===next?.key,!!action.disabled):''}</section>`;
-  return `<button type="button" class="cabinet-back" id="cabinetBack">${cabinetIcon('back')}Мои заказы</button><div class="cabinet-detail-head"><div class="cabinet-order-top"><span class="cabinet-kind ${c.source==='gbu'?'gbu':''}">${c.source==='gbu'?'ГБУ':'Частный'}</span><span>${esc(fmtDate(data.work_date))}</span></div><h2>ум: ${esc(c.surname)}</h2></div><div class="cabinet-stages">${stage('team','Состав',c.composition_closed?'Закрытие состава подтверждено':'Нужно закрыть состав и указать время',c.composition_closed,c.composition_closed?null:{key:'close',title:'Закрыть состав'})}${stage('phone','Связь с бригадой',`${c.contact_time?'Плановое время · '+c.contact_time:'Время пока не указано'}${c.on_contact?' · На связи':''}`,c.on_contact,c.on_contact?null:{key:'contact',title:today?'Подтвердить связь':'Доступно в день заказа',disabled:!today})}${stage('camera','Фотоотчёт',`${photo.received} из ${photo.total}${c.photo_time?' · Плановое время '+c.photo_time:''}`,photo.complete,photo.complete?null:{key:'photo',title:today?(c.source==='gbu'&&c.first_received?'Отправить второе фото':'Отправить фото'):'Доступно в день заказа',disabled:!today})}${stage('tea','Чай по заказу',photo.complete?'Укажите сумму или исправьте уже добавленную':c.source==='gbu'?'Сначала отправьте оба фото':'Сначала отправьте фотоотчёт',false,{key:'tea',title:'Указать чай',disabled:!photo.complete||data.work_date>data.today})}</div><p class="cabinet-bot-hint">Действия по этому заказу откроются в личном чате с ботом.</p>`;
+  return `<button type="button" class="cabinet-back" id="cabinetBack">${cabinetIcon('back')}Мои заказы</button><div class="cabinet-detail-head"><div class="cabinet-order-top"><span class="cabinet-kind ${c.source==='gbu'?'gbu':''}">${c.source==='gbu'?'ГБУ':'Частный'}</span><span>${esc(fmtDate(data.work_date))}</span></div><h2>ум: ${esc(c.surname)}</h2></div><div class="cabinet-stages">${stage('phone','Связь с бригадой',`${c.contact_time?'Плановое время · '+c.contact_time:'Время пока не указано'}${c.on_contact?' · На связи':''}`,c.on_contact,c.on_contact?null:{key:'contact',title:today?'Подтвердить связь':'Доступно в день заказа',disabled:!today})}${stage('camera','Фотоотчёт',`${photo.received} из ${photo.total}${c.photo_time?' · Плановое время '+c.photo_time:''}`,photo.complete,photo.complete?null:{key:'photo',title:today?(c.source==='gbu'&&c.first_received?'Отправить второе фото':'Отправить фото'):'Доступно в день заказа',disabled:!today})}${stage('tea','Чай по заказу',photo.complete?'Укажите сумму или исправьте уже добавленную':c.source==='gbu'?'Сначала отправьте оба фото':'Сначала отправьте фотоотчёт',false,{key:'tea',title:'Указать чай',disabled:!photo.complete||data.work_date>data.today})}</div><p class="cabinet-bot-hint">Действия по этому заказу откроются в личном чате с ботом.</p>`;
 }
 function renderOwnerCabinet(data){
   const root=qs('#ownerCabinetContent'),day=data.work_date,uid=state.bootstrap?.user?.id;
@@ -5872,9 +5931,10 @@ function renderOwnerCabinet(data){
     root.innerHTML=`<div class="cabinet-owner-badge">${cabinetIcon('lock')}Только вы</div>${ownerCabinetProfileHtml(data)}
       <article class="cabinet-readiness"><div><small>Готовность на завтра · ${esc(fmtDate(data.tomorrow))}</small><strong class="${r.status==='ready'?'cabinet-done':''}">${esc(r.label)}</strong></div><button type="button" class="cabinet-secondary" data-cabinet-action="readiness">${r.status==='no_response'?'Выбрать':'Изменить'}</button>${r.text?`<p>${esc(r.text)}</p>`:''}</article>
       <section class="cabinet-my-orders"><div class="cabinet-section-heading"><h2>Мои заказы</h2><button type="button" class="cabinet-number-link" data-cabinet-action="number">${cabinetIcon('plus')}Номер в группу</button></div><div class="cabinet-day-shortcuts"><button type="button" data-cabinet-day="${data.today}" class="${day===data.today?'active':''}" aria-pressed="${day===data.today}">Сегодня</button><button type="button" data-cabinet-day="${data.tomorrow}" class="${day===data.tomorrow?'active':''}" aria-pressed="${day===data.tomorrow}">Завтра</button><label class="cabinet-date-picker">${cabinetIcon('calendar')}<input id="cabinetDate" type="date" value="${esc(day)}" aria-label="Дата моих заказов"></label></div>${day!==data.today&&day!==data.tomorrow?`<p class="cabinet-selected-date">${esc(fmtDate(day))}</p>`:''}${ownerCabinetCardsHtml(data)}</section>
-      <div class="cabinet-personal-links"><button type="button" id="cabinetEarnings">${cabinetIcon('wallet')}<span>Мой заработок</span>${cabinetIcon('chevron')}</button><button type="button" id="cabinetControl">${cabinetIcon('control')}<span>Контроль диспетчерской</span>${cabinetIcon('chevron')}</button></div>
-      <details class="cabinet-other-actions"><summary>Другие действия</summary><div>${[['contact','phone','Бригада на связи'],['photo','camera','Фотоотчёт'],['tea','tea','Чай по заказу'],['close','team','Закрыть состав']].map(([key,icon,title])=>cabinetButton(key,title,icon)).join('')}</div><p class="cabinet-bot-hint">Выбор заказа и отчёты откроются в личном чате с ботом.</p></details>
+      <div class="cabinet-personal-links"><button type="button" id="cabinetEmployees">${cabinetIcon('team')}<span>Сотрудники</span>${cabinetIcon('chevron')}</button><button type="button" id="cabinetEarnings">${cabinetIcon('wallet')}<span>Мой заработок</span>${cabinetIcon('chevron')}</button><button type="button" id="cabinetControl">${cabinetIcon('control')}<span>Контроль диспетчерской</span>${cabinetIcon('chevron')}</button></div>
+      <details class="cabinet-other-actions"><summary>Другие действия</summary><div>${[['contact','phone','Бригада на связи'],['photo','camera','Фотоотчёт'],['tea','tea','Чай по заказу']].map(([key,icon,title])=>cabinetButton(key,title,icon)).join('')}</div><p class="cabinet-bot-hint">Выбор заказа и отчёты откроются в личном чате с ботом.</p></details>
       ${!Object.keys(data.actions||{}).length?'<p class="cabinet-bot-hint" role="status">Связь с ботом ещё не настроена. Обновите кабинет чуть позже.</p>':''}`;
+    qs('#cabinetEmployees',root).onclick=openCabinetEmployees;
     qs('#cabinetEarnings',root).onclick=()=>{if(state.bootstrap?.can_use_owner_cabinet)openPersonalTables()};
     qs('#cabinetDate',root).onchange=e=>{if(e.target.value){ownerCabinetSelectedCard=null;loadBootstrap(e.target.value).catch(e=>toast(e.message))}};
     qsa('[data-cabinet-day]',root).forEach(btn=>btn.onclick=()=>{ownerCabinetSelectedCard=null;loadBootstrap(btn.dataset.cabinetDay).catch(e=>toast(e.message))});
@@ -5919,6 +5979,19 @@ async function loadOwnerCabinet(){
 // Events''')
     return html.replace('</head>', r'''
 <style id="owner-cabinet-style">
+#cabinetDirectory{padding-top:8px}
+.cabinet-directory-search,.cabinet-directory-filter{display:block;font-size:13px;color:var(--muted);margin-bottom:12px}
+.cabinet-directory-search input,.cabinet-directory-filter select{display:block;width:100%;box-sizing:border-box;min-height:46px;margin-top:6px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--panel2);color:var(--text);font-size:16px}
+.cabinet-directory-group h4{font-size:15px;color:var(--gold);margin:20px 0 10px}
+.cabinet-directory-person{border:1px solid var(--line);border-radius:13px;background:var(--panel);margin-bottom:8px;overflow:hidden}
+.cabinet-directory-person summary{display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer;padding:13px;min-height:48px;list-style:none}
+.cabinet-directory-person summary::-webkit-details-marker{display:none}
+.cabinet-directory-person summary>span{min-width:0;overflow-wrap:anywhere}
+.cabinet-directory-person b{font-size:15px}.cabinet-directory-person small{display:block;margin-top:5px;color:var(--muted);font-size:13px}
+.cabinet-directory-person[open] summary>.cabinet-icon{transform:rotate(90deg)}
+.cabinet-directory-contacts{display:flex;flex-wrap:wrap;gap:8px;padding:0 13px 13px}
+.cabinet-directory-contacts a{display:flex;align-items:center;gap:7px;min-height:44px;padding:8px 10px;box-sizing:border-box;border:1px solid var(--line);border-radius:10px;color:var(--gold);text-decoration:none;overflow-wrap:anywhere;font-size:14px}
+.cabinet-directory-contacts span{font-size:12px;color:var(--muted);padding:10px 0}
 .owner-cabinet-open #dateStrip,.owner-cabinet-open #selectedDayHeader,.owner-cabinet-open #selectedDayHeader+h3,.owner-cabinet-open #summary,.owner-cabinet-open #cashBtn{display:none!important}
 .owner-cabinet-open main{padding-top:0}
 .owner-cabinet-open .topbar{padding-bottom:8px}
