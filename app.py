@@ -7424,7 +7424,7 @@ function roleNavigationItems(kind){
   if(kind==='owner')return [orders,staff,{key:'tables',title:'Мои таблицы',icon:()=>'<span>💰</span>'},readiness];
   if(kind==='assistant')return [orders,staff,cash,earnings,readiness];
   if(kind==='cashier')return [{...readiness,title:'Кабинет'},cash,earnings,staff];
-  return [staff,earnings,readiness];
+  return [{...readiness,title:'Кабинет'},earnings,staff];
 }
 function updateRoleNavigation(){
   if(!state.bootstrap)return;
