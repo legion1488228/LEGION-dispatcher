@@ -7227,21 +7227,9 @@ async function openCabinetAssignedOrder(id){
   const phone=p=>/^\+?[\d ()-]{7,22}$/.test(String(p||''))?`<a class="contact-btn" href="tel:${esc(p.replace(/[^+\d]/g,''))}">${esc(p)}</a>`:'';
   showModal('Назначенный заказ',`<div class="cabinet-assigned-info"><p>${esc(order.source_label)} · ${esc(order.work_date)} · ${esc(order.issue_time)}</p><h3>ум: ${esc(order.deceased_name||'Не указано')}</h3><p>${esc(order.route||'Маршрут не указан')}</p><p>${esc(order.category_label||'')} · ${Number(order.team_size)||0} чел.</p><p>Агент: ${esc(order.agent_name||'—')} ${phone(order.agent_phone)} ${phone(order.other_agent_phone)}</p><h4>Состав от диспетчера</h4>${(order.members||[]).map(p=>`<p>${esc(p.display_name)} ${phone(p.phone)}</p>`).join('')||'<p>Сотрудники пока не назначены</p>'}<p class="muted">Изменения состава вносит диспетчер.</p></div>`);
 }
-async function cabinetNavigate(target){
-  if(!state.bootstrap?.cabinet_only)return;
-  closeModal();
-  if(!ownerCabinetData){await loadOwnerCabinet();if(!ownerCabinetData)return}
-  if(target==='staff'){await openCabinetEmployees();return}
-  ownerCabinetSelectedCard=null;renderOwnerCabinet(ownerCabinetData);
-  qsa('.cabinet-only-nav button').forEach(button=>button.classList.toggle('active',button.dataset.cabinetNav===target));
-  if(target==='orders')qs('.cabinet-my-orders')?.scrollIntoView({behavior:'smooth',block:'start'});else window.scrollTo({top:0,behavior:'smooth'});
-}
-qsa('[data-cabinet-nav]').forEach(button=>button.onclick=()=>cabinetNavigate(button.dataset.cabinetNav).catch(e=>toast(e.message)));
 // Events
 qs('#cashBtn')""")
     replace("const people=(data.items||[]).slice().sort", "root.addEventListener('cabinet-access-changed',event=>{const person=(data.items||[]).find(p=>p.id===event.detail.id);if(person)person.cabinet_access=event.detail.access});\n    const people=(data.items||[]).slice().sort")
-    # Insert before the script so navigation handlers see these elements on startup.
-    replace('<nav class="bottom-nav">', '<nav class="cabinet-only-nav" aria-label="Кабинет бригадира"><button type="button" class="active" data-cabinet-nav="home"><span>⌂</span><small>Главная</small></button><button type="button" data-cabinet-nav="orders"><span>▤</span><small>Мои заказы</small></button><button type="button" data-cabinet-nav="staff"><span>♙</span><small>Сотрудники</small></button></nav><nav class="bottom-nav">')
     return html.replace('</head>', r'''
 <style id="cabinet-access-compact-style">
 #modal>.modal-head{position:sticky;top:16px;z-index:20;background:#111114;isolation:isolate}
@@ -7285,10 +7273,8 @@ qs('#cashBtn')""")
 .cabinet-access-control .is-connected{color:var(--green)}
 .cabinet-access-button{min-height:34px;padding:6px 10px;font-size:12px;border-radius:8px;border:1px solid var(--gold2);color:var(--gold);background:var(--panel2)}
 .cabinet-access-button:disabled{opacity:.5}.cabinet-directory-person>.cabinet-access-control{margin:0;padding:0 13px 13px}
-.cabinet-only-nav{display:none}.cabinet-only .bottom-nav{display:none}
-.cabinet-only .cabinet-only-nav{display:grid;grid-template-columns:repeat(3,1fr);position:fixed;z-index:30;left:0;right:0;bottom:0;height:calc(62px + var(--safe-bottom));padding-bottom:var(--safe-bottom);background:var(--bg);border-top:1px solid var(--line)}
-.cabinet-only-nav button{border:0;background:transparent;color:var(--muted);padding:7px 2px}.cabinet-only-nav button.active{color:var(--gold)}
-.cabinet-only-nav span{display:block;font-size:22px;height:27px}.cabinet-only-nav small{font-size:10px;font-weight:600}
+.cabinet-only .bottom-nav{display:none}
+body.cabinet-only{padding-bottom:var(--safe-bottom)}
 </style></head>''', 1)
 
 
