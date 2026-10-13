@@ -180,6 +180,11 @@ def _startup_migrations():
     if "tea_reported_at" not in order_cols:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE orders ADD COLUMN tea_reported_at TIMESTAMP NULL"))
+    if inspector.has_table("cabinet_earnings_days"):
+        earnings_cols = {c["name"] for c in inspector.get_columns("cabinet_earnings_days")}
+        if "category" not in earnings_cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE cabinet_earnings_days ADD COLUMN category VARCHAR(20) NULL"))
     # A combined Telegram message can close several orders and be replaced.
     # Keep the old table intact while copying its records into the new schema.
     if inspector.has_table("number_card_closures"):
@@ -7028,6 +7033,7 @@ class CabinetEarningsDay(Base):
     work_date = Column(Date, primary_key=True)
     salary = Column(Integer, nullable=True)
     tea = Column(Integer, nullable=True)
+    category = Column(String(20), nullable=True)
     version = Column(Integer, nullable=False, default=1)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -7054,6 +7060,7 @@ class CabinetCashInput(BaseModel):
 class CabinetEarningsInput(BaseModel):
     salary: StrictInt | None = Field(default=None, ge=0, le=10000000)
     tea: StrictInt | None = Field(default=None, ge=0, le=10000000)
+    category: Literal['standard','vip','elite'] | None = None
     version: StrictInt = Field(ge=0)
 
 
@@ -7173,6 +7180,7 @@ def cabinet_earnings_dict(day, row):
     salary = row.salary if row else None
     tea = row.tea if row else None
     return {'work_date': day.isoformat(), 'salary': salary, 'tea': tea,
+        'category': row.category if row else None,
         'total': (salary or 0) + (tea or 0), 'version': row.version if row else 0}
 
 
@@ -7181,8 +7189,11 @@ def cabinet_earnings_save(work_date: date, data: CabinetEarningsInput,
         db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     cabinet_finance_access(db, user.id)
     row = db.get(CabinetEarningsDay, (user.id, work_date))
+    # Older clients omit the category; preserve any choice already made for this day.
+    values = {'salary': data.salary, 'tea': data.tea,
+        'category': data.category if 'category' in data.model_fields_set else (row.category if row else None)}
     # An identical retry is safe, even if the first response was lost.
-    if row and row.salary == data.salary and row.tea == data.tea:
+    if row and all(getattr(row, field) == value for field, value in values.items()):
         return cabinet_earnings_dict(work_date, row)
     if (row.version if row else 0) != data.version:
         raise HTTPException(409, 'Суммы за день уже изменены. Обновите таблицу и проверьте запись')
@@ -7190,20 +7201,20 @@ def cabinet_earnings_save(work_date: date, data: CabinetEarningsInput,
         if row:
             changed = db.execute(update(CabinetEarningsDay).where(CabinetEarningsDay.tg_id == user.id,
                 CabinetEarningsDay.work_date == work_date, CabinetEarningsDay.version == data.version).values(
-                salary=data.salary, tea=data.tea, version=data.version + 1, updated_at=datetime.utcnow()))
+                **values, version=data.version + 1, updated_at=datetime.utcnow()))
             if changed.rowcount != 1:
                 db.rollback()
                 raise HTTPException(409, 'Суммы за день уже изменены. Обновите таблицу')
             db.refresh(row)
         else:
-            row = CabinetEarningsDay(tg_id=user.id, work_date=work_date, salary=data.salary, tea=data.tea, version=1)
+            row = CabinetEarningsDay(tg_id=user.id, work_date=work_date, **values, version=1)
             db.add(row)
         db.commit()
         return cabinet_earnings_dict(work_date, row)
     except IntegrityError:
         db.rollback()
         row = db.get(CabinetEarningsDay, (user.id, work_date))
-        if row and row.salary == data.salary and row.tea == data.tea:
+        if row and all(getattr(row, field) == value for field, value in values.items()):
             return cabinet_earnings_dict(work_date, row)
         raise HTTPException(409, 'Суммы за день уже сохранены. Обновите таблицу')
 
@@ -7888,3 +7899,57 @@ def _assistant_month_earnings_html(html):
 
 
 INLINE_INDEX_HTML = _assistant_month_earnings_html(INLINE_INDEX_HTML)
+
+
+def _cabinet_earnings_categories_html(html):
+    def replace(old, new):
+        nonlocal html
+        if html.count(old) != 1:
+            raise ValueError('Cabinet earnings category UI anchor missing: ' + old[:90])
+        html = html.replace(old, new, 1)
+    replace('row.tea=draft.tea;row.version=draft.version;',
+        "row.tea=draft.tea;if(Object.prototype.hasOwnProperty.call(draft,'category'))row.category=draft.category;row.version=draft.version;")
+    replace('    const amount=value=>value===null',
+        "    const categoryLabels={standard:'Стандарт',vip:'ВИП',elite:'ЭЛИТ'};\n    const amount=value=>value===null")
+    replace('const valid=row=>!Number.isNaN(amount(row.salary))&&!Number.isNaN(amount(row.tea));',
+        "const valid=row=>(row.category==null||Object.prototype.hasOwnProperty.call(categoryLabels,row.category))&&!Number.isNaN(amount(row.salary))&&!Number.isNaN(amount(row.tea));")
+    replace('JSON.stringify({salary:row.salary,tea:row.tea,version:row.version})',
+        'JSON.stringify({salary:row.salary,tea:row.tea,category:row.category??null,version:row.version})')
+    replace('return {salary:amount(row.salary),tea:amount(row.tea),version:row.version}',
+        'return {salary:amount(row.salary),tea:amount(row.tea),category:row.category??null,version:row.version}')
+    replace('row.dirty=latest.salary!==values.salary||latest.tea!==values.tea;',
+        'row.dirty=latest.salary!==values.salary||latest.tea!==values.tea||latest.category!==values.category;')
+    replace('Есть изменения. Сохраняем при выходе из поля…', 'Есть несохранённые изменения…')
+    replace("${hasAllowance?'<colgroup><col style=\"width:12%\"><col style=\"width:23%\"><col style=\"width:23%\"><col style=\"width:23%\"><col style=\"width:19%\"></colgroup>':'<colgroup><col style=\"width:16%\"><col style=\"width:30%\"><col style=\"width:30%\"><col style=\"width:24%\"></colgroup>'}",
+        "${hasAllowance?'<colgroup><col style=\"width:10%\"><col style=\"width:20%\"><col style=\"width:18%\"><col style=\"width:16%\"><col style=\"width:19%\"><col style=\"width:17%\"></colgroup>':'<colgroup><col style=\"width:12%\"><col style=\"width:22%\"><col style=\"width:22%\"><col style=\"width:22%\"><col style=\"width:22%\"></colgroup>'}")
+    replace('<th scope="col">Дата</th><th scope="col">Оклад</th>',
+        '<th scope="col">Дата</th><th scope="col">Категория</th><th scope="col">Оклад</th>')
+    replace("</th>${['salary','tea'].map(k=>", """</th><td><button type="button" class="cabinet-earnings-category" data-earnings-category="${row.work_date}" aria-haspopup="dialog" aria-label="Категория за ${row.work_date}: ${esc(categoryLabels[row.category]||'не выбрана')}">${esc(categoryLabels[row.category]||'—')}</button></td>${['salary','tea'].map(k=>""")
+    replace('</span><small>Итого</small></th><td data-half-salary="${half}">',
+        '</span><small>Итого</small></th><td></td><td data-half-salary="${half}">')
+    replace('<th scope="row" title="Всего за месяц">Месяц</th><td id="cabinetSalaryTotal">',
+        '<th scope="row" title="Всего за месяц">Месяц</th><td></td><td id="cabinetSalaryTotal">')
+    replace("        qsa('[data-earnings-day]',body).forEach(input=>{", """        qsa('[data-earnings-category]',body).forEach(button=>button.onclick=()=>{
+          if(!active())return;
+          const row=rows.get(button.dataset.earningsCategory);
+          showModal('Категория · '+fmtDate(row.work_date),`<div class="cabinet-category-options" role="group" aria-label="Выберите категорию">${Object.entries(categoryLabels).map(([value,label])=>`<button type="button" class="cabinet-secondary" data-category-choice="${value}" aria-pressed="${row.category===value}">${label}${row.category===value?' ✓':''}</button>`).join('')}</div>`);
+          qsa('[data-category-choice]',qs('#modal')).forEach(choice=>choice.onclick=()=>{
+            if(!active()){closeModal();return}
+            row.category=choice.dataset.categoryChoice;row.dirty=true;row.error='';remember(row);
+            button.textContent=categoryLabels[row.category];
+            button.setAttribute('aria-label','Категория за '+row.work_date+': '+categoryLabels[row.category]);
+            closeModal();button.focus({preventScroll:true});updateTotals();saveRow(row);
+          });
+        });
+        qsa('[data-earnings-day]',body).forEach(input=>{""")
+    return html.replace('</head>', """<style id="cabinet-earnings-category-style">
+#cabinetFinance.compact-month .cabinet-earnings-category{width:100%;height:calc(var(--month-row) - 2px);min-height:0;margin:0;padding:0 2px;border:1px solid var(--line);border-radius:3px;background:var(--panel2);color:var(--text);font-size:9px;line-height:1;white-space:nowrap;box-sizing:border-box;text-align:center}
+#cabinetFinance.compact-month .cabinet-earnings-category::after{content:'⌄';margin-left:2px;color:var(--muted);font-size:8px}
+#cabinetFinance.compact-month .cabinet-earnings-category:focus-visible{outline:1px solid var(--gold);outline-offset:-1px}
+.cabinet-category-options{display:grid;gap:8px;margin:12px 0}
+.cabinet-category-options button{min-height:44px;font-size:16px;text-align:left}
+.cabinet-category-options button[aria-pressed="true"]{border-color:var(--gold);color:var(--gold)}
+</style></head>""", 1)
+
+
+INLINE_INDEX_HTML = _cabinet_earnings_categories_html(INLINE_INDEX_HTML)
