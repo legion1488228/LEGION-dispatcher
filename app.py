@@ -6046,6 +6046,11 @@ def owner_cabinet_employees(db: Session = Depends(get_db), user: TelegramUser = 
     return JSONResponse({"items": items}, headers={"Cache-Control": "private, no-store, max-age=0"})
 
 
+# One-time restart of the cabinet list, by the original "Number to group"
+# publication timestamp. This date does not roll forward each midnight.
+CABINET_ACTIVE_START_UTC = datetime(2026, 10, 13, tzinfo=ZoneInfo("Europe/Moscow")).astimezone(timezone.utc)
+
+
 @app.get("/api/owner/brigadier-cabinet")
 def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends(get_db),
                             user: TelegramUser = Depends(require_app_user), active_only: bool = False):
@@ -6067,6 +6072,7 @@ def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends
         Order.status.notin_(["closed", "cancelled"]) if active_only else Order.status != "cancelled").order_by(Order.work_date, Order.issue_time, Order.id)).unique().all()
     cards = db.scalars(select(NumberCardEvent).where(
         NumberCardEvent.tg_id == user.id, True if active_only else NumberCardEvent.work_date == selected,
+        NumberCardEvent.sent_at >= CABINET_ACTIVE_START_UTC if active_only else True,
         _visible_number_card()).order_by(NumberCardEvent.sent_at, NumberCardEvent.id)).all()
     statuses = number_card_statuses(db, cards)
     contacts = {row.event_id: bool(row.confirmed) for row in db.scalars(
@@ -7476,7 +7482,7 @@ async function roleNavigate(target){
 // Events
 qs('#cashBtn')''')
     return html.replace('</head>', '''<style id="four-cabinet-style">
-body[data-cabinet-kind="cashier"] .cabinet-personal-links{display:none!important}
+body[data-cabinet-kind="cashier"] .cabinet-personal-links,body[data-cabinet-kind="owner"] .cabinet-personal-links{display:none!important}
 body.role-navigation-enabled{padding-bottom:calc(70px + var(--safe-bottom))}
 .role-navigation-enabled .bottom-nav,.role-navigation-enabled #cashBtn{display:none!important}
 .role-navigation{display:grid;grid-template-columns:repeat(var(--role-columns),minmax(0,1fr));position:fixed;z-index:30;left:0;right:0;bottom:0;height:calc(64px + var(--safe-bottom));padding-bottom:var(--safe-bottom);border-top:1px solid var(--line);background:var(--bg)}
