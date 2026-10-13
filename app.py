@@ -6305,6 +6305,8 @@ async function ownerCabinetAction(key,cardId=null){
   const prepared=card&&(card.prepared??card.composition_closed);
   if(card&&(key==='delete'||key==='number')&&!card.can_delete){toast(card.delete_reason||'Удаление доступно до первого фото по заказу');return}
   if(key==='photo'&&(!prepared||data.work_date!==data.today||(data.can_record_cash!==false&&card.source==='private'&&!card.cash))){toast('Фото доступно в день заказа после выполнения предыдущих этапов.');return}
+  if(key==='cash'&&card?.work_date>data.today){toast('Касса доступна начиная со дня заказа');return}
+  if(key==='cash'&&!card?.on_contact){toast('Сначала нажмите «Бригада на связи» по этому заказу');return}
   if(key==='cash'&&data.can_record_cash===false){toast('В вашем кабинете ведение кассы отключено');return}
   if(key==='cash'&&(!prepared||card.source!=='private')){toast('Сначала отправьте отчёт о закрытии заказа');return}
   if(key==='tea'&&(!prepared||!cabinetPhotoInfo(card).complete)){toast('Сначала отправьте все фото по заказу');return} 
@@ -6551,7 +6553,8 @@ function cabinetPhotoInfo(c){
 function cabinetNextAction(c,data){
   if(!c.photo_time)return {key:'schedule',title:'Указать время фото',icon:'clock'};
   if(!(c.prepared??c.composition_closed))return {key:'close',title:'Отчёт о закрытии заказа',icon:'check'};
-  if(data.can_record_cash!==false&&c.source==='private'&&!c.cash&&!c.first_received)return {key:'cash',title:'Заполнить кассу',icon:'wallet'};
+  if(c.work_date===data.today&&!c.on_contact)return {key:'contact',title:'Бригада на связи',icon:'phone'};
+  if(c.on_contact&&c.work_date<=data.today&&data.can_record_cash!==false&&c.source==='private'&&!c.cash&&!c.first_received)return {key:'cash',title:'Заполнить кассу',icon:'wallet'};
   if(data.work_date>data.today)return null;
   const photo=cabinetPhotoInfo(c);
   if(!photo.complete)return data.work_date===data.today?{key:'photo',title:c.source==='gbu'?(c.first_received?'Отправить второе фото':'Отправить первое фото'):'Отправить фото',icon:'camera'}:null;
@@ -6570,7 +6573,7 @@ function ownerCabinetCardsHtml(data){
 function ownerCabinetDetailHtml(c,data){
   const photo=cabinetPhotoInfo(c),today=data.work_date===data.today,next=cabinetNextAction(c,data),prepared=(c.prepared??c.composition_closed),privateOrder=c.source==='private';
   const stage=(key,icon,title,subtitle,done,action)=>`<section class="cabinet-stage ${done?'is-done':action?.key===next?.key?'is-next':''}"><div class="cabinet-stage-head">${cabinetIcon(done?'check':icon)}<div><h3>${title}</h3><p>${esc(subtitle)}</p></div></div>${action?cabinetButton(action.key,action.title,icon,c,action.key===next?.key,!!action.disabled):''}<div data-stage-host="${key}"></div></section>`;
-  return `<button type="button" class="cabinet-back" id="cabinetBack">${cabinetIcon('back')}Мои заказы</button><article class="cabinet-order cabinet-detail"><div class="cabinet-detail-head"><div class="cabinet-order-top"><span class="cabinet-kind">${privateOrder?'Частный':'ГБУ'}</span>${cabinetOrderTools(c)}</div><h2>ум: ${esc(c.surname)}</h2><p>${esc(fmtDate(data.work_date))} · Фото ${esc(c.photo_time||'⏳')}</p>${photo.complete&&c.tea_received?'<p class="cabinet-done">✅ Заказ завершён</p>':''}</div><div data-stage-host="delete"></div><div data-stage-host="edit"></div><div class="cabinet-stages">${stage('number','check','1. Номер в группу','Карточка отправлена',true,null)}${stage('schedule','clock','2. Время фото',c.photo_time||'Укажите плановое время',!!c.photo_time,c.photo_time?null:{key:'schedule',title:'Указать время фото'})}${stage('close','check','3. Отчёт о закрытии',prepared?'Сохранён. Сотрудников назначает диспетчер':'Связь с агентом и время связи с бригадой',prepared,prepared?null:{key:'close',title:'Отчёт о закрытии',disabled:!c.photo_time})}${privateOrder?stage('cash','wallet','4. Касса',c.cash?`${cabinetMoney(c.cash.commission)} ₽ · Откат ${cabinetMoney(c.cash.kickback)} ₽`:'Заполните перед отправкой фото',!!c.cash,{key:'cash',title:c.cash?'Изменить кассу':'Заполнить кассу',disabled:!prepared}):''}${stage('photo','camera',`${privateOrder?5:4}. Фотоотчёт`,`${photo.received} из ${photo.total} · ${c.source==='gbu'?(c.first_received?'✅':'⬜️')+(c.second_received?'✅':'⬜️'):(c.first_received?'✅':'⬜️')}`,photo.complete,photo.complete?null:{key:'photo',title:privateOrder&&!c.cash?'Фото — после кассы':today?(c.source==='gbu'&&c.first_received?'Отправить второе фото':'Отправить фото'):'Доступно в день заказа',disabled:!prepared||!today||(privateOrder&&!c.cash)})}${stage('tea','tea',`${privateOrder?6:5}. Итоговый отчёт`,c.tea_received?`Заказ завершён ✅ · Чай ${cabinetMoney(c.tea_amount)} ₽`:'Откроется после всех фото',photo.complete&&c.tea_received,{key:'tea',title:c.tea_received?'Изменить отчёт':'Завершить заказ',disabled:!prepared||!photo.complete||data.work_date>data.today})}${stage('contact','phone','Связь с бригадой',c.on_contact?'Бригада на связи':`План: ${c.contact_time||'не указан'}`,c.on_contact,c.on_contact?null:{key:'contact',title:'Бригада на связи',disabled:!today})}</div></article>`;
+  return `<button type="button" class="cabinet-back" id="cabinetBack">${cabinetIcon('back')}Мои заказы</button><article class="cabinet-order cabinet-detail"><div class="cabinet-detail-head"><div class="cabinet-order-top"><span class="cabinet-kind">${privateOrder?'Частный':'ГБУ'}</span>${cabinetOrderTools(c)}</div><h2>ум: ${esc(c.surname)}</h2><p>${esc(fmtDate(data.work_date))} · Фото ${esc(c.photo_time||'⏳')}</p>${photo.complete&&c.tea_received?'<p class="cabinet-done">✅ Заказ завершён</p>':''}</div><div data-stage-host="delete"></div><div data-stage-host="edit"></div><div class="cabinet-stages">${stage('number','check','1. Номер в группу','Карточка отправлена',true,null)}${stage('schedule','clock','2. Время фото',c.photo_time||'Укажите плановое время',!!c.photo_time,c.photo_time?null:{key:'schedule',title:'Указать время фото'})}${stage('close','check','3. Отчёт о закрытии',prepared?'Сохранён. Сотрудников назначает диспетчер':'Связь с агентом и время связи с бригадой',prepared,prepared?null:{key:'close',title:'Отчёт о закрытии',disabled:!c.photo_time})}${stage('contact','phone','Связь с бригадой',c.on_contact?'Бригада на связи':`План: ${c.contact_time||'не указан'}`,c.on_contact,c.on_contact?null:{key:'contact',title:'Бригада на связи',disabled:!today})}${privateOrder?stage('cash','wallet','4. Касса',c.cash?`${cabinetMoney(c.cash.commission)} ₽ · Откат ${cabinetMoney(c.cash.kickback)} ₽`:'Заполните перед отправкой фото',!!c.cash,{key:'cash',title:c.work_date>data.today?'Доступно в день заказа':!c.on_contact?'Сначала бригада на связи':c.cash?'Изменить кассу':'Заполнить кассу',disabled:!prepared||!c.on_contact||c.work_date>data.today}):''}${stage('photo','camera',`${privateOrder?5:4}. Фотоотчёт`,`${photo.received} из ${photo.total} · ${c.source==='gbu'?(c.first_received?'✅':'⬜️')+(c.second_received?'✅':'⬜️'):(c.first_received?'✅':'⬜️')}`,photo.complete,photo.complete?null:{key:'photo',title:privateOrder&&!c.cash?'Фото — после кассы':today?(c.source==='gbu'&&c.first_received?'Отправить второе фото':'Отправить фото'):'Доступно в день заказа',disabled:!prepared||!today||(privateOrder&&!c.cash)})}${stage('tea','tea',`${privateOrder?6:5}. Итоговый отчёт`,c.tea_received?`Заказ завершён ✅ · Чай ${cabinetMoney(c.tea_amount)} ₽`:'Откроется после всех фото',photo.complete&&c.tea_received,{key:'tea',title:c.tea_received?'Изменить отчёт':'Завершить заказ',disabled:!prepared||!photo.complete||data.work_date>data.today})}</div></article>`;
 }
 function renderOwnerCabinet(data){
   const root=qs('#ownerCabinetContent'),day=data.work_date,uid=state.bootstrap?.user?.id;
@@ -6873,6 +6876,8 @@ def cabinet_command_create(data: CabinetCommandInput, db: Session = Depends(get_
             NumberCardEvent.tg_id == user.id, _visible_number_card()))
         if not card:
             raise HTTPException(404, 'Заказ удалён или передан другому бригадиру')
+        if data.action == 'cash':
+            cabinet_cash_stage_guard(db, card)
         if data.action == 'delete' or data.action == 'number':
             deletion = cabinet_order_deletion_info(db, card)
             if not deletion['can_delete']:
@@ -7097,11 +7102,20 @@ def cabinet_cash_status(tg_id: int, report_key: str, db: Session = Depends(get_d
     return {'cash': cabinet_cash_for_card(db, card)}
 
 
+def cabinet_cash_stage_guard(db, card):
+    if card.work_date > datetime.now(MOSCOW).date():
+        raise HTTPException(409, 'Касса доступна начиная со дня заказа по московскому времени')
+    contact = db.get(OrderBrigadeContact, card.id)
+    if not contact or not contact.confirmed or contact.tg_id != card.tg_id:
+        raise HTTPException(409, 'Сначала нажмите «Бригада на связи» по этому заказу')
+
+
 @app.post('/api/bot/cabinet/cash', dependencies=[Depends(_bot_key)])
 def cabinet_cash_save(data: CabinetCashInput, db: Session = Depends(get_db)):
     if not cabinet_can_cash(db, data.tg_id):
         raise HTTPException(403, 'В вашем кабинете ведение кассы отключено')
     card = cabinet_finance_card(db, data.tg_id, data.report_key)
+    cabinet_cash_stage_guard(db, card)
     if card.source != 'private':
         raise HTTPException(422, 'Касса на этом этапе заполняется только для частного заказа')
     if data.team_size not in (4, 6) or data.reserve > data.team_size:
