@@ -97,9 +97,25 @@ async def require_app_user(db: Session = Depends(get_db),
         raise HTTPException(401, "Откройте приложение заново через Telegram")
     if user.id in HIDDEN_TG_IDS:
         raise HTTPException(403, "Доступ закрыт")
+    if db.get(OwnerManagedBlock, user.id):
+        raise HTTPException(403, 'Аккаунт заблокирован владельцем')
+    grant = db.get(BrigadierCabinetAccess, user.id)
+    if grant and not _is_cabinet_owner(db, user.id) and not _can_use_owner_cabinet(db, user.id):
+        raise HTTPException(403, "Доступ к кабинету отключён")
     if user.id not in allowed_ids() and not _can_use_owner_cabinet(db, user.id):
         raise HTTPException(403, "Кабинет не подключён или доступ отключён. Обратитесь к владельцу «ЛЕГИОН»")
     return user
+
+
+async def require_admin(db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)) -> TelegramUser:
+    if not _dispatcher_access(db, user.id):
+        raise HTTPException(403, 'Диспетчерская доступна владельцу и помощникам')
+    return user
+
+
+def _require_cash_manager(db, user):
+    if not _dispatcher_access(db, user.id):
+        raise HTTPException(403, 'Касса доступна владельцу и помощникам')
 
 
 def _seed_gbu_agents():
@@ -1060,7 +1076,8 @@ def _upsert_employee(db: Session, data: EmployeeSync) -> Employee:
         emp.phone = data.phone.strip()
     if data.telegram_username.strip():
         emp.telegram_username = data.telegram_username.strip().lstrip("@")
-    emp.group_code = data.group_code
+    group_override = db.get(OwnerEmployeeGroup, emp.id) if emp.id else None
+    emp.group_code = group_override.group_code if group_override else data.group_code
     if data.height_cm is not None:
         emp.height_cm = data.height_cm
     if 'has_car' in getattr(data, 'model_fields_set', {'has_car'}):
@@ -1144,11 +1161,14 @@ def api_me(user: TelegramUser = Depends(require_admin)):
 @app.get("/api/bootstrap")
 def bootstrap(work_date: date | None = None, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     selected = work_date or datetime.now(MOSCOW).date()
-    if user.id not in allowed_ids():
+    kind = cabinet_kind(db, user.id)
+    if not _dispatcher_access(db, user.id):
         # Never calculate or expose dispatcher summaries to a brigadier.
         return JSONResponse({"user": {"id": user.id, "name": user.full_name},
             "cabinet_only": True, "is_owner": False, "can_manage_cabinets": False,
             "can_use_owner_cabinet": True, "can_view_vlad_allowance": False,
+            "cabinet_kind": kind, "can_record_cash": cabinet_can_cash(db, user.id),
+            "can_manage_cash": False,
             "selected_date": selected.isoformat(), "today": datetime.now(MOSCOW).date().isoformat()},
             headers={"Cache-Control": "private, no-store"})
     dates = _date_folders(db, selected)
@@ -1157,6 +1177,9 @@ def bootstrap(work_date: date | None = None, db: Session = Depends(get_db), user
         "user": {"id": user.id, "name": user.full_name},
         "is_owner": _is_owner(db, user.id),
         "cabinet_only": False,
+        "cabinet_kind": kind,
+        "can_record_cash": cabinet_can_cash(db, user.id),
+        "can_manage_cash": True,
         "can_manage_cabinets": _is_cabinet_owner(db, user.id),
         "can_use_owner_cabinet": _can_use_owner_cabinet(db, user.id),
         "can_view_vlad_allowance": _can_view_vlad_allowance(db, user),
@@ -2561,7 +2584,7 @@ def bot_edit_own_cash(entry_id: int, data: BrigadierCashPatch, db: Session = Dep
 
 @app.get("/api/cash")
 def owner_cash_day(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
-    _require_owner(db, user)
+    _require_cash_manager(db, user)
     rows = _all_cash_rows(db, work_date, work_date)
     start, end = _period_bounds(work_date)
     period_rows = _all_cash_rows(db, start, end)
@@ -2608,14 +2631,14 @@ def _cash_day_check_data(db: Session, work_date: date) -> dict:
 
 @app.get("/api/cash/day-check")
 def owner_cash_day_check(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
-    _require_owner(db, user)
+    _require_cash_manager(db, user)
     return _cash_day_check_data(db, work_date)
 
 
 @app.put("/api/cash/day-check/{work_date}")
 def owner_save_cash_day_check(work_date: date, change: CashDayCheckChange,
                              db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
-    _require_owner(db, user)
+    _require_cash_manager(db, user)
     data = _cash_day_check_data(db, work_date)
     conflict = 'Список кассы уже изменён. Обновите его перед сохранением.'
     if data['version'] != change.version:
@@ -2653,7 +2676,7 @@ def owner_save_cash_day_check(work_date: date, change: CashDayCheckChange,
 
 @app.get("/api/cash/ledger")
 def owner_cash_ledger(on_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin), period: Literal["half", "month"] = "half"):
-    _require_owner(db, user)
+    _require_cash_manager(db, user)
     start, end = _period_bounds(on_date)
     if period == "month":
         import calendar
@@ -2769,13 +2792,13 @@ def owner_cash_ledger(on_date: date, db: Session = Depends(get_db), user: Telegr
 
 @app.patch("/api/cash/{entry_id}")
 def owner_patch_cash(entry_id: int, data: CashEntryPatch, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
-    _require_owner(db, user)
+    _require_cash_manager(db, user)
     raise HTTPException(403, "Владельцу доступен только просмотр кассы")
 
 
 @app.delete("/api/cash/{entry_id}")
 def owner_delete_cash(entry_id: int, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
-    _require_owner(db, user)
+    _require_cash_manager(db, user)
     raise HTTPException(403, "Владельцу доступен только просмотр кассы")
 
 
@@ -3518,7 +3541,7 @@ def sync_cash_reminder_settings(data: CashReminderSettings, db: Session = Depend
 @app.post("/api/cash/reminder")
 async def send_cash_reminder(db: Session = Depends(get_db),
                              user: TelegramUser = Depends(require_admin)):
-    _require_owner(db, user)
+    _require_cash_manager(db, user)
     now = datetime.utcnow()
     row = db.execute(select(CashReminderConfig).where(
         CashReminderConfig.id == 1).with_for_update()).scalar_one_or_none()
@@ -3546,7 +3569,7 @@ async def send_cash_reminder(db: Session = Depends(get_db),
 
 @app.get("/api/cash/months")
 def owner_cash_months(db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
-    _require_owner(db, user)
+    _require_cash_manager(db, user)
     dates = db.execute(select(CashEntry.work_date).where(
         CashEntry.brigadier_tg_id.notin_(_cash_excluded_ids(db))).distinct()).scalars().all()
     dates += db.scalars(select(CabinetOrderCash.work_date).where(
@@ -5793,6 +5816,40 @@ class BrigadierCabinetAccess(Base):
 class CabinetAccessInput(BaseModel):
     active: StrictBool
     version: StrictInt = Field(ge=0)
+    kind: Literal['assistant', 'cashier', 'brigadier'] | None = None
+
+
+class CabinetRole(Base):
+    __tablename__ = 'brigadier_cabinet_roles'
+    tg_id = Column(BigInteger, primary_key=True)
+    kind = Column(String(20), nullable=False)
+
+
+def cabinet_kind(db, uid):
+    if _is_cabinet_owner(db, uid):
+        return 'owner'
+    role = db.get(CabinetRole, uid)
+    grant = db.get(BrigadierCabinetAccess, uid)
+    if role and grant:
+        return role.kind
+    if uid in allowed_ids():
+        return 'assistant'
+    employee = db.scalar(select(Employee).where(Employee.tg_id == uid,
+        Employee.active.is_(True), _visible_employee()).limit(1))
+    return 'cashier' if employee and getattr(employee, 'is_cashier', False) else 'brigadier'
+
+
+def _dispatcher_access(db, uid):
+    if _is_cabinet_owner(db, uid):
+        return True
+    grant = db.get(BrigadierCabinetAccess, uid)
+    if grant:
+        return _can_use_owner_cabinet(db, uid) and cabinet_kind(db, uid) == 'assistant'
+    return uid in allowed_ids() and uid not in HIDDEN_TG_IDS
+
+
+def cabinet_can_cash(db, uid):
+    return _can_use_owner_cabinet(db, uid) and cabinet_kind(db, uid) in {'owner', 'assistant', 'cashier'}
 
 
 def _is_cabinet_owner(db: Session, tg_id: int) -> bool:
@@ -5805,10 +5862,10 @@ def cabinet_access_info(db: Session, employee):
     if employee.group_code != "brigadier" or not employee.tg_id or not employee.active:
         return None
     if _is_cabinet_owner(db, employee.tg_id):
-        return {"owner": True, "active": True, "version": 0}
+        return {"owner": True, "active": True, "version": 0, "kind": 'owner'}
     grant = db.get(BrigadierCabinetAccess, employee.tg_id)
     return {"owner": False, "active": _can_use_owner_cabinet(db, employee.tg_id),
-            "version": grant.version if grant else 0}
+            "version": grant.version if grant else 0, "kind": cabinet_kind(db, employee.tg_id)}
 
 
 @app.put("/api/employees/{employee_id}/cabinet-access")
@@ -5822,12 +5879,22 @@ def set_cabinet_access(employee_id: int, data: CabinetAccessInput,
         raise HTTPException(409, "Сначала нужна регистрация бригадира в боте")
     if employee.tg_id == user.id:
         raise HTTPException(409, "Ваш кабинет уже подключён")
+    # Serialize owner-issued role changes, including the two-helper limit.
+    db.scalar(select(OwnerCabinetConfig).where(OwnerCabinetConfig.id == 1).with_for_update())
     grant = db.get(BrigadierCabinetAccess, employee.tg_id)
     if (grant.version if grant else 0) != data.version:
         raise HTTPException(409, "Доступ уже изменён. Обновите список бригадиров")
     values = dict(employee_id=employee.id, active=data.active, version=data.version + 1,
                   granted_by=user.id, updated_at=datetime.utcnow())
     try:
+        kind = data.kind or cabinet_kind(db, employee.tg_id)
+        if kind == 'assistant' and data.active:
+            others = db.scalar(select(func.count()).select_from(BrigadierCabinetAccess).join(
+                CabinetRole, CabinetRole.tg_id == BrigadierCabinetAccess.tg_id).where(
+                BrigadierCabinetAccess.active.is_(True), BrigadierCabinetAccess.granted_by == user.id,
+                CabinetRole.kind == 'assistant', BrigadierCabinetAccess.tg_id != employee.tg_id))
+            if others >= 2:
+                raise HTTPException(409, 'Уже подключены два помощника. Сначала смените роль или отключите одного из них')
         if grant:
             result = db.execute(update(BrigadierCabinetAccess).where(
                 BrigadierCabinetAccess.tg_id == employee.tg_id,
@@ -5837,6 +5904,12 @@ def set_cabinet_access(employee_id: int, data: CabinetAccessInput,
                 raise HTTPException(409, "Доступ уже изменён. Обновите список бригадиров")
         else:
             db.add(BrigadierCabinetAccess(tg_id=employee.tg_id, **values))
+        role = db.get(CabinetRole, employee.tg_id)
+        if role is None:
+            db.add(CabinetRole(tg_id=employee.tg_id, kind=kind))
+        else:
+            role.kind = kind
+        employee.is_cashier = kind in {'assistant', 'cashier'}
         if not data.active:
             db.execute(update(CabinetCommand).where(CabinetCommand.tg_id == employee.tg_id,
                 CabinetCommand.status == "queued").values(status="error", payload="{}",
@@ -5851,7 +5924,8 @@ def set_cabinet_access(employee_id: int, data: CabinetAccessInput,
 def bot_cabinet_access_data(db, tg_id):
     grant = db.get(BrigadierCabinetAccess, tg_id)
     return {"tg_id": tg_id, "allowed": _can_use_owner_cabinet(db, tg_id),
-            "version": grant.version if grant else 0}
+            "version": grant.version if grant else 0, "kind": cabinet_kind(db, tg_id),
+            "can_record_cash": cabinet_can_cash(db, tg_id)}
 
 
 @app.get("/api/bot/cabinet/access", dependencies=[Depends(_bot_key)])
@@ -5921,6 +5995,8 @@ def _can_use_owner_cabinet(db: Session, tg_id: int) -> bool:
     if _is_cabinet_owner(db, tg_id):
         return True
     if int(tg_id) in HIDDEN_TG_IDS:
+        return False
+    if db.get(OwnerManagedBlock, int(tg_id)):
         return False
     config = db.get(OwnerCabinetConfig, 1)
     grant = db.get(BrigadierCabinetAccess, int(tg_id))
@@ -6025,6 +6101,7 @@ def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends
         "tomorrow_readiness": _owner_cabinet_readiness(db, employee, today + timedelta(days=1)),
         "orders": [_cabinet_order_dict(order, db) for order in orders], "number_cards": items,
         "actions": actions,
+        "cabinet_kind": cabinet_kind(db, user.id), "can_record_cash": cabinet_can_cash(db, user.id),
     }, headers={"Cache-Control": "private, no-store, max-age=0", "Pragma": "no-cache"})
 
 
@@ -6227,7 +6304,8 @@ async function ownerCabinetAction(key,cardId=null){
   if(cardId!==null&&!card)return;
   const prepared=card&&(card.prepared??card.composition_closed);
   if(card&&(key==='delete'||key==='number')&&!card.can_delete){toast(card.delete_reason||'Удаление доступно до первого фото по заказу');return}
-  if(key==='photo'&&(!prepared||data.work_date!==data.today||(card.source==='private'&&!card.cash))){toast('Сначала заполните кассу. Фото доступно в день заказа.');return}
+  if(key==='photo'&&(!prepared||data.work_date!==data.today||(data.can_record_cash!==false&&card.source==='private'&&!card.cash))){toast('Фото доступно в день заказа после выполнения предыдущих этапов.');return}
+  if(key==='cash'&&data.can_record_cash===false){toast('В вашем кабинете ведение кассы отключено');return}
   if(key==='cash'&&(!prepared||card.source!=='private')){toast('Сначала отправьте отчёт о закрытии заказа');return}
   if(key==='tea'&&(!prepared||!cabinetPhotoInfo(card).complete)){toast('Сначала отправьте все фото по заказу');return} 
   const input=(name,label,value='',type='text',extra='')=>`<label>${label}<input name="${name}" type="${type}" value="${esc(value??'')}" ${extra}></label>`;
@@ -6473,7 +6551,7 @@ function cabinetPhotoInfo(c){
 function cabinetNextAction(c,data){
   if(!c.photo_time)return {key:'schedule',title:'Указать время фото',icon:'clock'};
   if(!(c.prepared??c.composition_closed))return {key:'close',title:'Отчёт о закрытии заказа',icon:'check'};
-  if(c.source==='private'&&!c.cash&&!c.first_received)return {key:'cash',title:'Заполнить кассу',icon:'wallet'};
+  if(data.can_record_cash!==false&&c.source==='private'&&!c.cash&&!c.first_received)return {key:'cash',title:'Заполнить кассу',icon:'wallet'};
   if(data.work_date>data.today)return null;
   const photo=cabinetPhotoInfo(c);
   if(!photo.complete)return data.work_date===data.today?{key:'photo',title:c.source==='gbu'?(c.first_received?'Отправить второе фото':'Отправить первое фото'):'Отправить фото',icon:'camera'}:null;
@@ -6769,6 +6847,8 @@ def cabinet_order_deletion_info(db, card):
 def cabinet_command_create(data: CabinetCommandInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     if not _can_use_owner_cabinet(db, user.id):
         raise HTTPException(403, 'Кабинет недоступен')
+    if data.action == 'cash' and not cabinet_can_cash(db, user.id):
+        raise HTTPException(403, 'В вашем кабинете ведение кассы отключено')
     # Hash the submitted intent before resolving a live card/date. A retry of
     # a successful deletion remains valid after that card has disappeared.
     intent = json.dumps({'tg_id': user.id, **data.model_dump(exclude={'request_id'})},
@@ -7019,6 +7099,8 @@ def cabinet_cash_status(tg_id: int, report_key: str, db: Session = Depends(get_d
 
 @app.post('/api/bot/cabinet/cash', dependencies=[Depends(_bot_key)])
 def cabinet_cash_save(data: CabinetCashInput, db: Session = Depends(get_db)):
+    if not cabinet_can_cash(db, data.tg_id):
+        raise HTTPException(403, 'В вашем кабинете ведение кассы отключено')
     card = cabinet_finance_card(db, data.tg_id, data.report_key)
     if card.source != 'private':
         raise HTTPException(422, 'Касса на этом этапе заполняется только для частного заказа')
@@ -7130,6 +7212,8 @@ def cabinet_finance(on_date: date, db: Session = Depends(get_db), user: Telegram
     legacy_cash = db.scalars(select(CashEntry).where(CashEntry.brigadier_tg_id == user.id,
         CashEntry.work_date.between(start, end)).order_by(CashEntry.work_date, CashEntry.id)).all()
     entries.extend(cabinet_legacy_cash_dict(row) for row in legacy_cash)
+    if not cabinet_can_cash(db, user.id):
+        entries = []
     # Source-qualified keys keep independent rows with equal IDs/amounts distinct.
     entries.sort(key=lambda item: (item['work_date'], 0 if item['source'] == 'cabinet' else 1,
         item['event_id'] if item['source'] == 'cabinet' else item['cash_entry_id']))
@@ -7165,7 +7249,7 @@ def _brigadier_access_html(html):
         html = html.replace(old, new, 1)
 
     replace("throw new Error(msg || `Ошибка ${response.status}`);", """const error=new Error(msg || `Ошибка ${response.status}`);error.status=response.status;
-    if((response.status===401||response.status===403)&&state.bootstrap?.cabinet_only&&(path.startsWith('/api/bootstrap')||path.startsWith('/api/owner/brigadier-cabinet')))cabinetAccessLost(error.message);
+    if((response.status===401||response.status===403)&&(state.bootstrap?.cabinet_only||state.bootstrap?.cabinet_kind==='assistant')&&(path.startsWith('/api/bootstrap')||path.startsWith('/api/owner/brigadier-cabinet')))cabinetAccessLost(error.message);
     throw error;""")
     replace('<h2>Доступ к диспетчерской</h2>', '<h2>Доступ к приложению</h2>')
     replace('Mini App доступна только владельцу и помощникам, чьи Telegram ID указаны в настройках сервера.', 'Если вы бригадир, попросите владельца подключить ваш кабинет в списке бригадиров.')
@@ -7202,23 +7286,26 @@ function cabinetAccessButton(person){
   const access=person.cabinet_access;
   if(!access)return '<small class="cabinet-access-note">Для подключения нужна регистрация в боте</small>';
   if(access.owner)return '<small class="cabinet-access-note">Ваш кабинет подключён</small>';
-  return `<div class="cabinet-access-control"><span class="${access.active?'is-connected':''}">${access.active?'● Кабинет подключён':'Кабинет не подключён'}</span><button type="button" class="cabinet-access-button" data-cabinet-grant="${Number(person.id)}" data-access-active="${access.active?'1':'0'}" data-access-version="${Number(access.version)}">${access.active?'Отключить кабинет':'Подключить кабинет'}</button></div>`;
+  const kinds={assistant:'Помощник',cashier:'Кассовый бригадир',brigadier:'Обычный бригадир'};
+  const attrs=`data-cabinet-grant="${Number(person.id)}" data-access-version="${Number(access.version)}"`;
+  return `<div class="cabinet-access-control"><span class="${access.active?'is-connected':''}">${access.active?'● '+esc(kinds[access.kind]||kinds.brigadier):'Кабинет не подключён'}</span><select class="cabinet-role-select" aria-label="Тип личного кабинета">${Object.entries(kinds).map(([key,title])=>`<option value="${key}" ${key===(access.kind||'brigadier')?'selected':''}>${title}</option>`).join('')}</select><button type="button" class="cabinet-access-button" ${attrs} data-access-action="save">${access.active?'Сохранить тип':'Подключить кабинет'}</button>${access.active?`<button type="button" class="cabinet-access-button" ${attrs} data-access-action="disable">Отключить</button>`:''}</div>`;
 }
 function wireCabinetAccessButtons(root){qsa('[data-cabinet-grant]',root).forEach(button=>button.onclick=()=>changeCabinetAccess(button))}
 async function changeCabinetAccess(button){
   if(!state.bootstrap?.can_manage_cabinets||button.disabled)return;
-  const uid=state.bootstrap.user.id,id=Number(button.dataset.cabinetGrant),active=button.dataset.accessActive!=='1',version=Number(button.dataset.accessVersion),label=button.textContent;
-  button.disabled=true;button.textContent='Сохранение…';
+  const uid=state.bootstrap.user.id,id=Number(button.dataset.cabinetGrant),active=button.dataset.accessAction!=='disable',version=Number(button.dataset.accessVersion),label=button.textContent;
+  const control=button.closest('.cabinet-access-control'),kind=qs('.cabinet-role-select',control).value;
+  qsa('button,select',control).forEach(x=>x.disabled=true);button.textContent='Сохранение…';
   try{
-    const result=await api(`/api/employees/${id}/cabinet-access`,{method:'PUT',body:JSON.stringify({active,version})});
+    const result=await api(`/api/employees/${id}/cabinet-access`,{method:'PUT',body:JSON.stringify({active,version,kind})});
     if(state.bootstrap?.user?.id!==uid||!button.isConnected)return;
     const access=result.cabinet_access;
-    button.dataset.accessActive=access.active?'1':'0';button.dataset.accessVersion=String(access.version);button.textContent=access.active?'Отключить кабинет':'Подключить кабинет';
-    const status=button.parentElement.querySelector('span');status.textContent=access.active?'● Кабинет подключён':'Кабинет не подключён';status.classList.toggle('is-connected',access.active);
     // Keep search/filter rerenders in this modal consistent with the saved grant.
     button.dispatchEvent(new CustomEvent('cabinet-access-changed',{bubbles:true,detail:{id,access}}));
-    toast(access.active?'Кабинет подключён. Кнопка «Мой кабинет» появится в меню бота.':'Доступ к кабинету отключён',5000);
-  }catch(e){button.textContent=label;toast(e.message,5000)}finally{button.disabled=false}
+    control.outerHTML=cabinetAccessButton({id,group_code:'brigadier',cabinet_access:access});
+    wireCabinetAccessButtons(document);
+    toast(!access.active?'Доступ к кабинету отключён':access.kind==='brigadier'?'Кабинет обычного бригадира подключён.': 'Кабинет подключён. Прежняя касса доступна в таблице; новые записи также отправляются в кассовый чат.',5000);
+  }catch(e){button.textContent=label;toast(e.message,5000)}finally{qsa('button,select',control).forEach(x=>x.disabled=false)}
 }
 async function openCabinetAssignedOrder(id){
   const uid=state.bootstrap?.user?.id;
@@ -7285,3 +7372,429 @@ INLINE_INDEX_HTML = _brigadier_access_html(INLINE_INDEX_HTML)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     '<button class="contact-btn" data-cash-edit="${x.id}">✏️ Изменить</button>\n            <button class="contact-btn danger" data-cash-del="${x.id}">Удалить</button>',
     '${x.source===\'cabinet\'?\'<small class="muted">Из кабинета бригадира</small>\':`<button class="contact-btn" data-cash-edit="${x.id}">✏️ Изменить</button><button class="contact-btn danger" data-cash-del="${x.id}">Удалить</button>`}')
+
+
+def _four_cabinets_html(html):
+    def replace(old, new):
+        nonlocal html
+        if html.count(old) != 1:
+            raise ValueError('Four cabinet UI anchor missing: ' + old[:90])
+        html = html.replace(old, new, 1)
+    replace('function applyCabinetMode(){', 'function applyCabinetMode(){\n  updateRoleNavigation();')
+    replace("if(!state.bootstrap?.is_owner){toast('Касса доступна только владельцу');return}",
+        "if(!state.bootstrap?.can_manage_cash){toast('Касса доступна владельцу и помощникам');return}")
+    replace("prepared=(c.prepared??c.composition_closed),privateOrder=c.source==='private';",
+        "prepared=(c.prepared??c.composition_closed),privateOrder=c.source==='private',cashRequired=privateOrder&&data.can_record_cash!==false;")
+    replace("${privateOrder?stage('cash'", "${cashRequired?stage('cash'")
+    replace("`${privateOrder?5:4}. Фотоотчёт`", "`${cashRequired?5:4}. Фотоотчёт`")
+    replace("`${privateOrder?6:5}. Итоговый отчёт`", "`${cashRequired?6:5}. Итоговый отчёт`")
+    html = html.replace("privateOrder&&!c.cash", "cashRequired&&!c.cash")
+    replace("${card.source==='private'?'Далее заполните кассу.':'Далее — фото в день заказа.'}",
+        "${card.source==='private'&&data.can_record_cash!==false?'Далее заполните кассу.':'Далее — фото в день заказа.'}")
+    replace("    const amount=value=>value===null", "    if(state.bootstrap?.can_record_cash===false){qs('[data-finance-tab=\"cash\"]',panel)?.remove();qs('h2',panel).textContent='Мой заработок';tab='earnings'}\n    const amount=value=>value===null")
+    replace('<span>Касса и заработок</span>', "<span>${data.can_record_cash===false?'Мой заработок':'Касса и заработок'}</span>")
+    replace('// Events\nqs(\'#cashBtn\')', r'''
+let roleNavigationIdentity='',roleNavigationActive='';
+function roleNavigationItems(kind){
+  const staff={key:'staff',title:'Сотрудники',icon:()=>cabinetIcon('team')};
+  const readiness={key:'ready',title:'Готовность',icon:()=>cabinetIcon('check')};
+  const earnings={key:'earnings',title:'Заработок',icon:()=>'<b class="role-ruble">₽</b>'};
+  const cash={key:'cash',title:'Касса',icon:()=>cabinetIcon('wallet')};
+  const orders={key:'orders',title:'Заказы',icon:()=>'<span>▤</span>'};
+  if(kind==='owner')return [orders,staff,{key:'tables',title:'Мои таблицы',icon:()=>'<span>💰</span>'},readiness];
+  if(kind==='assistant')return [orders,staff,cash,earnings,readiness];
+  if(kind==='cashier')return [staff,cash,earnings,readiness];
+  return [staff,earnings,readiness];
+}
+function updateRoleNavigation(){
+  if(!state.bootstrap)return;
+  const kind=state.bootstrap.cabinet_kind||(state.bootstrap.is_owner?'owner':state.bootstrap.cabinet_only?'brigadier':'assistant');
+  const identity=state.bootstrap.user.id+':'+kind;
+  document.body.classList.add('role-navigation-enabled');document.body.dataset.cabinetKind=kind;
+  let nav=qs('#roleNavigation');
+  if(!nav){nav=document.createElement('nav');nav.id='roleNavigation';nav.className='role-navigation';nav.setAttribute('aria-label','Разделы личного кабинета');document.body.append(nav)}
+  if(identity!==roleNavigationIdentity){
+    roleNavigationIdentity=identity;roleNavigationActive='ready';
+    const items=roleNavigationItems(kind);nav.style.setProperty('--role-columns',items.length);
+    nav.innerHTML=items.map(item=>`<button type="button" data-role-nav="${item.key}" aria-label="${item.title}"><span class="role-nav-icon">${item.icon()}</span><small>${item.title}</small></button>`).join('');
+    qsa('button',nav).forEach(button=>button.onclick=()=>roleNavigate(button.dataset.roleNav).catch(e=>toast(e.message)));
+  }
+  qsa('button',nav).forEach(button=>{const selected=button.dataset.roleNav===roleNavigationActive;button.classList.toggle('active',selected);button.setAttribute('aria-current',selected?'page':'false')});
+  let own=qs('#roleOwnOrders');
+  if(!own){own=document.createElement('button');own.id='roleOwnOrders';own.type='button';own.className='cabinet-secondary role-own-orders';own.textContent='Мои заказы и готовность';qs('main').prepend(own);own.onclick=()=>roleOpenOwn().catch(e=>toast(e.message))}
+  own.hidden=!state.bootstrap.can_use_owner_cabinet||!['owner','assistant'].includes(kind)||currentViewId()==='ownerCabinetView';
+}
+async function roleActivateView(id){
+  closeModal();closeDrawer();
+  qsa('.bottom-nav button').forEach(button=>button.classList.toggle('active',button.dataset.view===id));
+  qsa('.view').forEach(view=>view.classList.toggle('active',view.id===id));
+  await renderCurrentView();
+}
+async function roleOpenOwn(){
+  if(!state.bootstrap?.can_use_owner_cabinet){toast('Сначала подключите ваш профиль бригадира');return}
+  ownerCabinetSelectedCard=null;await roleActivateView('ownerCabinetView');
+}
+async function roleNavigate(target){
+  const kind=state.bootstrap?.cabinet_kind;
+  if(!roleNavigationItems(kind).some(item=>item.key===target))return;
+  roleNavigationActive=target;updateRoleNavigation();
+  const dispatcher=['owner','assistant'].includes(kind);
+  if(target==='orders'){await roleActivateView('ordersView');return}
+  if(target==='staff'){
+    if(dispatcher){await roleActivateView('employeesView');return}
+    await roleOpenOwn();await openCabinetEmployees();return;
+  }
+  if(target==='ready'){await roleActivateView(dispatcher?'readinessView':'ownerCabinetView');return}
+  if(target==='tables'){closeModal();await openPersonalTables();return}
+  if(target==='cash'&&kind==='assistant'){closeModal();await openCashTable();return}
+  await roleOpenOwn();
+  await openCabinetFinance(state.selectedDate,target==='cash'?'cash':'earnings');
+}
+// Events
+qs('#cashBtn')''')
+    return html.replace('</head>', '''<style id="four-cabinet-style">
+body.role-navigation-enabled{padding-bottom:calc(70px + var(--safe-bottom))}
+.role-navigation-enabled .bottom-nav,.role-navigation-enabled #cashBtn{display:none!important}
+.role-navigation{display:grid;grid-template-columns:repeat(var(--role-columns),minmax(0,1fr));position:fixed;z-index:30;left:0;right:0;bottom:0;height:calc(64px + var(--safe-bottom));padding-bottom:var(--safe-bottom);border-top:1px solid var(--line);background:var(--bg)}
+.role-navigation button{min-width:0;border:0;background:transparent;color:var(--muted);padding:7px 1px;cursor:pointer}
+.role-navigation button.active{color:var(--gold)}.role-nav-icon{height:27px;display:flex;align-items:center;justify-content:center;font-size:23px}.role-nav-icon svg{width:23px;height:23px}.role-ruble{font-size:26px;font-weight:500}
+.role-navigation small{display:block;font-size:10px;font-weight:600;white-space:nowrap}
+.role-own-orders{margin:4px 0 12px;font-size:13px}.role-own-orders[hidden]{display:none}
+.cabinet-role-select{max-width:210px;min-height:34px;padding:4px 6px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--text);font-size:12px}
+</style></head>''',1)
+
+
+INLINE_INDEX_HTML = _four_cabinets_html(INLINE_INDEX_HTML)
+
+
+class OwnerManagedBlock(Base):
+    __tablename__ = 'owner_managed_blocks'
+    tg_id = Column(BigInteger, primary_key=True)
+
+
+class OwnerEmployeeGroup(Base):
+    __tablename__ = 'owner_employee_groups'
+    employee_id = Column(Integer, primary_key=True)
+    group_code = Column(String(20), nullable=False)
+
+
+class OwnerBotSnapshot(Base):
+    __tablename__ = 'owner_bot_snapshot'
+    id = Column(Integer, primary_key=True)
+    payload = Column(String, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class OwnerManagementCommand(Base):
+    __tablename__ = 'owner_management_commands'
+    id = Column(String(32), primary_key=True)
+    owner_id = Column(BigInteger, nullable=False)
+    payload = Column(String, nullable=False)
+    status = Column(String(20), nullable=False, default='queued')
+    result = Column(String, nullable=False, default='{}')
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    lease_until = Column(DateTime, nullable=True)
+
+
+class OwnerBotOptions(BaseModel):
+    first_summary: str = Field(pattern=r'^([01]\d|2[0-3]):[0-5]\d$')
+    second_summary: str = Field(pattern=r'^([01]\d|2[0-3]):[0-5]\d$')
+    automatic_summaries: StrictBool
+    reminder_minutes: StrictInt = Field(ge=1, le=240)
+    cash_summary_hour: StrictInt = Field(ge=0, le=23)
+
+
+class OwnerManagementInput(BaseModel):
+    request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    action: Literal['cash_connect','cash_disconnect','cash_check','block','unblock','settings','staff_sync','profile_sync']
+    employee_id: StrictInt | None = None
+    chat_id: StrictInt | None = None
+    options: OwnerBotOptions | None = None
+
+
+class OwnerGroupInput(BaseModel):
+    group_code: Literal['brigadier','main','cashless','reserve']
+
+
+def require_management_owner(db, user):
+    if not _is_cabinet_owner(db, user.id):
+        raise HTTPException(403, 'Управление доступно только владельцу')
+
+
+@app.get('/api/owner/management')
+def owner_management(db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    require_management_owner(db, user)
+    snapshot = db.get(OwnerBotSnapshot, 1)
+    data = json.loads(snapshot.payload) if snapshot else {}
+    employees = list_employees(None, db, user)
+    active_ids = {e['id'] for e in employees}
+    for employee in db.scalars(select(Employee).where(_visible_employee(), Employee.tg_id.in_(select(OwnerManagedBlock.tg_id)))):
+        if employee.id not in active_ids:
+            employees.append({**_employee_dict(employee), 'cabinet_access':cabinet_access_info(db,employee)})
+    return JSONResponse({'employees': employees, 'bot': data,
+        'bot_online': bool(snapshot and datetime.utcnow()-snapshot.updated_at < timedelta(seconds=120)),
+        'updated_at': snapshot.updated_at.isoformat() if snapshot else None},
+        headers={'Cache-Control':'private, no-store'})
+
+
+@app.post('/api/owner/management/actions')
+def owner_management_submit(data: OwnerManagementInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    require_management_owner(db, user)
+    previous = db.get(OwnerManagementCommand, data.request_id)
+    payload = data.model_dump(exclude={'request_id'})
+    if previous:
+        original = json.loads(previous.payload)
+        original.pop('tg_id', None)
+        if previous.owner_id != user.id or original != payload:
+            raise HTTPException(409, 'Запрос уже использован')
+        return {'id':previous.id,'status':previous.status,**json.loads(previous.result)}
+    if data.employee_id is not None:
+        employee = db.scalar(select(Employee).where(Employee.id == data.employee_id, _visible_employee()))
+        if not employee or not employee.tg_id or (not employee.active and not (data.action=='unblock' and db.get(OwnerManagedBlock,employee.tg_id))):
+            raise HTTPException(409, 'Нужен зарегистрированный активный сотрудник')
+        payload['tg_id'] = int(employee.tg_id)
+        if data.action in {'block','unblock'} and employee.tg_id == user.id:
+            raise HTTPException(409, 'Свой аккаунт заблокировать нельзя')
+        if data.action.startswith('cash_') and (employee.group_code != 'brigadier' or not cabinet_can_cash(db, employee.tg_id)):
+            raise HTTPException(409, 'Сначала назначьте кассовый кабинет бригадиру')
+    elif data.action in {'cash_connect','cash_disconnect','cash_check','block','unblock','profile_sync'}:
+        raise HTTPException(422, 'Выберите сотрудника')
+    if data.action == 'cash_connect' and (data.chat_id is None or data.chat_id >= 0):
+        raise HTTPException(422, 'Выберите групповой чат кассы')
+    if data.action == 'settings':
+        if data.options is None or data.options.first_summary >= data.options.second_summary:
+            raise HTTPException(422, 'Вторая сводка должна быть позже первой')
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    snapshot = db.get(OwnerBotSnapshot, 1)
+    if not snapshot or datetime.utcnow()-snapshot.updated_at >= timedelta(seconds=120):
+        raise HTTPException(409, 'Бот не на связи. Проверьте запуск bot.py и повторите позже')
+    db.add(OwnerManagementCommand(id=data.request_id, owner_id=user.id, payload=encoded))
+    try:db.commit()
+    except IntegrityError:
+        db.rollback()
+        previous = db.get(OwnerManagementCommand, data.request_id)
+        if not previous or previous.owner_id != user.id or previous.payload != encoded:
+            raise HTTPException(409, 'Конфликт повторного запроса')
+        return {'id':previous.id,'status':previous.status,**json.loads(previous.result)}
+    return {'id':data.request_id,'status':'queued'}
+
+
+@app.get('/api/owner/management/actions/{request_id}')
+def owner_management_status(request_id: str, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    require_management_owner(db, user)
+    command = db.get(OwnerManagementCommand, request_id)
+    if not command or command.owner_id != user.id:
+        raise HTTPException(404, 'Действие не найдено')
+    return JSONResponse({'id':command.id,'status':command.status,**json.loads(command.result)},headers={'Cache-Control':'no-store'})
+
+
+@app.put('/api/owner/management/employees/{employee_id}/group')
+def owner_employee_group(employee_id: int, data: OwnerGroupInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    require_management_owner(db, user)
+    employee = db.scalar(select(Employee).where(Employee.id == employee_id, Employee.active.is_(True), _visible_employee()))
+    if not employee or employee.tg_id == user.id:
+        raise HTTPException(409, 'Этот состав изменить нельзя')
+    override = db.get(OwnerEmployeeGroup, employee_id)
+    if override is None:db.add(OwnerEmployeeGroup(employee_id=employee_id,group_code=data.group_code))
+    else:override.group_code=data.group_code
+    employee.group_code=data.group_code
+    db.commit()
+    return {'ok':True}
+
+
+@app.post('/api/owner/management/employees')
+def owner_employee_add(data: EmployeeSync, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    require_management_owner(db, user)
+    if not data.full_name.strip() or not data.metro.strip() or not data.phone.strip():
+        raise HTTPException(422, 'Укажите имя, метро и телефон')
+    if data.tg_id is not None and (data.tg_id <= 0 or db.scalar(select(Employee.id).where(Employee.tg_id == data.tg_id)) is not None):
+        raise HTTPException(409, 'Этот Telegram-аккаунт уже есть в списке или ID неверный')
+    if data.tg_id in HIDDEN_TG_IDS or (data.tg_id and db.get(OwnerManagedBlock, data.tg_id)):
+        raise HTTPException(409, 'Этот аккаунт исключён или заблокирован')
+    if not 7 <= len(_reference_phone(data.phone)) <= 15:
+        raise HTTPException(422, 'Укажите корректный телефон')
+    if any(_reference_phone(e.phone) == _reference_phone(data.phone) for e in db.scalars(select(Employee))):
+        raise HTTPException(409, 'Этот телефон уже есть в списке')
+    employee=Employee(tg_id=data.tg_id,full_name=data.full_name.strip(),metro=data.metro.strip(),
+        phone=brigadier_phone8(data.phone),telegram_username=data.telegram_username.strip().lstrip('@'),
+        group_code=data.group_code,height_cm=data.height_cm,has_car=data.has_car,is_cashier=False,active=True)
+    db.add(employee);db.commit()
+    return _employee_dict(employee)
+
+
+@app.post('/api/bot/owner-management/snapshot', dependencies=[Depends(_bot_key)])
+def owner_bot_snapshot(data: dict, db: Session = Depends(get_db)):
+    config=db.get(OwnerCabinetConfig,1)
+    if not config or data.get('owner_id') != config.owner_tg_id:
+        raise HTTPException(403,'Владелец изменён')
+    encoded=json.dumps(data,ensure_ascii=False)
+    if len(encoded)>500000:raise HTTPException(413,'Слишком много настроек')
+    snapshot=db.get(OwnerBotSnapshot,1)
+    if snapshot is None:db.add(OwnerBotSnapshot(id=1,payload=encoded))
+    else:snapshot.payload=encoded;snapshot.updated_at=datetime.utcnow()
+    blocked={int(x['tg_id']) for x in data.get('blocked',[]) if int(x['tg_id']) != config.owner_tg_id}
+    for row in db.scalars(select(OwnerManagedBlock)):
+        if row.tg_id not in blocked:db.delete(row)
+    for uid in blocked:
+        if db.get(OwnerManagedBlock,uid) is None:db.add(OwnerManagedBlock(tg_id=uid))
+    db.commit();return {'ok':True}
+
+
+@app.post('/api/bot/owner-management/claim', dependencies=[Depends(_bot_key)])
+def owner_management_claim(db: Session = Depends(get_db)):
+    now=datetime.utcnow()
+    command=db.scalar(select(OwnerManagementCommand).where(or_(OwnerManagementCommand.status=='queued',
+        and_(OwnerManagementCommand.status=='running',OwnerManagementCommand.lease_until<now)))
+        .order_by(OwnerManagementCommand.created_at).with_for_update(skip_locked=True).limit(1))
+    if not command:return {'job':None}
+    if not _is_cabinet_owner(db,command.owner_id):
+        command.status='error';command.result=json.dumps({'error':'Владелец изменён'});db.commit();return {'job':None}
+    command.status='running';command.lease_until=now+timedelta(minutes=5);db.commit()
+    return {'job':{'id':command.id,'owner_id':command.owner_id,**json.loads(command.payload)}}
+
+
+@app.post('/api/bot/owner-management/result', dependencies=[Depends(_bot_key)])
+def owner_management_finish(data: dict, db: Session = Depends(get_db)):
+    command=db.get(OwnerManagementCommand,str(data.get('id','')))
+    if not command or data.get('status') not in {'done','error'}:raise HTTPException(422,'Неизвестное действие')
+    if command.status in {'done','error'}:return {'ok':True}
+    payload=json.loads(command.payload)
+    if data['status']=='done' and payload.get('action')=='unblock' and _is_cabinet_owner(db,command.owner_id):
+        employee=db.get(Employee,payload.get('employee_id'))
+        if employee and employee.tg_id==payload.get('tg_id') and employee.tg_id not in HIDDEN_TG_IDS:
+            employee.active=True
+    command.status=data['status'];command.result=json.dumps(data.get('result') or {},ensure_ascii=False)
+    command.lease_until=None;db.commit();return {'ok':True}
+
+
+@app.get('/api/bot/owner-management/employees/{employee_id}', dependencies=[Depends(_bot_key)])
+def owner_bot_employee(employee_id: int, db: Session = Depends(get_db)):
+    employee=db.scalar(select(Employee).where(Employee.id==employee_id,_visible_employee()))
+    if not employee:raise HTTPException(404,'Сотрудник не найден')
+    return _employee_dict(employee)
+
+
+def _owner_management_html(html):
+    def replace(old,new):
+        nonlocal html
+        if html.count(old)!=1:raise ValueError('Owner settings UI anchor missing: '+old[:90])
+        html=html.replace(old,new,1)
+    replace("if(kind==='owner')return [orders,staff,{key:'tables',title:'Мои таблицы',icon:()=>'<span>💰</span>'},readiness];",
+        "if(kind==='owner')return [orders,staff,{key:'tables',title:'Мои таблицы',icon:()=>'<span>💰</span>'},readiness,{key:'management',title:'Управление',icon:()=>'<span>⚙</span>'}];")
+    replace("if(target==='orders'){await roleActivateView('ordersView');return}",
+        "if(target==='management'){await roleActivateView('ownerManagementView');return}\n  if(target==='orders'){await roleActivateView('ordersView');return}")
+    replace('  const v = currentViewId();', """  const v = currentViewId();
+  document.body.classList.toggle('management-open',v==='ownerManagementView');
+  if(v==='ownerManagementView'){document.body.classList.remove('owner-cabinet-open');qs('.topbar h1').textContent='Управление';return renderOwnerManagement()}""")
+    replace('<section id="controlView" class="view">','<section id="ownerManagementView" class="view"><div id="ownerManagementContent"></div></section>\n<section id="controlView" class="view">')
+    replace('    </nav>','      <button data-view="ownerManagementView" hidden aria-hidden="true"></button>\n    </nav>')
+    replace('async function autoRefresh(){\n  if(document.hidden) return;', "async function autoRefresh(){\n  if(document.hidden||currentViewId()==='ownerManagementView') return;")
+    replace('// Events\nqs(\'#cashBtn\')', r'''
+let ownerManagementSection='home',ownerManagementRequest=0;
+const ownerGroupLabels={brigadier:'Бригадиры',main:'Основной состав',cashless:'Безнал состав',reserve:'Резерв'};
+async function ownerManagementAction(action,employeeId=null,extras={}){
+  if(!state.bootstrap?.can_manage_cabinets)throw Error('Только владелец');
+  const uid=state.bootstrap.user.id,storage='owner-management-pending:'+uid;
+  if(sessionStorage.getItem(storage))throw Error('Сначала нажмите «Проверить последнее действие»');
+  const request_id=crypto.randomUUID().replace(/-/g,'');
+  const intent={request_id,action,...(employeeId===null?{}:{employee_id:Number(employeeId)}),...extras};
+  // Keep intent across a lost HTTP response; a retry never repeats a accepted action.
+  sessionStorage.setItem(storage,JSON.stringify(intent));
+  let result;
+  try{result=await api('/api/owner/management/actions',{method:'POST',body:JSON.stringify(intent)})}
+  catch(e){if(e.status>=400&&e.status<500)sessionStorage.removeItem(storage);throw e}
+  for(let attempt=0;attempt<90;attempt++){
+    if(state.bootstrap?.user?.id!==uid||!state.bootstrap.can_manage_cabinets)throw Error('Доступ изменён');
+    const status=attempt===0?result:await api('/api/owner/management/actions/'+request_id,{cache:'no-store'});
+    if(['done','error'].includes(status.status)){
+      sessionStorage.removeItem(storage);if(status.status==='error')throw Error(status.error||'Действие не выполнено');return status;
+    }
+    await new Promise(resolve=>setTimeout(resolve,1000));
+  }
+  throw Error('Действие ещё выполняется. Нажмите «Проверить последнее действие»; повторно отправлять не нужно.');
+}
+async function ownerManagementPending(){
+  const uid=state.bootstrap?.user?.id,storage='owner-management-pending:'+uid,raw=sessionStorage.getItem(storage);
+  if(!raw)return;
+  const intent=JSON.parse(raw);
+  let status;
+  try{status=await api('/api/owner/management/actions',{method:'POST',body:JSON.stringify(intent)})}
+  catch(e){if(e.status>=400&&e.status<500)sessionStorage.removeItem(storage);await renderOwnerManagement();throw e}
+  if(['done','error'].includes(status.status)){sessionStorage.removeItem(storage);toast(status.error||status.message||'Сохранено',6000)}
+  else toast('Действие ещё выполняется. Обновите через несколько секунд.',5000);
+  await renderOwnerManagement();
+}
+async function renderOwnerManagement(){
+  const root=qs('#ownerManagementContent'),uid=state.bootstrap?.user?.id,request=++ownerManagementRequest;
+  if(!state.bootstrap?.can_manage_cabinets||state.bootstrap.cabinet_kind!=='owner'){root.textContent='Раздел доступен только владельцу';return}
+  root.innerHTML='<p class="muted">Загрузка настроек…</p>';
+  const data=await api('/api/owner/management',{cache:'no-store'});
+  if(request!==ownerManagementRequest||currentViewId()!=='ownerManagementView'||state.bootstrap?.user?.id!==uid)return;
+  const groups=ownerGroupLabels,people=data.employees||[],brigadiers=people.filter(p=>p.group_code==='brigadier'),cash=(data.bot.cash_chats||[]),blocked=new Set((data.bot.blocked||[]).map(p=>Number(p.tg_id)));
+  const label=p=>[String(p.full_name||'').split(' ')[0],p.metro,p.height_cm].filter(Boolean).join(' ');
+  const sections=[['access','Кабинеты и доступы','Подключить · сменить тип · отключить','lock'],['brigadiers','Бригадиры','Добавить · редактировать · назначить кассовым','team'],['cash','Бригадиры и чаты кассы','Подключение чатов и проверка связи','wallet'],['staff','Сотрудники и группы','Добавить · перенести · заблокировать','team'],['bot','Настройки бота','Сверки · уведомления · служебные действия','control']];
+  const heading=sections.find(x=>x[0]===ownerManagementSection)?.[1]||'Управление';
+  root.innerHTML=`${ownerManagementSection==='home'?'':`<button class="cabinet-back" id="managementBack">${cabinetIcon('back')}Управление</button>`}<div class="management-title"><h2>${esc(heading)}</h2><small>${cabinetIcon('lock')} Только вы</small></div><p class="muted management-status">${data.bot_online?'Бот на связи':'Нет связи с ботом — проверьте запуск bot.py'}</p>${sessionStorage.getItem('owner-management-pending:'+uid)?'<button class="cabinet-secondary" id="managementPending">Проверить последнее действие</button>':''}<div id="managementBody"></div>`;
+  if(qs('#managementBack'))qs('#managementBack').onclick=()=>{ownerManagementSection='home';renderOwnerManagement().catch(e=>toast(e.message))};
+  if(qs('#managementPending'))qs('#managementPending').onclick=()=>ownerManagementPending().catch(e=>toast(e.message,6000));
+  const body=qs('#managementBody');
+  const perform=async(button,action,eid=null,extras={})=>{if(button.disabled)return;button.disabled=true;const text=button.textContent;button.textContent='Выполняется…';try{const result=await ownerManagementAction(action,eid,extras);toast(result.message||'Сохранено',6000);if(currentViewId()==='ownerManagementView')await renderOwnerManagement();return true}catch(e){toast(e.message,6000);if(currentViewId()==='ownerManagementView'&&sessionStorage.getItem('owner-management-pending:'+uid)&&!qs('#managementPending')){const pending=document.createElement('button');pending.id='managementPending';pending.className='cabinet-secondary';pending.textContent='Проверить последнее действие';pending.onclick=()=>ownerManagementPending().catch(e=>toast(e.message,6000));body.before(pending)}return false}finally{if(button.isConnected){button.disabled=false;button.textContent=text}}};
+  if(ownerManagementSection==='home'){
+    body.innerHTML=`<p class="muted">Все настройки и действия в одном месте</p><div class="management-menu">${sections.map(([key,title,subtitle,icon])=>`<button type="button" data-management-section="${key}">${cabinetIcon(icon)}<span><b>${title}</b><small>${subtitle}</small></span>${cabinetIcon('chevron')}</button>`).join('')}</div>`;
+    qsa('[data-management-section]',body).forEach(button=>button.onclick=()=>{ownerManagementSection=button.dataset.managementSection;renderOwnerManagement().catch(e=>toast(e.message))});return;
+  }
+  if(['access','brigadiers','staff'].includes(ownerManagementSection)){
+    const directory=ownerManagementSection==='staff'?people:brigadiers;
+    body.innerHTML=`${ownerManagementSection==='access'?'':'<button class="cabinet-primary" id="managementAdd">＋ Добавить сотрудника</button>'}<input id="managementSearch" class="search" placeholder="Поиск по имени и метро"><div id="managementPeople"></div>`;
+    function draw(){
+      const search=qs('#managementSearch').value.toLocaleLowerCase('ru');
+      qs('#managementPeople').innerHTML=directory.filter(p=>label(p).toLocaleLowerCase('ru').includes(search)).map(p=>`<article class="management-person"><h3>${esc(label(p))}</h3><p>${esc(groups[p.group_code])}${blocked.has(Number(p.tg_id))?' · 🚫 Заблокирован':''}</p>${ownerManagementSection==='access'?cabinetAccessButton(p):`<div class="management-actions"><button class="cabinet-secondary" data-management-edit="${p.id}">Изменить</button>${p.tg_id&&p.group_code==='brigadier'?`<button class="cabinet-secondary" data-management-sync="${p.id}">Синхронизировать профиль</button>`:''}${ownerManagementSection==='staff'&&p.tg_id!==uid?`<button class="cabinet-secondary" data-management-move="${p.id}">Изменить состав</button>${p.tg_id?`<button class="cabinet-secondary" data-management-block="${p.id}" data-is-blocked="${blocked.has(Number(p.tg_id))?'1':'0'}">${blocked.has(Number(p.tg_id))?'Снять блокировку':'Заблокировать'}</button>`:''}`:''}</div>${cabinetAccessButton(p)}`}</article>`).join('')||'<p class="muted">Сотрудники не найдены</p>';
+      wireCabinetAccessButtons(qs('#managementPeople'));
+      qsa('[data-management-edit]',body).forEach(button=>button.onclick=()=>{const p=directory.find(x=>x.id===Number(button.dataset.managementEdit));openEmployeeProfile(p,()=>renderOwnerManagement())});
+      qsa('[data-management-sync]',body).forEach(button=>button.onclick=()=>perform(button,'profile_sync',Number(button.dataset.managementSync)));
+      qsa('[data-management-block]',body).forEach(button=>button.onclick=()=>{const block=button.dataset.isBlocked!=='1';if(confirm(block?'Заблокировать доступ сотрудника к боту и кабинету? Из Telegram-групп он не удаляется.':'Снять блокировку сотрудника?'))perform(button,block?'block':'unblock',Number(button.dataset.managementBlock))});
+      qsa('[data-management-move]',body).forEach(button=>button.onclick=()=>{
+        const p=directory.find(x=>x.id===Number(button.dataset.managementMove));
+        showModal('Изменить состав',`<form id="managementMoveForm" class="cabinet-native-form"><p>${esc(label(p))}</p><label>Состав в списке<select name="group_code">${Object.entries(groups).map(([key,title])=>`<option value="${key}" ${p.group_code===key?'selected':''}>${title}</option>`).join('')}</select></label><p class="muted">Меняет состав в учёте приложения. В Telegram-группу сотрудник вступает отдельно.</p><button class="cabinet-primary">Сохранить</button></form>`);
+        qs('#managementMoveForm').onsubmit=async event=>{event.preventDefault();const form=event.currentTarget;qs('button',form).disabled=true;try{await api('/api/owner/management/employees/'+p.id+'/group',{method:'PUT',body:JSON.stringify({group_code:new FormData(form).get('group_code')})});closeModal();await renderOwnerManagement()}catch(e){toast(e.message);qs('button',form).disabled=false}};
+      });
+    }
+    qs('#managementSearch').oninput=draw;draw();
+    body.addEventListener('cabinet-access-changed',event=>{const p=directory.find(x=>x.id===event.detail.id);if(p)p.cabinet_access=event.detail.access});
+    if(qs('#managementAdd'))qs('#managementAdd').onclick=()=>ownerManagementAdd(ownerManagementSection==='brigadiers'?'brigadier':'main');
+    return;
+  }
+  if(ownerManagementSection==='cash'){
+    const cashiers=brigadiers.filter(p=>p.cabinet_access?.active&&['assistant','cashier','owner'].includes(p.cabinet_access.kind));
+    body.innerHTML=`<p class="muted">Кассовых бригадиров: ${cashiers.length} · Подключённых чатов: ${cash.length}</p><p class="muted">Добавьте бота в отдельную группу кассы — она появится в выборе чата. При замене новые записи пойдут в новый чат; прежние сообщения останутся в старом.</p>${cashiers.map(p=>{const chat=cash.find(c=>Number(c.brigadier_tg_id)===Number(p.tg_id));return `<article class="management-person"><h3>${esc(label(p))}</h3><p>${esc(chat?.title||'Чат не подключён')}${chat?' · '+esc(chat.chat_id):''}</p><div class="management-actions"><button class="cabinet-secondary" data-management-connect="${p.id}">${chat?'Заменить чат':'Подключить чат'}</button>${chat?`<button class="cabinet-secondary" data-management-check="${p.id}">Проверить связь</button><button class="cabinet-secondary" data-management-disconnect="${p.id}">Отключить чат</button>`:''}</div></article>`}).join('')||'<p>Сначала назначьте кассовый кабинет в разделе «Кабинеты и доступы».</p>'}`;
+    qsa('[data-management-connect]',body).forEach(button=>button.onclick=()=>{
+      showModal('Подключить чат кассы',`<form id="managementCashForm" class="cabinet-native-form"><label>Группа<select name="known_chat"><option value="">Выберите чат</option>${(data.bot.known_chats||[]).map(c=>`<option value="${c.chat_id}">${esc(c.title)} · ${c.chat_id}</option>`).join('')}</select></label><label>Или ID группы<input name="chat_id" inputmode="numeric" placeholder="−100…"></label><p class="muted">Бот должен состоять в группе, а вы — быть её администратором.</p><button class="cabinet-primary">Подключить</button></form>`);
+      qs('#managementCashForm').onsubmit=async event=>{event.preventDefault();const form=event.currentTarget,values=new FormData(form),id=Number(values.get('chat_id')||values.get('known_chat'));if(!Number.isSafeInteger(id)||id>=0){toast('Выберите групповой чат');return}const ok=await perform(qs('button',form),'cash_connect',Number(button.dataset.managementConnect),{chat_id:id});if(ok&&currentViewId()==='ownerManagementView')closeModal()};
+    });
+    qsa('[data-management-check]',body).forEach(button=>button.onclick=()=>perform(button,'cash_check',Number(button.dataset.managementCheck)));
+    qsa('[data-management-disconnect]',body).forEach(button=>button.onclick=()=>{if(confirm('Отключить чат? История кассы останется в таблице.'))perform(button,'cash_disconnect',Number(button.dataset.managementDisconnect))});return;
+  }
+  const options=data.bot.options||{first_summary:'14:00',second_summary:'18:00',automatic_summaries:true,reminder_minutes:10,cash_summary_hour:23};
+  body.innerHTML=`<form id="managementBotForm" class="cabinet-native-form"><label>Первая автоматическая сводка<input type="time" name="first_summary" value="${esc(options.first_summary)}" required></label><label>Вторая автоматическая сводка<input type="time" name="second_summary" value="${esc(options.second_summary)}" required></label><label><input type="checkbox" name="automatic_summaries" ${options.automatic_summaries?'checked':''}> Автоматические сводки включены</label><label>Напоминание о новом заказе, минут<input type="number" name="reminder_minutes" min="1" max="240" value="${options.reminder_minutes}" required></label><label>Час итогов кассы за половину месяца<input type="number" name="cash_summary_hour" min="0" max="23" value="${options.cash_summary_hour}" required></label><p class="muted">Время московское. Настройки сохраняются после перезапуска бота.</p><button class="cabinet-primary" ${data.bot_online?'':'disabled'}>Сохранить настройки</button></form><button class="cabinet-secondary management-sync" id="managementSync">Синхронизировать сотрудников, заказы и кассу</button>`;
+  qs('#managementBotForm').onsubmit=async event=>{event.preventDefault();const form=event.currentTarget,values=new FormData(form),settings={first_summary:values.get('first_summary'),second_summary:values.get('second_summary'),automatic_summaries:values.has('automatic_summaries'),reminder_minutes:Number(values.get('reminder_minutes')),cash_summary_hour:Number(values.get('cash_summary_hour'))};await perform(qs('button',form),'settings',null,{options:settings})};
+  qs('#managementSync').onclick=()=>perform(qs('#managementSync'),'staff_sync');
+}
+function ownerManagementAdd(group){
+  showModal('Добавить сотрудника',`<form id="managementAddForm" class="cabinet-native-form"><label>Имя<input name="full_name" required maxlength="100"></label><label>Метро<input name="metro" required maxlength="100"></label><label>Рост, см<input name="height_cm" type="number" min="150" max="220" required></label><label>Телефон<input name="phone" type="tel" required></label><label>Telegram username<input name="telegram_username" placeholder="Без @"></label><label>Telegram ID<input name="tg_id" inputmode="numeric" placeholder="Если известен"></label><label>Состав<select name="group_code">${Object.entries(ownerGroupLabels).map(([key,title])=>`<option value="${key}" ${key===group?'selected':''}>${title}</option>`).join('')}</select></label><p class="muted">Без Telegram ID сотрудник появится в списке. Для подключения кабинета нужен его зарегистрированный Telegram-аккаунт.</p><button class="cabinet-primary">Добавить</button></form>`);
+  qs('#managementAddForm').onsubmit=async event=>{
+    event.preventDefault();const form=event.currentTarget,values=new FormData(form),submit=qs('button',form);submit.disabled=true;
+    const employee=Object.fromEntries(values);employee.height_cm=Number(employee.height_cm);employee.tg_id=employee.tg_id?Number(employee.tg_id):null;
+    try{await api('/api/owner/management/employees',{method:'POST',body:JSON.stringify(employee)});closeModal();await renderOwnerManagement();toast('Сотрудник добавлен. Для бригадира с Telegram ID нажмите «Синхронизировать профиль».',6000)}catch(e){toast(e.message,6000);submit.disabled=false}
+  };
+}
+// Events
+qs('#cashBtn')''')
+    return html.replace('</head>', '''<style id="owner-management-style">
+.management-open #dateStrip,.management-open #summary,.management-open #roleOwnOrders{display:none!important}
+#ownerManagementContent{max-width:680px;margin:auto;padding-bottom:16px}.management-title{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.management-title h2{font-size:24px;margin:12px 0}.management-title small{display:flex;gap:5px;color:var(--gold);align-items:center}.management-title small svg{width:16px;height:16px}
+.management-status{font-size:12px}.management-menu{display:grid;gap:12px;margin-top:18px}.management-menu>button{display:flex;align-items:center;gap:14px;width:100%;padding:18px 14px;border:1px solid var(--line);border-radius:18px;background:var(--panel);color:var(--text);text-align:left}.management-menu>button>svg:first-child{width:30px;height:30px;color:var(--gold);flex-shrink:0}.management-menu>button>svg:last-child{margin-left:auto;flex-shrink:0}.management-menu b{display:block;font-size:16px}.management-menu small{display:block;color:var(--muted);font-size:12px;margin-top:6px}
+.management-person{padding:14px;margin:12px 0;border:1px solid var(--line);border-radius:14px;background:var(--panel)}.management-person h3{font-size:16px;margin:0 0 6px}.management-person p{font-size:12px;color:var(--muted)}.management-actions{display:flex;gap:8px;flex-wrap:wrap}.management-actions button{font-size:12px}.management-sync{margin-top:16px;width:100%}#managementSearch{width:100%;margin:14px 0}
+</style></head>''',1)
+
+
+INLINE_INDEX_HTML = _owner_management_html(INLINE_INDEX_HTML)
