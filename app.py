@@ -185,6 +185,9 @@ def _startup_migrations():
         if "category" not in earnings_cols:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE cabinet_earnings_days ADD COLUMN category VARCHAR(20) NULL"))
+        if "second_category" not in earnings_cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE cabinet_earnings_days ADD COLUMN second_category VARCHAR(20) NULL"))
     # A combined Telegram message can close several orders and be replaced.
     # Keep the old table intact while copying its records into the new schema.
     if inspector.has_table("number_card_closures"):
@@ -7034,6 +7037,7 @@ class CabinetEarningsDay(Base):
     salary = Column(Integer, nullable=True)
     tea = Column(Integer, nullable=True)
     category = Column(String(20), nullable=True)
+    second_category = Column(String(20), nullable=True)
     version = Column(Integer, nullable=False, default=1)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -7061,6 +7065,7 @@ class CabinetEarningsInput(BaseModel):
     salary: StrictInt | None = Field(default=None, ge=0, le=10000000)
     tea: StrictInt | None = Field(default=None, ge=0, le=10000000)
     category: Literal['standard','vip','elite'] | None = None
+    second_category: Literal['standard','vip','elite'] | None = None
     version: StrictInt = Field(ge=0)
 
 
@@ -7181,6 +7186,7 @@ def cabinet_earnings_dict(day, row):
     tea = row.tea if row else None
     return {'work_date': day.isoformat(), 'salary': salary, 'tea': tea,
         'category': row.category if row else None,
+        'second_category': row.second_category if row else None,
         'total': (salary or 0) + (tea or 0), 'version': row.version if row else 0}
 
 
@@ -7189,9 +7195,12 @@ def cabinet_earnings_save(work_date: date, data: CabinetEarningsInput,
         db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     cabinet_finance_access(db, user.id)
     row = db.get(CabinetEarningsDay, (user.id, work_date))
-    # Older clients omit the category; preserve any choice already made for this day.
+    # Older clients omit category fields; preserve the choices made for this day.
     values = {'salary': data.salary, 'tea': data.tea,
-        'category': data.category if 'category' in data.model_fields_set else (row.category if row else None)}
+        'category': data.category if 'category' in data.model_fields_set else (row.category if row else None),
+        'second_category': data.second_category if 'second_category' in data.model_fields_set else (row.second_category if row else None)}
+    if values['second_category'] is not None and values['category'] is None:
+        raise HTTPException(422, 'Выберите категорию первого заказа')
     # An identical retry is safe, even if the first response was lost.
     if row and all(getattr(row, field) == value for field, value in values.items()):
         return cabinet_earnings_dict(work_date, row)
@@ -7908,23 +7917,26 @@ def _cabinet_earnings_categories_html(html):
             raise ValueError('Cabinet earnings category UI anchor missing: ' + old[:90])
         html = html.replace(old, new, 1)
     replace('row.tea=draft.tea;row.version=draft.version;',
-        "row.tea=draft.tea;if(Object.prototype.hasOwnProperty.call(draft,'category'))row.category=draft.category;row.version=draft.version;")
+        "row.tea=draft.tea;for(const field of ['category','second_category'])if(Object.prototype.hasOwnProperty.call(draft,field))row[field]=draft[field];row.version=draft.version;")
     replace('    const amount=value=>value===null',
-        "    const categoryLabels={standard:'Стандарт',vip:'ВИП',elite:'ЭЛИТ'};\n    const amount=value=>value===null")
+        """    const categoryLabels={standard:'Стандарт',vip:'ВИП',elite:'ЭЛИТ'},categoryShort={standard:'СТ',vip:'ВИП',elite:'ЭЛ'};
+    const categoryText=row=>row.second_category?categoryShort[row.category]+' + '+categoryShort[row.second_category]:categoryLabels[row.category]||'—';
+    const categoryDescription=row=>row.second_category?'Первый заказ: '+categoryLabels[row.category]+'; второй заказ: '+categoryLabels[row.second_category]:categoryLabels[row.category]||'не выбрана';
+    const amount=value=>value===null""")
     replace('const valid=row=>!Number.isNaN(amount(row.salary))&&!Number.isNaN(amount(row.tea));',
-        "const valid=row=>(row.category==null||Object.prototype.hasOwnProperty.call(categoryLabels,row.category))&&!Number.isNaN(amount(row.salary))&&!Number.isNaN(amount(row.tea));")
+        "const valid=row=>(row.category==null||Object.prototype.hasOwnProperty.call(categoryLabels,row.category))&&(row.second_category==null||(row.category!=null&&Object.prototype.hasOwnProperty.call(categoryLabels,row.second_category)))&&!Number.isNaN(amount(row.salary))&&!Number.isNaN(amount(row.tea));")
     replace('JSON.stringify({salary:row.salary,tea:row.tea,version:row.version})',
-        'JSON.stringify({salary:row.salary,tea:row.tea,category:row.category??null,version:row.version})')
+        'JSON.stringify({salary:row.salary,tea:row.tea,category:row.category??null,second_category:row.second_category??null,version:row.version})')
     replace('return {salary:amount(row.salary),tea:amount(row.tea),version:row.version}',
-        'return {salary:amount(row.salary),tea:amount(row.tea),category:row.category??null,version:row.version}')
+        'return {salary:amount(row.salary),tea:amount(row.tea),category:row.category??null,second_category:row.second_category??null,version:row.version}')
     replace('row.dirty=latest.salary!==values.salary||latest.tea!==values.tea;',
-        'row.dirty=latest.salary!==values.salary||latest.tea!==values.tea||latest.category!==values.category;')
+        'row.dirty=latest.salary!==values.salary||latest.tea!==values.tea||latest.category!==values.category||latest.second_category!==values.second_category;')
     replace('Есть изменения. Сохраняем при выходе из поля…', 'Есть несохранённые изменения…')
     replace("${hasAllowance?'<colgroup><col style=\"width:12%\"><col style=\"width:23%\"><col style=\"width:23%\"><col style=\"width:23%\"><col style=\"width:19%\"></colgroup>':'<colgroup><col style=\"width:16%\"><col style=\"width:30%\"><col style=\"width:30%\"><col style=\"width:24%\"></colgroup>'}",
         "${hasAllowance?'<colgroup><col style=\"width:10%\"><col style=\"width:20%\"><col style=\"width:18%\"><col style=\"width:16%\"><col style=\"width:19%\"><col style=\"width:17%\"></colgroup>':'<colgroup><col style=\"width:12%\"><col style=\"width:22%\"><col style=\"width:22%\"><col style=\"width:22%\"><col style=\"width:22%\"></colgroup>'}")
     replace('<th scope="col">Дата</th><th scope="col">Оклад</th>',
         '<th scope="col">Дата</th><th scope="col">Категория</th><th scope="col">Оклад</th>')
-    replace("</th>${['salary','tea'].map(k=>", """</th><td><button type="button" class="cabinet-earnings-category" data-earnings-category="${row.work_date}" aria-haspopup="dialog" aria-label="Категория за ${row.work_date}: ${esc(categoryLabels[row.category]||'не выбрана')}">${esc(categoryLabels[row.category]||'—')}</button></td>${['salary','tea'].map(k=>""")
+    replace("</th>${['salary','tea'].map(k=>", """</th><td><button type="button" class="cabinet-earnings-category" data-earnings-category="${row.work_date}" aria-haspopup="dialog" title="${esc(categoryDescription(row))}" aria-label="Категория за ${row.work_date}: ${esc(categoryDescription(row))}">${esc(categoryText(row))}</button></td>${['salary','tea'].map(k=>""")
     replace('</span><small>Итого</small></th><td data-half-salary="${half}">',
         '</span><small>Итого</small></th><td></td><td data-half-salary="${half}">')
     replace('<th scope="row" title="Всего за месяц">Месяц</th><td id="cabinetSalaryTotal">',
@@ -7932,13 +7944,24 @@ def _cabinet_earnings_categories_html(html):
     replace("        qsa('[data-earnings-day]',body).forEach(input=>{", """        qsa('[data-earnings-category]',body).forEach(button=>button.onclick=()=>{
           if(!active())return;
           const row=rows.get(button.dataset.earningsCategory);
-          showModal('Категория · '+fmtDate(row.work_date),`<div class="cabinet-category-options" role="group" aria-label="Выберите категорию">${Object.entries(categoryLabels).map(([value,label])=>`<button type="button" class="cabinet-secondary" data-category-choice="${value}" aria-pressed="${row.category===value}">${label}${row.category===value?' ✓':''}</button>`).join('')}</div>`);
+          const applySelection=(first,second=null)=>{
+            if(!active()){closeModal();return}
+            row.category=first;row.second_category=second;row.dirty=true;row.error='';remember(row);
+            button.textContent=categoryText(row);button.title=categoryDescription(row);
+            button.setAttribute('aria-label','Категория за '+row.work_date+': '+categoryDescription(row));
+            closeModal();button.focus({preventScroll:true});updateTotals();saveRow(row);
+          };
+          showModal('Категория · '+fmtDate(row.work_date),`<div class="cabinet-category-options" role="group" aria-label="Выберите категорию">${Object.entries({...categoryLabels,two:'Два заказа'}).map(([value,label])=>{const selected=value==='two'?!!row.second_category:!row.second_category&&row.category===value;return `<button type="button" class="cabinet-secondary" data-category-choice="${value}" aria-pressed="${selected}">${label}${selected?' ✓':''}</button>`}).join('')}</div>`);
           qsa('[data-category-choice]',qs('#modal')).forEach(choice=>choice.onclick=()=>{
             if(!active()){closeModal();return}
-            row.category=choice.dataset.categoryChoice;row.dirty=true;row.error='';remember(row);
-            button.textContent=categoryLabels[row.category];
-            button.setAttribute('aria-label','Категория за '+row.work_date+': '+categoryLabels[row.category]);
-            closeModal();button.focus({preventScroll:true});updateTotals();saveRow(row);
+            if(choice.dataset.categoryChoice!=='two'){applySelection(choice.dataset.categoryChoice);return}
+            const options=()=>'<option value="" disabled>Выберите категорию</option>'+Object.entries(categoryLabels).map(([value,label])=>`<option value="${value}">${label}</option>`).join('');
+            showModal('Два заказа · '+fmtDate(row.work_date),`<form id="cabinetTwoOrdersForm" class="cabinet-native-form"><label>Первый заказ<select name="first_category" required aria-label="Категория первого заказа">${options()}</select></label><label>Второй заказ<select name="second_category" required aria-label="Категория второго заказа">${options()}</select></label><p id="cabinetTwoOrdersStatus" role="status" aria-live="polite"></p><button type="submit" class="cabinet-primary cabinet-wide" id="cabinetTwoOrdersSave" disabled>Сохранить категории</button></form>`);
+            const form=qs('#cabinetTwoOrdersForm'),first=qs('[name=first_category]',form),second=qs('[name=second_category]',form),submit=qs('#cabinetTwoOrdersSave',form);
+            first.value=row.category||'';second.value=row.second_category||'';
+            const ready=()=>Object.prototype.hasOwnProperty.call(categoryLabels,first.value)&&Object.prototype.hasOwnProperty.call(categoryLabels,second.value);
+            const update=()=>{submit.disabled=!ready()};first.onchange=update;second.onchange=update;update();
+            form.onsubmit=event=>{event.preventDefault();if(!ready()){qs('#cabinetTwoOrdersStatus',form).textContent='Выберите категорию для обоих заказов';return}applySelection(first.value,second.value)};
           });
         });
         qsa('[data-earnings-day]',body).forEach(input=>{""")
