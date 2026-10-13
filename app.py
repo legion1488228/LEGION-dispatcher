@@ -7840,7 +7840,7 @@ def _assistant_month_earnings_html(html):
     replace("if(kind==='assistant')return [orders,staff,cash,earnings,readiness];",
             "if(kind==='assistant')return [{...readiness,title:'Заказы'},staff,cash,earnings,{key:'own',title:'Личный кабинет',icon:()=>cabinetIcon('user')}];")
     replace("own.hidden=!state.bootstrap.can_use_owner_cabinet||kind!=='assistant'||currentViewId()==='ownerCabinetView';", "own.hidden=true;")
-    replace("const endDay=Number(data.end.slice(8));", "const endDay=Number(data.end.slice(8)),hasAllowance=data.has_allowance===true;panel.classList.toggle('compact-month',hasAllowance);document.body.classList.toggle('compact-month-open',hasAllowance);")
+    replace("const endDay=Number(data.end.slice(8));", "const endDay=Number(data.end.slice(8)),hasAllowance=data.has_allowance===true;panel.classList.add('compact-month');document.body.classList.add('compact-month-open');")
     replace("    const amount=value=>value===null", "    if(hasAllowance)qs('h2',panel).textContent='Заработок Влада';\n    const amount=value=>value===null")
     replace("let salary=0,tea=0;", "let salary=0,tea=0,allowance=0;")
     replace("const halves={1:{salary:0,tea:0},2:{salary:0,tea:0}};", "const halves={1:{salary:0,tea:0,allowance:0},2:{salary:0,tea:0,allowance:0}};")
@@ -7860,10 +7860,16 @@ def _assistant_month_earnings_html(html):
     return html.replace('</head>', """<style id="vlad-compact-month-style">
 .compact-month-open:has(#cabinetFinance.compact-month) .topbar{padding-top:4px;padding-bottom:4px;min-height:32px}
 .compact-month-open:has(#cabinetFinance.compact-month) .topbar h1{font-size:16px}.compact-month-open:has(#cabinetFinance.compact-month) .eyebrow{display:none}
-#cabinetFinance.compact-month{--month-row:clamp(14px,calc((100dvh - 225px)/35),20px)}
+#cabinetFinance.compact-month{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:8px;align-items:center;--month-row:clamp(14px,calc((100dvh - 190px - var(--safe-bottom))/35),20px)}
+#cabinetFinance.compact-month #cabinetFinanceBody{grid-column:1/-1}
+#cabinetFinance.compact-month .cabinet-finance-month{font-size:0;gap:0}
+#cabinetFinance.compact-month .cabinet-finance-month input{width:140px;max-width:100%}
+#cabinetFinance.compact-month .cabinet-cash-date{height:calc(var(--month-row) - 1px);min-height:0;padding:0;font-size:10px;line-height:1}
+#cabinetFinance.compact-month .cabinet-cash-date .cabinet-icon{width:10px;height:10px}
+#cabinetFinance.compact-month .cabinet-cash-details>td{height:auto;white-space:normal;text-align:left;padding:8px;font-size:12px}
 #cabinetFinance.compact-month>.cabinet-back{min-height:20px;margin:0;font-size:10px}
 #cabinetFinance.compact-month h2{font-size:15px;margin:3px 0}
-#cabinetFinance.compact-month .cabinet-finance-month{font-size:10px}
+#cabinetFinance.compact-month .cabinet-finance-month{font-size:0}
 #cabinetFinance.compact-month .cabinet-finance-month input{min-height:24px;padding:2px 4px;font-size:12px}
 #cabinetFinance.compact-month .cabinet-finance-tabs{margin:4px 0;padding:2px}
 #cabinetFinance.compact-month .cabinet-finance-tabs button{min-height:24px;padding:2px;font-size:11px}
@@ -7877,7 +7883,7 @@ def _assistant_month_earnings_html(html):
 #cabinetFinance.compact-month .cabinet-allowance{color:var(--gold);font-weight:700}
 #cabinetFinance.compact-month #cabinetEarningsStatus{font-size:9px;margin:3px 0}
 #cabinetFinance.compact-month #cabinetSaveEarnings{min-height:24px;padding:2px;font-size:10px}
-@supports(-webkit-touch-callout:none){#cabinetFinance.compact-month input[data-earnings-day]:focus{font-size:16px}}
+@supports(-webkit-touch-callout:none){#cabinetFinance.compact-month input[data-earnings-day]:focus{font-size:16px;min-height:26px;height:26px}}
 </style></head>""", 1)
 
 
