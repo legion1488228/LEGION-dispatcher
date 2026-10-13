@@ -6455,7 +6455,7 @@ async function openCabinetFinance(onDate=ownerCabinetData?.today,tab='earnings')
     }
     const endDay=Number(data.end.slice(8));
     const halfLabel=half=>half===1?'1–15':`16–${endDay}`;
-    panel.innerHTML=`<button type="button" class="cabinet-back" id="cabinetFinanceBack">${cabinetIcon('back')}Кабинет бригадира</button><h2>Касса и заработок</h2><label class="cabinet-finance-month">Месяц<input id="cabinetFinanceMonth" type="month" value="${esc(data.start.slice(0,7))}" aria-label="Месяц кассы и заработка"></label><div class="cabinet-finance-tabs" role="tablist"><button type="button" data-finance-tab="earnings" role="tab">Мой заработок</button><button type="button" data-finance-tab="cash" role="tab">Моя касса</button></div><div id="cabinetFinanceBody"></div>`;
+    panel.innerHTML=`<h2>Касса и заработок</h2><label class="cabinet-finance-month">Месяц<input id="cabinetFinanceMonth" type="month" value="${esc(data.start.slice(0,7))}" aria-label="Месяц кассы и заработка"></label><div id="cabinetFinanceBody"></div>`;
     const amount=value=>value===null||value===''?null:/^\d+$/.test(String(value))&&Number(value)<=10000000?Number(value):NaN;
     const valid=row=>!Number.isNaN(amount(row.salary))&&!Number.isNaN(amount(row.tea));
     function remember(row){sessionStorage.setItem(draftKey(row.work_date),JSON.stringify({salary:row.salary,tea:row.tea,version:row.version}))}
@@ -6510,8 +6510,9 @@ async function openCabinetFinance(onDate=ownerCabinetData?.today,tab='earnings')
       for(const row of rows.values())if(!(await saveRow(row))){toast('Не все суммы сохранены. Проверьте таблицу заработка.');return false}
       return active();
     }
+    panel.cabinetFinanceLeave=flush;
     function renderTab(next){
-      if(!active())return;tab=next;
+      if(!active())return;tab=next;panel.dataset.financeTab=tab;qs('h2',panel).textContent=tab==='cash'?'Касса':data.has_allowance?'Заработок Влада':'Заработок';
       qsa('[data-finance-tab]',panel).forEach(b=>{b.classList.toggle('active',b.dataset.financeTab===tab);b.setAttribute('aria-selected',b.dataset.financeTab===tab)});
       const body=qs('#cabinetFinanceBody',panel);
       if(tab==='earnings'){
@@ -6548,11 +6549,10 @@ async function openCabinetFinance(onDate=ownerCabinetData?.today,tab='earnings')
         });
       }
     }
-    qs('#cabinetFinanceBack').onclick=async()=>{if(await flush()){ownerCabinetSelectedCard=null;renderOwnerCabinet(ownerCabinetData)}};
     qs('#cabinetFinanceMonth').onchange=async event=>{const month=event.target.value;if(/^\d{4}-\d{2}$/.test(month)&&await flush())await openCabinetFinance(month+'-01',tab);else event.target.value=data.start.slice(0,7)};
     qsa('[data-finance-tab]',panel).forEach(button=>button.onclick=async()=>{if(button.dataset.financeTab===tab)return;if(await flush())renderTab(button.dataset.financeTab)});
     renderTab(tab);
-  }catch(error){if(active()){panel.innerHTML=`<p role="alert">${esc(error.message)}</p><button type="button" id="cabinetFinanceRetry" class="cabinet-secondary">Повторить</button><button type="button" id="cabinetFinanceBack" class="cabinet-back">Кабинет бригадира</button>`;qs('#cabinetFinanceRetry').onclick=()=>openCabinetFinance(onDate,tab);qs('#cabinetFinanceBack').onclick=()=>renderOwnerCabinet(ownerCabinetData)}}
+  }catch(error){if(active()){panel.innerHTML=`<p role="alert">${esc(error.message)}</p><button type="button" id="cabinetFinanceRetry" class="cabinet-secondary">Повторить</button>`;qs('#cabinetFinanceRetry').onclick=()=>openCabinetFinance(onDate,tab)}}
 }
 
 function cabinetPhotoInfo(c){
@@ -7461,11 +7461,12 @@ async function roleActivateView(id){
 }
 async function roleOpenOwn(){
   if(!state.bootstrap?.can_use_owner_cabinet){toast('Сначала подключите ваш профиль бригадира');return}
-  ownerCabinetSelectedCard=null;await roleActivateView('ownerCabinetView');
+  ownerCabinetSelectedCard=null;ownerCabinetSignature='';qs('#ownerCabinetContent').innerHTML='';await roleActivateView('ownerCabinetView');
 }
 async function roleNavigate(target){
   const kind=state.bootstrap?.cabinet_kind;
   if(!roleNavigationItems(kind).some(item=>item.key===target))return;
+  const finance=qs('#cabinetFinance');if(finance?.cabinetFinanceLeave&&!await finance.cabinetFinanceLeave())return;
   roleNavigationActive=target;updateRoleNavigation();
   const dispatcher=['owner','assistant'].includes(kind);
   if(target==='orders'){await roleActivateView('ordersView');return}
@@ -7473,7 +7474,7 @@ async function roleNavigate(target){
     if(dispatcher){await roleActivateView('employeesView');return}
     await roleOpenOwn();await openCabinetEmployees();return;
   }
-  if(target==='ready'){await roleActivateView(dispatcher?'readinessView':'ownerCabinetView');return}
+  if(target==='ready'){if(dispatcher)await roleActivateView('readinessView');else await roleOpenOwn();return}
   if(target==='tables'){closeModal();await openPersonalTables();return}
   if(target==='cash'&&kind==='assistant'){closeModal();await openCashTable();return}
   await roleOpenOwn();
