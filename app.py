@@ -7422,7 +7422,7 @@ function updateRoleNavigation(){
   qsa('button',nav).forEach(button=>{const selected=button.dataset.roleNav===roleNavigationActive;button.classList.toggle('active',selected);button.setAttribute('aria-current',selected?'page':'false')});
   let own=qs('#roleOwnOrders');
   if(!own){own=document.createElement('button');own.id='roleOwnOrders';own.type='button';own.className='cabinet-secondary role-own-orders';own.textContent='Мои заказы и готовность';qs('main').prepend(own);own.onclick=()=>roleOpenOwn().catch(e=>toast(e.message))}
-  own.hidden=!state.bootstrap.can_use_owner_cabinet||!['owner','assistant'].includes(kind)||currentViewId()==='ownerCabinetView';
+  own.hidden=!state.bootstrap.can_use_owner_cabinet||kind!=='assistant'||currentViewId()==='ownerCabinetView';
 }
 async function roleActivateView(id){
   closeModal();closeDrawer();
@@ -7680,9 +7680,9 @@ def _owner_management_html(html):
         if html.count(old)!=1:raise ValueError('Owner settings UI anchor missing: '+old[:90])
         html=html.replace(old,new,1)
     replace("if(kind==='owner')return [orders,staff,{key:'tables',title:'Мои таблицы',icon:()=>'<span>💰</span>'},readiness];",
-        "if(kind==='owner')return [orders,staff,{key:'tables',title:'Мои таблицы',icon:()=>'<span>💰</span>'},readiness,{key:'management',title:'Управление',icon:()=>'<span>⚙</span>'}];")
+        "if(kind==='owner')return [{...readiness,title:'Заказы'},staff,{key:'tables',title:'Мои таблицы',icon:()=>'<span>💰</span>'},{key:'own',title:'Мой кабинет',icon:()=>cabinetIcon('user')},{key:'management',title:'Управление',icon:()=>'<span>⚙</span>'}];")
     replace("if(target==='orders'){await roleActivateView('ordersView');return}",
-        "if(target==='management'){await roleActivateView('ownerManagementView');return}\n  if(target==='orders'){await roleActivateView('ordersView');return}")
+        "if(target==='own'){await roleOpenOwn();return}\n  if(target==='management'){await roleActivateView('ownerManagementView');return}\n  if(target==='orders'){await roleActivateView('ordersView');return}")
     replace('  const v = currentViewId();', """  const v = currentViewId();
   document.body.classList.toggle('management-open',v==='ownerManagementView');
   if(v==='ownerManagementView'){document.body.classList.remove('owner-cabinet-open');qs('.topbar h1').textContent='Управление';return renderOwnerManagement()}""")
