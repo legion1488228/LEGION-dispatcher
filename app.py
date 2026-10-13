@@ -7997,6 +7997,57 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('Не отписались к 15:3
     "Не отписались к ${esc(c.cutoff_label||'14:00')} · ${no.length}", 1)
 
 
+@app.get('/api/owner/brigade-control')
+def owner_brigade_control(work_date: date, db: Session = Depends(get_db),
+        user: TelegramUser = Depends(require_app_user)):
+    require_management_owner(db, user)
+    cards = db.scalars(select(NumberCardEvent).where(NumberCardEvent.work_date == work_date,
+        NumberCardEvent.source.in_(('private', 'gbu')), NumberCardEvent.tg_id.notin_(HIDDEN_TG_IDS),
+        _visible_number_card())).all()
+    statuses = number_card_statuses(db, cards)
+    contacts = _order_contact_states(db, work_date)
+    cards.sort(key=lambda card: number_card_contact_sort_key(card, statuses))
+    employees = {row.tg_id: row for row in db.scalars(select(Employee).where(
+        Employee.tg_id.in_([card.tg_id for card in cards]), _visible_employee()))} if cards else {}
+    keys = [f'card:{card.chat_id}:{card.message_id}' for card in cards]
+    states = {row.report_key: row for row in db.scalars(select(CabinetOrderState).where(
+        CabinetOrderState.report_key.in_(keys)))} if keys else {}
+    items = []
+    for card, key in zip(cards, keys):
+        row = states.get(key)
+        try:
+            meta = json.loads(row.payload) if row and row.tg_id == card.tg_id else {}
+        except (ValueError, TypeError):
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        photo = effective_order_photo(db, card)
+        employee = employees.get(card.tg_id)
+        required = 2 if card.source == 'gbu' else 1
+        received = int(bool(photo['first_received'])) + (int(bool(photo['second_received'])) if required == 2 else 0)
+        items.append({'id': card.id, 'source': card.source, 'surname': card.surname,
+            'employee': _employee_dict(employee) if employee else {'full_name': card.full_name, 'phone': card.phone},
+            'contact_time': statuses[card.id]['contact_time'], 'on_contact': bool(contacts.get(card.id)),
+            'prepared': bool(meta.get('prepared') or statuses[card.id]['closed']),
+            **photo, 'photos_required': required, 'photos_received': received,
+            'photos_complete': received == required, 'completed': meta.get('tea_received') is True,
+            'tea_amount': meta.get('tea_amount') if meta.get('tea_received') is True else None})
+    totals = {}
+    for source in ('private', 'gbu'):
+        entries = [item for item in items if item['source'] == source]
+        expected = int(_category_counts(db, work_date, source)['total'])
+        totals[source] = {'orders': max(expected, len(entries)), 'cards': len(entries),
+            'on_contact': sum(item['on_contact'] for item in entries),
+            'photos_complete': sum(item['photos_complete'] for item in entries),
+            'first_photos': sum(bool(item['first_received']) for item in entries),
+            'second_photos': sum(bool(item['second_received']) for item in entries),
+            'completed': sum(item['completed'] for item in entries)}
+    totals['all'] = {field: totals['private'][field] + totals['gbu'][field] for field in totals['private']}
+    return JSONResponse({'work_date': work_date.isoformat(), 'items': items, 'totals': totals,
+        'updated_at': datetime.now(MOSCOW).isoformat()},
+        headers={'Cache-Control': 'private, no-store'})
+
+
 # Keep the readiness heading full-width and its actions in two compact rows.
 # Scoped styles preserve the same buttons, handlers and layouts in other views.
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', """<style id="readiness-compact-layout-style">
@@ -8026,3 +8077,82 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', """<style id="readiness
 #employeeReadiness .group-stats b{font-size:15px;line-height:1.3}
 @media(max-width:350px){#employeeReadiness .readiness-actions>button{font-size:11px;padding-left:4px;padding-right:4px}#employeeReadiness #readinessHistoryBtn small{font-size:9px!important}}
 </style></head>""", 1)
+
+
+def _owner_brigade_control_html(html):
+    def replace(old, new):
+        nonlocal html
+        if html.count(old) != 1:
+            raise ValueError('Owner brigade control UI anchor missing: ' + old[:90])
+        html = html.replace(old, new, 1)
+    replace('<button class="icon-btn" id="refreshBtn"', '<button type="button" class="icon-btn owner-management-top" id="ownerManagementTop" aria-label="Управление" title="Управление" hidden>⚙</button><button class="icon-btn" id="refreshBtn"')
+    replace('<section id="ownerManagementView" class="view">', '<section id="ownerBrigadeControlView" class="view"><div id="ownerBrigadeControlContent"></div></section>\n<section id="ownerManagementView" class="view">')
+    replace('<button data-view="ownerManagementView" hidden aria-hidden="true"></button>', '<button data-view="ownerManagementView" hidden aria-hidden="true"></button><button data-view="ownerBrigadeControlView" hidden aria-hidden="true"></button>')
+    replace("{key:'management',title:'Управление',icon:()=>'<span>⚙</span>'}", "{key:'brigadeControl',title:'Контроль',icon:()=>cabinetIcon('control')}")
+    replace("  own.hidden=true;", """  own.hidden=true;
+  const management=qs('#ownerManagementTop'),owner=kind==='owner'&&state.bootstrap.can_manage_cabinets===true;
+  management.hidden=!owner;management.classList.toggle('active',owner&&roleNavigationActive==='management');management.setAttribute('aria-current',owner&&roleNavigationActive==='management'?'page':'false');
+  management.onclick=()=>roleNavigate('management').catch(e=>toast(e.message));
+  if(!owner){ownerBrigadeControlData=null;ownerBrigadeControlIdentity='';qs('#ownerBrigadeControlContent').replaceChildren()}""")
+    replace("  if(!roleNavigationItems(kind).some(item=>item.key===target))return;", "  if(!(target==='management'&&kind==='owner'&&state.bootstrap.can_manage_cabinets===true)&&!roleNavigationItems(kind).some(item=>item.key===target))return;")
+    replace("  if(target==='management'){await roleActivateView('ownerManagementView');return}", "  if(target==='management'){await roleActivateView('ownerManagementView');return}\n  if(target==='brigadeControl'){await roleActivateView('ownerBrigadeControlView');return}")
+    replace("  document.body.classList.toggle('management-open',v==='ownerManagementView');", "  document.body.classList.toggle('management-open',v==='ownerManagementView');\n  document.body.classList.toggle('owner-brigade-control-open',v==='ownerBrigadeControlView');")
+    replace("  if (v==='ordersView') return loadOrders();", "  if(v==='ownerBrigadeControlView')return loadOwnerBrigadeControl();\n  if (v==='ordersView') return loadOrders();")
+    replace("  if(document.hidden||currentViewId()==='ownerManagementView') return;", "  if(document.hidden||currentViewId()==='ownerManagementView') return;\n  if(currentViewId()==='ownerBrigadeControlView'){try{await loadOwnerBrigadeControl()}catch{}return}")
+    replace("function currentViewId() {", r"""let ownerBrigadeControlData=null,ownerBrigadeControlIdentity='',ownerBrigadeControlRequest=0;
+let ownerBrigadeControlSource='all',ownerBrigadeControlStage=null;
+function renderOwnerBrigadeControl(){
+  const root=qs('#ownerBrigadeControlContent'),data=ownerBrigadeControlData;
+  if(!data||currentViewId()!=='ownerBrigadeControlView')return;
+  const open=new Set(qsa('details[open]',root).map(row=>Number(row.dataset.controlCard)));
+  const source=ownerBrigadeControlSource,stage=ownerBrigadeControlStage,totals=data.totals[source];
+  const captions={all:'Все заказы',private:'Частные заказы',gbu:'Заказы ГБУ'};
+  const fields={contact:'on_contact',photo:'photos_complete',done:'completed'};
+  const stages={contact:'Ожидают связи',photo:'Ожидают фото',done:'Ожидают отчёта по чаю'};
+  const items=data.items.filter(item=>(source==='all'||item.source===source)&&(!stage||!item[fields[stage]]));
+  const block=(key,icon,value,label,ready)=>`<div class="bc-stage ${ready?'is-done':''} ${stage===key?'is-focused':''}"><b>${cabinetIcon(icon)}${esc(value)}</b><span>${esc(label)}</span></div>`;
+  root.innerHTML=`<div class="bc-heading"><div><h2>Контроль заказов</h2><p>${esc(fmtDate(data.work_date))}</p></div><label class="bc-date">Дата<input type="date" id="brigadeControlDate" value="${esc(data.work_date)}" aria-label="Дата контроля заказов"></label></div>
+    <div class="bc-counters" role="group" aria-label="Этап контроля">${[['contact','На связи','on_contact'],['photo','Фото получены','photos_complete'],['done','Завершено','completed']].map(([key,label,field])=>`<button type="button" data-brigade-stage="${key}" aria-pressed="${stage===key}"><b>${totals[field]}/${totals.orders}</b><span>${label}</span></button>`).join('')}</div>
+    <div class="bc-sources" role="group" aria-label="Тип заказа">${[['all','Все'],['private','Частные'],['gbu','ГБУ']].map(([key,label])=>`<button type="button" data-brigade-source="${key}" aria-pressed="${source===key}">${label} · ${data.totals[key].orders}</button>`).join('')}</div>
+    <div class="bc-list-caption"><span>${stage?stages[stage]:captions[source]} · ${items.length}</span><span>По времени связи</span></div>
+    ${totals.cards<totals.orders?`<p class="bc-missing">Номера в группе: ${totals.cards}/${totals.orders}. Остальные карточки появятся после отправки номера.</p>`:''}
+    <div class="bc-list">${items.map(card=>{
+      const p=card.employee||{},person=String(p.full_name||'').trim().split(/\s+/)[0]||'Бригадир',name=[person,p.metro].filter(Boolean).join(' · ');
+      const phone=String(p.phone||'').replace(/[^+\d]/g,'');
+      return `<details class="bc-order" data-control-card="${card.id}"${open.has(card.id)?' open':''}><summary><div class="bc-order-title"><b>ум: ${esc(card.surname)}</b><span>${card.source==='gbu'?'ГБУ':'Частный'}</span>${cabinetIcon('chevron')}</div><p class="bc-person">${esc(name)}</p><div class="bc-stages">${block('contact','phone',card.contact_time||'—',card.on_contact?'На связи':'Ожидается',card.on_contact)}${block('photo','camera',card.photo_time||'—',`Фото ${card.photos_received}/${card.photos_required}`,card.photos_complete)}${block('done','tea',card.completed?'Получен':'Отчёт',card.completed?'Завершён':'Ожидается',card.completed)}</div></summary><div class="bc-details"><p>${esc([name,p.height_cm?p.height_cm+' см':''].filter(Boolean).join(' · '))}${/^\+?\d{7,15}$/.test(phone)?` · <a href="tel:${esc(phone)}">${esc(p.phone)}</a>`:''}</p><dl><div><dt>Бригада на связи</dt><dd>${card.on_contact?'✅ На связи':'⏳ Нет отметки'}</dd></div><div><dt>Фото 1${card.photo_time?' · '+esc(card.photo_time):''}</dt><dd>${card.first_received?'✅ Получено':'⏳ Ожидается'}${card.first_manual?' · вручную':''}</dd></div>${card.source==='gbu'?`<div><dt>Фото 2</dt><dd>${card.second_received?'✅ Получено':'⏳ Ожидается'}${card.second_manual?' · вручную':''}</dd></div>`:''}<div><dt>Отчёт по чаю</dt><dd>${card.completed?'✅ '+cabinetMoney(card.tea_amount)+' ₽':'⏳ Не отправлен'}</dd></div></dl><button type="button" class="cabinet-back" data-brigade-photos="${card.source}">${cabinetIcon('camera')}Открыть контроль фото</button></div></details>`;
+    }).join('')||'<div class="cabinet-empty">'+(stage?'Все карточки прошли этот этап.':'На эту дату карточек заказов нет.')+'</div>'}</div>
+    <p class="bc-legend">Частные — 1 фото · ГБУ — 2 фото</p><p class="bc-updated">Обновлено ${esc(new Date(data.updated_at).toLocaleTimeString('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'}))}</p>`;
+  qs('#brigadeControlDate',root).onchange=event=>{if(event.target.value)loadBootstrap(event.target.value).catch(error=>toast(error.message))};
+  qsa('[data-brigade-source]',root).forEach(button=>button.onclick=()=>{ownerBrigadeControlSource=button.dataset.brigadeSource;renderOwnerBrigadeControl()});
+  qsa('[data-brigade-stage]',root).forEach(button=>button.onclick=()=>{ownerBrigadeControlStage=ownerBrigadeControlStage===button.dataset.brigadeStage?null:button.dataset.brigadeStage;renderOwnerBrigadeControl()});
+  qsa('[data-brigade-photos]',root).forEach(button=>button.onclick=()=>openPhotoControl(button.dataset.brigadePhotos,data.work_date));
+}
+async function loadOwnerBrigadeControl(){
+  const root=qs('#ownerBrigadeControlContent'),uid=state.bootstrap?.user?.id,day=state.selectedDate;
+  if(state.bootstrap?.cabinet_kind!=='owner'||state.bootstrap?.can_manage_cabinets!==true){ownerBrigadeControlData=null;root.textContent='Раздел доступен только владельцу';return}
+  const identity=uid+':'+day,request=++ownerBrigadeControlRequest;
+  if(ownerBrigadeControlIdentity!==identity){ownerBrigadeControlIdentity=identity;ownerBrigadeControlData=null;ownerBrigadeControlSource='all';ownerBrigadeControlStage=null;root.innerHTML='<p role="status">Загрузка контроля заказов…</p>'}
+  const active=()=>request===ownerBrigadeControlRequest&&currentViewId()==='ownerBrigadeControlView'&&state.selectedDate===day&&state.bootstrap?.user?.id===uid&&state.bootstrap?.cabinet_kind==='owner'&&state.bootstrap?.can_manage_cabinets===true;
+  try{
+    const data=await api('/api/owner/brigade-control?work_date='+encodeURIComponent(day),{cache:'no-store'});
+    if(!active()||data.work_date!==day)return;
+    ownerBrigadeControlData=data;renderOwnerBrigadeControl();
+  }catch(error){if(active()){ownerBrigadeControlData=null;root.innerHTML=`<p role="alert">${esc(error.message)}</p><button type="button" class="cabinet-secondary" id="brigadeControlRetry">Повторить</button>`;qs('#brigadeControlRetry',root).onclick=loadOwnerBrigadeControl}}
+}
+function currentViewId() {""")
+    return html.replace('</head>', """<style id="owner-brigade-control-style">
+.owner-management-top[hidden]{display:none!important}.owner-management-top.active{color:var(--gold);border-color:var(--gold)}
+.topbar>div:first-child{min-width:0}.topbar>div:last-child{flex-shrink:0}.owner-management-top{font-size:23px}
+.owner-brigade-control-open #summary,.owner-brigade-control-open #selectedDayHeader,.owner-brigade-control-open main>h3,.owner-brigade-control-open #roleOwnOrders{display:none!important}
+#ownerBrigadeControlContent{padding:8px 0 16px}.bc-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}.bc-heading h2{font-size:21px;margin:0}.bc-heading p{font-size:12px;color:var(--muted);margin:4px 0 0}.bc-date{font-size:11px;color:var(--muted);text-align:right}.bc-date input{display:block;max-width:128px;min-height:32px;padding:4px 6px;border:1px solid var(--line);border-radius:10px;background:var(--panel2);color:var(--text);font-size:12px}
+.bc-counters{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.bc-counters button{min-width:0;min-height:70px;padding:8px 4px;border:1px solid var(--line);border-radius:13px;background:var(--panel);color:var(--text)}.bc-counters b{display:block;font-size:23px}.bc-counters span{display:block;font-size:11px;color:var(--muted);margin-top:3px}.bc-counters button[aria-pressed=true]{border-color:var(--gold);background:#211d15}
+.bc-sources{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;padding:4px;margin-top:10px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}.bc-sources button{min-width:0;min-height:40px;padding:6px 2px;border:0;border-radius:8px;background:transparent;color:var(--muted);font-size:12px}.bc-sources button[aria-pressed=true]{background:#2a251b;color:#f6dfac}
+.bc-list-caption{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--muted);margin:12px 0 6px}.bc-missing{font-size:12px;color:var(--gold)}.bc-order{padding:10px 9px;margin-bottom:7px;border:1px solid var(--line);border-radius:13px;background:var(--panel)}.bc-order summary{list-style:none;cursor:pointer}.bc-order summary::-webkit-details-marker{display:none}.bc-order-title{display:flex;gap:6px;align-items:center}.bc-order-title b{font-size:14px;flex:1;min-width:0;overflow-wrap:anywhere}.bc-order-title>span{font-size:11px;color:var(--gold);background:#211d15;border-radius:5px;padding:2px 5px}.bc-order-title>.cabinet-icon{width:14px;height:14px;transform:rotate(90deg)}.bc-order[open] .bc-order-title>.cabinet-icon{transform:rotate(-90deg)}.bc-person{font-size:12px;color:var(--muted);margin:3px 0 7px}
+.bc-stages{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}.bc-stage{min-width:0;padding:5px 3px;border-radius:6px;background:var(--panel2);text-align:center}.bc-stage b{display:flex;align-items:center;justify-content:center;gap:4px;font-size:12px;white-space:nowrap}.bc-stage .cabinet-icon{width:13px;height:13px;color:var(--muted)}.bc-stage>span{display:block;font-size:11px;color:var(--muted);margin-top:2px}.bc-stage.is-done b{color:var(--green)}.bc-stage.is-focused{background:#302719}
+.bc-details{border-top:1px solid var(--line);margin-top:9px;padding-top:9px;font-size:12px}.bc-details p{color:var(--muted);margin:0 0 8px}.bc-details a{color:var(--gold)}.bc-details dl{margin:0}.bc-details dl>div{display:flex;justify-content:space-between;gap:8px;margin:6px 0}.bc-details dt{color:var(--muted)}.bc-details dd{margin:0;text-align:right}.bc-legend,.bc-updated{font-size:11px;color:var(--muted);margin:8px 0 0}
+@media(max-width:350px){.bc-heading h2{font-size:18px}.bc-date input{max-width:116px}.bc-list-caption{font-size:10px}}
+@media(pointer:coarse){.bc-sources button{min-height:44px}}
+</style></head>""", 1)
+
+
+INLINE_INDEX_HTML = _owner_brigade_control_html(INLINE_INDEX_HTML)
