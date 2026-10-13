@@ -7423,7 +7423,7 @@ function roleNavigationItems(kind){
   const orders={key:'orders',title:'Заказы',icon:()=>'<span>▤</span>'};
   if(kind==='owner')return [orders,staff,{key:'tables',title:'Мои таблицы',icon:()=>'<span>💰</span>'},readiness];
   if(kind==='assistant')return [orders,staff,cash,earnings,readiness];
-  if(kind==='cashier')return [staff,cash,earnings,readiness];
+  if(kind==='cashier')return [{...readiness,title:'Кабинет'},cash,earnings,staff];
   return [staff,earnings,readiness];
 }
 function updateRoleNavigation(){
@@ -7473,6 +7473,7 @@ async function roleNavigate(target){
 // Events
 qs('#cashBtn')''')
     return html.replace('</head>', '''<style id="four-cabinet-style">
+body[data-cabinet-kind="cashier"] .cabinet-personal-links{display:none!important}
 body.role-navigation-enabled{padding-bottom:calc(70px + var(--safe-bottom))}
 .role-navigation-enabled .bottom-nav,.role-navigation-enabled #cashBtn{display:none!important}
 .role-navigation{display:grid;grid-template-columns:repeat(var(--role-columns),minmax(0,1fr));position:fixed;z-index:30;left:0;right:0;bottom:0;height:calc(64px + var(--safe-bottom));padding-bottom:var(--safe-bottom);border-top:1px solid var(--line);background:var(--bg)}
