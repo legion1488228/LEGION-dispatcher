@@ -6060,10 +6060,10 @@ def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends
         Employee.group_code == "brigadier").order_by(Employee.id).limit(1))
     profile = _employee_dict(employee) if employee else None
     avatar = db.get(CabinetProfilePhoto, user.id)
-    orders = db.scalars(select(Order).join(Assignment, Assignment.order_id == Order.id).join(
+    orders = [] if active_only else db.scalars(select(Order).join(Assignment, Assignment.order_id == Order.id).join(
         Employee, Employee.id == Assignment.employee_id).where(
         Employee.tg_id == user.id, Employee.active.is_(True), _visible_employee(),
-        Assignment.role == "brigadier", True if active_only else Order.work_date == selected,
+        Assignment.role == "brigadier", Order.work_date == selected,
         Order.status.notin_(["closed", "cancelled"]) if active_only else Order.status != "cancelled").order_by(Order.work_date, Order.issue_time, Order.id)).unique().all()
     cards = db.scalars(select(NumberCardEvent).where(
         NumberCardEvent.tg_id == user.id, True if active_only else NumberCardEvent.work_date == selected,
@@ -6566,13 +6566,12 @@ function cabinetNextAction(c,data){
   return null;
 }
 function ownerCabinetCardsHtml(data){
-  const cards=(data.number_cards||[]).filter(c=>!c.tea_received),orders=data.orders||[];
+  const cards=(data.number_cards||[]).filter(c=>!c.tea_received);
   const cardRows=cards.map(c=>{
     const photo=cabinetPhotoInfo(c),next=cabinetNextAction(c,data),done=photo.complete&&c.tea_received;
     return `<article class="cabinet-order"><div class="cabinet-order-top"><span class="cabinet-kind ${c.source==='gbu'?'gbu':''}">${c.source==='gbu'?'ГБУ':'Частный'}</span><small class="cabinet-card-date">${esc(fmtDate(c.work_date))}</small>${cabinetOrderTools(c)}</div><button type="button" class="cabinet-order-open" data-cabinet-detail="${Number(c.id)}"><h3>ум: ${esc(c.surname)}</h3></button><div class="cabinet-order-statuses"><span class="${(c.prepared??c.composition_closed)?'cabinet-done':''}">${cabinetIcon((c.prepared??c.composition_closed)?'check':'clock')}${(c.prepared??c.composition_closed)?'Закрытие подтверждено':'Оформление заказа'}</span><span>${esc(photo.label)} · ${photo.received}/${photo.total}</span></div>${done?'<p class="cabinet-done">✅ Заказ завершён</p>':next?cabinetButton(next.key,next.title,next.icon,c,true):'<p>Фото доступно в день заказа</p>'}<button type="button" class="cabinet-back" data-cabinet-detail="${Number(c.id)}">Все этапы заказа ${cabinetIcon('chevron')}</button></article>`;
   }).join('');
-  const assigned=orders.map(o=>`<button type="button" class="cabinet-order cabinet-assigned" data-cabinet-order="${Number(o.id)}"><div class="cabinet-order-top"><span class="cabinet-kind">${esc(o.source_label)}</span><b>${esc(o.issue_time)}</b></div><h3>ум: ${esc(o.deceased_name||'Не указано')}</h3><p>${esc(o.route||'Маршрут не указан')}</p><small>${esc(o.status_label)}</small></button>`).join('');
-  return `${cardRows}${orders.length?`<details class="cabinet-assignments"${cards.length?'':' open'}><summary>Назначения из диспетчерской <span>${orders.length}</span></summary><div>${assigned}</div></details>`:''}${!cards.length&&!orders.length?'<div class="cabinet-empty">Активных заказов нет.</div>':''}`;
+  return `${cardRows}${!cards.length?'<div class="cabinet-empty">Активных заказов нет.</div>':''}`;
 }
 function ownerCabinetDetailHtml(c,data){
   data={...data,work_date:c.work_date};
