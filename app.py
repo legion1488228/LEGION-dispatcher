@@ -7195,6 +7195,12 @@ def cabinet_finance(on_date: date, db: Session = Depends(get_db), user: Telegram
         CabinetEarningsDay.tg_id == user.id, CabinetEarningsDay.work_date.between(start, end)))}
     days = [cabinet_earnings_dict(start + timedelta(days=i), earnings.get(start + timedelta(days=i)))
         for i in range((end-start).days + 1)]
+    # Read the same historical calculation as the owner's allowance table.
+    # Do not copy it into manual earnings: reopening must never double-count it.
+    has_allowance = not _is_owner(db, user.id) and _can_view_vlad_allowance(db, user)
+    for row in days:
+        row['allowance'] = _vlad_allowance_cents(db, date.fromisoformat(row['work_date'])) // 100 if has_allowance else 0
+        row['total'] += row['allowance']
     cash = db.scalars(select(CabinetOrderCash).where(CabinetOrderCash.tg_id == user.id,
         CabinetOrderCash.work_date.between(start, end)).order_by(CabinetOrderCash.work_date, CabinetOrderCash.event_id)).all()
     cards = {r.id: r for r in db.scalars(select(NumberCardEvent).where(NumberCardEvent.tg_id == user.id,
@@ -7230,12 +7236,12 @@ def cabinet_finance(on_date: date, db: Session = Depends(get_db), user: Telegram
         period_totals.append({'start': start.replace(day=first).isoformat(),
             'end': start.replace(day=last).isoformat(),
             'salary': sum(r['salary'] or 0 for r in period_days), 'tea': sum(r['tea'] or 0 for r in period_days),
-            'total': sum(r['total'] for r in period_days), 'cash': sum(r['cash'] for r in period_cash),
+            'allowance': sum(r['allowance'] for r in period_days), 'total': sum(r['total'] for r in period_days), 'cash': sum(r['cash'] for r in period_cash),
             'kickback': sum(r['kickback'] for r in period_cash), 'orders': sum(r['orders'] for r in period_cash)})
     return JSONResponse({'user_id': user.id, 'start': start.isoformat(), 'end': end.isoformat(),
-        'days': days, 'cash_entries': entries, 'cash_days': list(cash_days.values()), 'period_totals': period_totals,
+        'has_allowance': has_allowance, 'days': days, 'cash_entries': entries, 'cash_days': list(cash_days.values()), 'period_totals': period_totals,
         'totals': {'salary': sum(r['salary'] or 0 for r in days), 'tea': sum(r['tea'] or 0 for r in days),
-            'total': sum(r['total'] for r in days), 'cash': sum(r['cash'] for r in entries),
+            'allowance': sum(r['allowance'] for r in days), 'total': sum(r['total'] for r in days), 'cash': sum(r['cash'] for r in entries),
             'kickback': sum(r['kickback'] for r in entries), 'orders': len(entries)}},
         headers={'Cache-Control':'private, no-store'})
 
@@ -7798,3 +7804,56 @@ qs('#cashBtn')''')
 
 
 INLINE_INDEX_HTML = _owner_management_html(INLINE_INDEX_HTML)
+
+
+def _assistant_month_earnings_html(html):
+    def replace(old, new):
+        nonlocal html
+        if html.count(old) != 1:
+            raise ValueError('Assistant earnings UI anchor missing: ' + old[:90])
+        html = html.replace(old, new, 1)
+    replace("if(kind==='assistant')return [orders,staff,cash,earnings,readiness];",
+            "if(kind==='assistant')return [{...readiness,title:'Заказы'},staff,cash,earnings,{key:'own',title:'Личный кабинет',icon:()=>cabinetIcon('user')}];")
+    replace("own.hidden=!state.bootstrap.can_use_owner_cabinet||kind!=='assistant'||currentViewId()==='ownerCabinetView';", "own.hidden=true;")
+    replace("const endDay=Number(data.end.slice(8));", "const endDay=Number(data.end.slice(8)),hasAllowance=data.has_allowance===true;panel.classList.toggle('compact-month',hasAllowance);document.body.classList.toggle('compact-month-open',hasAllowance);")
+    replace("    const amount=value=>value===null", "    if(hasAllowance)qs('h2',panel).textContent='Заработок Влада';\n    const amount=value=>value===null")
+    replace("let salary=0,tea=0;", "let salary=0,tea=0,allowance=0;")
+    replace("const halves={1:{salary:0,tea:0},2:{salary:0,tea:0}};", "const halves={1:{salary:0,tea:0,allowance:0},2:{salary:0,tea:0,allowance:0}};")
+    replace("const a=amount(row.salary),b=amount(row.tea);salary+=", "const a=amount(row.salary),b=amount(row.tea),extra=Number(row.allowance||0);allowance+=extra;salary+=")
+    replace("half.salary+=Number.isFinite(a)?a:0;half.tea+=Number.isFinite(b)?b:0;", "half.salary+=Number.isFinite(a)?a:0;half.tea+=Number.isFinite(b)?b:0;half.allowance+=extra;")
+    replace("cabinetMoney((a||0)+(b||0));", "cabinetMoney((a||0)+(b||0)+extra);")
+    replace("for(const field of ['salary','tea','total'])", "for(const field of ['salary','tea','allowance','total'])")
+    replace("cabinetMoney(field==='total'?halves[half].salary+halves[half].tea:halves[half][field]);", "(field==='allowance'?'+':'')+cabinetMoney(field==='total'?halves[half].salary+halves[half].tea+halves[half].allowance:halves[half][field]);")
+    replace("if(c)c.textContent=cabinetMoney(salary+tea);", "if(c)c.textContent=cabinetMoney(salary+tea+allowance);const extraTotal=qs('#cabinetAllowanceTotal',panel);if(extraTotal)extraTotal.textContent='+'+cabinetMoney(allowance);")
+    replace('<td data-half-total="${half}"></td></tr>', """${hasAllowance?`<td class="cabinet-allowance" data-half-allowance="${half}"></td>`:''}<td data-half-total="${half}"></td></tr>""")
+    replace('Оклад и чай — вручную. Итоги за 1–15 и 16–${endDay} — автоматически. Суммы в ₽.', """${hasAllowance?'Надбавка: сотрудники × 100 ₽ · автоматически':`Оклад и чай — вручную. Итоги за 1–15 и 16–${endDay} — автоматически. Суммы в ₽.`}""")
+    replace('<colgroup><col style="width:16%"><col style="width:30%"><col style="width:30%"><col style="width:24%"></colgroup>', """${hasAllowance?'<colgroup><col style="width:12%"><col style="width:23%"><col style="width:23%"><col style="width:23%"><col style="width:19%"></colgroup>':'<colgroup><col style="width:16%"><col style="width:30%"><col style="width:30%"><col style="width:24%"></colgroup>'}""")
+    replace('<th scope="col">Чай</th><th scope="col">Итог</th>', """<th scope="col">Чай</th>${hasAllowance?'<th scope="col">Надбавка</th>':''}<th scope="col">Итог</th>""")
+    replace('<td data-day-total="${row.work_date}"></td>', """${hasAllowance?`<td class="cabinet-allowance">+${cabinetMoney(row.allowance||0)}</td>`:''}<td data-day-total="${row.work_date}"></td>""")
+    replace('<td id="cabinetTeaTotal"></td><td id="cabinetEarningsTotal"></td>', """<td id="cabinetTeaTotal"></td>${hasAllowance?'<td class="cabinet-allowance" id="cabinetAllowanceTotal"></td>':''}<td id="cabinetEarningsTotal"></td>""")
+    replace("const v = currentViewId();", "const v = currentViewId();if(v!=='ownerCabinetView'||!qs('#cabinetFinance.compact-month'))document.body.classList.remove('compact-month-open');")
+    return html.replace('</head>', """<style id="vlad-compact-month-style">
+.compact-month-open:has(#cabinetFinance.compact-month) .topbar{padding-top:4px;padding-bottom:4px;min-height:32px}
+.compact-month-open:has(#cabinetFinance.compact-month) .topbar h1{font-size:16px}.compact-month-open:has(#cabinetFinance.compact-month) .eyebrow{display:none}
+#cabinetFinance.compact-month{--month-row:clamp(14px,calc((100dvh - 225px)/35),20px)}
+#cabinetFinance.compact-month>.cabinet-back{min-height:20px;margin:0;font-size:10px}
+#cabinetFinance.compact-month h2{font-size:15px;margin:3px 0}
+#cabinetFinance.compact-month .cabinet-finance-month{font-size:10px}
+#cabinetFinance.compact-month .cabinet-finance-month input{min-height:24px;padding:2px 4px;font-size:12px}
+#cabinetFinance.compact-month .cabinet-finance-tabs{margin:4px 0;padding:2px}
+#cabinetFinance.compact-month .cabinet-finance-tabs button{min-height:24px;padding:2px;font-size:11px}
+#cabinetFinance.compact-month .cabinet-finance-hint{font-size:9px;margin:3px 0;line-height:1.2}
+#cabinetFinance.compact-month .cabinet-finance-scroll{max-height:none;overflow-x:auto;border-radius:0}
+#cabinetFinance.compact-month .cabinet-earnings-table{width:100%;min-width:0;table-layout:fixed}
+#cabinetFinance.compact-month .cabinet-earnings-table th,#cabinetFinance.compact-month .cabinet-earnings-table td{height:var(--month-row);padding:0 2px;font-size:10px;line-height:1;box-sizing:border-box;white-space:nowrap;text-align:center}
+#cabinetFinance.compact-month .cabinet-earnings-table th:first-child{text-align:left;font-size:9px}
+#cabinetFinance.compact-month .cabinet-earnings-table input{width:100%;height:calc(var(--month-row) - 2px);min-height:0;padding:0 2px;font-size:11px;line-height:1;border-radius:3px;box-sizing:border-box;text-align:center}
+#cabinetFinance.compact-month .cabinet-period-total small{display:none}
+#cabinetFinance.compact-month .cabinet-allowance{color:var(--gold);font-weight:700}
+#cabinetFinance.compact-month #cabinetEarningsStatus{font-size:9px;margin:3px 0}
+#cabinetFinance.compact-month #cabinetSaveEarnings{min-height:24px;padding:2px;font-size:10px}
+@supports(-webkit-touch-callout:none){#cabinetFinance.compact-month input[data-earnings-day]:focus{font-size:16px}}
+</style></head>""", 1)
+
+
+INLINE_INDEX_HTML = _assistant_month_earnings_html(INLINE_INDEX_HTML)
