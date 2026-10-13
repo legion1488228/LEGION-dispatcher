@@ -839,7 +839,26 @@ def _cash_row_dict(x: CashEntry, db: Session | None = None) -> dict:
         "team_size": x.team_size, "commission_rub": x.commission_rub, "kickback_rub": x.kickback_rub,
         "reserve_count": x.reserve_count, "cash_rub": int(x.commission_rub or 0), "total_rub": int(x.commission_rub or 0),
         "notes": x.notes or "", "created_at": x.created_at.isoformat() if x.created_at else None,
+        "source": getattr(x, 'source', 'bot'),
     }
+
+
+def _all_cash_rows(db, start, end, tg_id=None):
+    """Read both ledgers without copying entries or merging equal amounts."""
+    from types import SimpleNamespace
+    excluded = _cash_excluded_ids(db) if tg_id is None else set()
+    rows = list(db.scalars(select(CashEntry).where(CashEntry.work_date.between(start, end),
+        CashEntry.brigadier_tg_id.notin_(excluded),
+        CashEntry.brigadier_tg_id == tg_id if tg_id is not None else True)))
+    for item in db.scalars(select(CabinetOrderCash).where(CabinetOrderCash.work_date.between(start, end),
+            CabinetOrderCash.tg_id.notin_(excluded),
+            CabinetOrderCash.tg_id == tg_id if tg_id is not None else True)):
+        rows.append(SimpleNamespace(id=f'cabinet:{item.event_id}:{item.tg_id}', source='cabinet',
+            work_date=item.work_date, brigadier_tg_id=item.tg_id,
+            brigadier_name=_cash_brigadier_label(db, item.tg_id), category=item.category,
+            team_size=item.team_size, commission_rub=item.commission, kickback_rub=item.kickback,
+            reserve_count=item.reserve, notes='ум: ' + item.surname, created_at=item.updated_at))
+    return sorted(rows, key=lambda x: (x.work_date, str(x.brigadier_name).casefold(), str(x.id)))
 
 
 def _normalize_brigadier_phones(db):
@@ -2511,7 +2530,7 @@ def bot_delete_own_cash_entry(entry_id: int, data: BrigadierCashEntryDelete, db:
 @app.get("/api/bot/cash/period", dependencies=[Depends(_bot_key)])
 def bot_cash_period(tg_id: int, on_date: date, db: Session = Depends(get_db)):
     start, end = _period_bounds(on_date)
-    rows = db.execute(select(CashEntry).where(CashEntry.brigadier_tg_id == tg_id, CashEntry.work_date >= start, CashEntry.work_date <= end).order_by(CashEntry.work_date, CashEntry.id)).scalars().all()
+    rows = _all_cash_rows(db, start, end, tg_id=tg_id)
     return {"start": start.isoformat(), "end": end.isoformat(), "entries": [_cash_row_dict(x) for x in rows], "commission_rub": sum(x.commission_rub or 0 for x in rows), "kickback_rub": sum(x.kickback_rub or 0 for x in rows), "cash_rub": sum(x.commission_rub or 0 for x in rows), "total_rub": sum(x.commission_rub or 0 for x in rows)}
 
 
@@ -2543,9 +2562,9 @@ def bot_edit_own_cash(entry_id: int, data: BrigadierCashPatch, db: Session = Dep
 @app.get("/api/cash")
 def owner_cash_day(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
     _require_owner(db, user)
-    rows = db.execute(select(CashEntry).where(CashEntry.work_date == work_date, CashEntry.brigadier_tg_id.notin_(_cash_excluded_ids(db))).order_by(CashEntry.brigadier_name, CashEntry.id)).scalars().all()
+    rows = _all_cash_rows(db, work_date, work_date)
     start, end = _period_bounds(work_date)
-    period_rows = db.execute(select(CashEntry).where(CashEntry.work_date >= start, CashEntry.work_date <= end, CashEntry.brigadier_tg_id.notin_(_cash_excluded_ids(db)))).scalars().all()
+    period_rows = _all_cash_rows(db, start, end)
     return {"work_date": work_date.isoformat(), "rows": [_cash_row_dict(x, db) for x in rows], "day": {"commission_rub": sum(x.commission_rub or 0 for x in rows), "kickback_rub": sum(x.kickback_rub or 0 for x in rows), "cash_rub": sum(x.commission_rub or 0 for x in rows), "total_rub": sum(x.commission_rub or 0 for x in rows)}, "period": {"start": start.isoformat(), "end": end.isoformat(), "commission_rub": sum(x.commission_rub or 0 for x in period_rows), "kickback_rub": sum(x.kickback_rub or 0 for x in period_rows), "cash_rub": sum(x.commission_rub or 0 for x in period_rows), "total_rub": sum(x.commission_rub or 0 for x in period_rows), "entries": len(period_rows)}}
 
 
@@ -2565,8 +2584,7 @@ def _cash_day_check_data(db: Session, work_date: date) -> dict:
     submitted = defaultdict(int)
     amounts = defaultdict(list)
     total_rub = 0
-    for entry in db.scalars(select(CashEntry).where(CashEntry.work_date == work_date,
-            CashEntry.brigadier_tg_id.notin_(_cash_excluded_ids(db))).order_by(CashEntry.id)):
+    for entry in _all_cash_rows(db, work_date, work_date):
         total_rub += int(entry.commission_rub or 0)
         submitted[int(entry.brigadier_tg_id)] += 1
         amounts[int(entry.brigadier_tg_id)].append(int(entry.commission_rub or 0))
@@ -2642,11 +2660,7 @@ def owner_cash_ledger(on_date: date, db: Session = Depends(get_db), user: Telegr
         start = on_date.replace(day=1)
         end = on_date.replace(day=calendar.monthrange(on_date.year, on_date.month)[1])
 
-    entries = db.execute(
-        select(CashEntry)
-        .where(CashEntry.work_date >= start, CashEntry.work_date <= end, CashEntry.brigadier_tg_id.notin_(_cash_excluded_ids(db)))
-        .order_by(CashEntry.work_date, CashEntry.brigadier_name, CashEntry.id)
-    ).scalars().all()
+    entries = _all_cash_rows(db, start, end)
 
     current_cashiers = db.execute(
         select(Employee)
@@ -3535,6 +3549,8 @@ def owner_cash_months(db: Session = Depends(get_db), user: TelegramUser = Depend
     _require_owner(db, user)
     dates = db.execute(select(CashEntry.work_date).where(
         CashEntry.brigadier_tg_id.notin_(_cash_excluded_ids(db))).distinct()).scalars().all()
+    dates += db.scalars(select(CabinetOrderCash.work_date).where(
+        CabinetOrderCash.tg_id.notin_(_cash_excluded_ids(db))).distinct()).all()
     months = {day.strftime("%Y-%m") for day in dates}
     months.add(datetime.now(ZoneInfo("Europe/Moscow")).strftime("%Y-%m"))
     return {"months": sorted(months, reverse=True)}
@@ -3771,9 +3787,7 @@ def _personal_table_result(row, kind: str, month: str, db=None) -> dict:
             data["cells"].pop(f"{day}:0", None)
         if db is not None:
             start = date.fromisoformat(month + "-01")
-            entries = db.execute(select(CashEntry).where(
-                CashEntry.work_date >= start, CashEntry.work_date <= start.replace(day=days),
-                CashEntry.brigadier_tg_id.notin_(_cash_excluded_ids(db)))).scalars().all()
+            entries = _all_cash_rows(db, start, start.replace(day=days))
             field = "commission_rub" if kind == "earnings" else "kickback_rub"
             for entry in entries:
                 key = f"{entry.work_date.day}:0"
@@ -7279,3 +7293,9 @@ qs('#cashBtn')""")
 
 
 INLINE_INDEX_HTML = _brigadier_access_html(INLINE_INDEX_HTML)
+
+# Native cash is edited through its order so its version and Telegram mirror
+# remain consistent. Never route its source-qualified ID to legacy cash APIs.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    '<button class="contact-btn" data-cash-edit="${x.id}">✏️ Изменить</button>\n            <button class="contact-btn danger" data-cash-del="${x.id}">Удалить</button>',
+    '${x.source===\'cabinet\'?\'<small class="muted">Из кабинета бригадира</small>\':`<button class="contact-btn" data-cash-edit="${x.id}">✏️ Изменить</button><button class="contact-btn danger" data-cash-del="${x.id}">Удалить</button>`}')
