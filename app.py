@@ -998,8 +998,20 @@ def _ready_map(db: Session, work_date: date) -> dict[int, Readiness]:
     return {r.employee_id: r for r in rows}
 
 
-def _cutoff_utc_naive(work_date: date) -> datetime:
-    local_dt = datetime.combine(work_date - timedelta(days=1), time(15, 30), tzinfo=MOSCOW)
+def _readiness_cutoff_label(db: Session) -> str:
+    # The bot publishes its applied settings, including the first summary time.
+    snapshot = db.get(OwnerBotSnapshot, 1)
+    try:
+        options = json.loads(snapshot.payload).get('options', {}) if snapshot else {}
+        clock = options.get('first_summary')
+    except (ValueError, TypeError, AttributeError):
+        clock = None
+    return clock if isinstance(clock, str) and re.fullmatch(r'([01]\d|2[0-3]):[0-5]\d', clock) else '14:00'
+
+
+def _cutoff_utc_naive(work_date: date, cutoff_label: str = '14:00') -> datetime:
+    hour, minute = map(int, cutoff_label.split(':'))
+    local_dt = datetime.combine(work_date - timedelta(days=1), time(hour, minute), tzinfo=MOSCOW)
     return local_dt.astimezone(timezone.utc).replace(tzinfo=None)
 
 
@@ -1249,6 +1261,7 @@ def _day_summary(db: Session, work_date: date):
         "unassigned_count": sum(1 for o in active if not any(a.role == "brigadier" for a in o.assignments)),
         "ready_now": readiness["totals"]["ready_now"],
         "ready_cutoff": readiness["totals"]["ready_cutoff"],
+        "readiness_cutoff_label": readiness["cutoff_label"],
         "brigades_on_contact": readiness["totals"]["brigades_on_contact"],
         "no_response_cutoff": readiness["totals"]["no_response_cutoff"],
     }
@@ -2242,7 +2255,8 @@ def brigades_contact_data(db: Session, work_date: date):
 def readiness_summary_data(db: Session, work_date: date):
     employees = db.execute(select(Employee).where(Employee.active.is_(True), _visible_employee()).order_by(Employee.group_code, Employee.full_name)).scalars().all()
     ready_rows = _ready_map(db, work_date)
-    cutoff = _cutoff_utc_naive(work_date)
+    cutoff_label = _readiness_cutoff_label(db)
+    cutoff = _cutoff_utc_naive(work_date, cutoff_label)
 
     groups = {code: {"label": label, "ready": [], "not_ready": [], "day_off": [], "responded": [], "no_response": []} for code, label in GROUP_LABELS.items()}
     total_ready_now = 0
@@ -2277,7 +2291,7 @@ def readiness_summary_data(db: Session, work_date: date):
 
     for g in groups.values():
         g["counts"] = {k: len(g[k]) for k in ["ready", "not_ready", "day_off", "responded", "no_response"]}
-        # Official no-response at 15:30 can include a person who reported late.
+        # A person can have reported now but still have missed the first summary.
         g["no_response_cutoff"] = [
             x for bucket in [g["ready"], g["not_ready"], g["day_off"], g["responded"], g["no_response"]]
             for x in bucket if x["cutoff_status"] == "no_response"
@@ -2285,7 +2299,7 @@ def readiness_summary_data(db: Session, work_date: date):
 
     return {
         "work_date": work_date.isoformat(),
-        "cutoff_label": "15:30",
+        "cutoff_label": cutoff_label,
         "totals": manual_totals,
         "brigades_on_contact": on_contact,
         "groups": groups,
@@ -3267,6 +3281,7 @@ def control(work_date: date, db: Session = Depends(get_db), user: TelegramUser =
             "ready": [x for x in order_items if x["composition_complete"]],
         },
         "no_response_cutoff": no_response,
+        "cutoff_label": readiness["cutoff_label"],
         "workload": overloaded,
     }
 
@@ -4902,7 +4917,7 @@ def _organize_day_dashboard(html):
     html = html.replace('  state.bootstrap = data;',
         '  if(request!==dayRequest)return;\n  state.bootstrap = data;\n  qs(\'#readinessView\').style.visibility=\'visible\';', 1)
     html = html.replace('async function loadReadiness(){\n  const r=await api(`/api/readiness/summary?work_date=${state.selectedDate}`);',
-        'async function loadReadiness(){\n  const selectedDay=state.selectedDate, day=nextReadinessDay(selectedDay);\n  const r=await api(`/api/readiness/summary?work_date=${day}`);\n  if(state.selectedDate!==selectedDay||r.work_date!==day)return;\n  qs(\'#readinessDayLabel\').textContent=fmtDate(day)+\' · Срез в 15:30\';', 1)
+        'async function loadReadiness(){\n  const selectedDay=state.selectedDate, day=nextReadinessDay(selectedDay);\n  const r=await api(`/api/readiness/summary?work_date=${day}`);\n  if(state.selectedDate!==selectedDay||r.work_date!==day)return;\n  qs(\'#readinessDayLabel\').textContent=fmtDate(day)+\' · Время сводки: \'+(r.cutoff_label||\'14:00\');', 1)
     html = html.replace("openReadinessGroupedList('ready');", "openReadinessGroupedList('ready',day);", 1)
     html = html.replace("openReadinessGroupedList('no_response');", "openReadinessGroupedList('no_response',day);", 1)
     html = html.replace('openReadinessPeople(g.label||code,label,people,code,status,state.selectedDate);',
@@ -4924,7 +4939,7 @@ function renderSummary() {
   const tomorrow=new Date(Date.parse(state.bootstrap.today+'T12:00:00Z')+86400000).toISOString().slice(0,10);
   const closingTitle=day===tomorrow?'Закрытие заказов на завтра':day===state.bootstrap.today?'Закрытие заказов на сегодня':'Закрытие заказов';
   qs('#readinessTitle').textContent=day===state.bootstrap.today?'Готовность сотрудников на завтра':'Готовность сотрудников на следующий день';
-  qs('#readinessDayLabel').textContent=fmtDate(nextReadinessDay(day))+' · Срез в 15:30';
+  qs('#readinessDayLabel').textContent=fmtDate(nextReadinessDay(day))+' · Время сводки: '+(s.readiness_cutoff_label||'14:00');
   qs('#selectedDayHeader').innerHTML=`<h2>${esc(fmtDate(day))}</h2><label class="muted">Выбрать дату <input type="date" id="dashboardDate" value="${day}" style="max-width:160px"></label>`;
   qs('#dashboardDate').onchange=e=>{if(e.target.value)loadBootstrap(e.target.value).catch(e=>toast(e.message))};
   qs('#summary').innerHTML=`
@@ -7976,3 +7991,38 @@ def _cabinet_earnings_categories_html(html):
 
 
 INLINE_INDEX_HTML = _cabinet_earnings_categories_html(INLINE_INDEX_HTML)
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('Не отписались к 15:30 · ${no.length}',
+    "Не отписались к ${esc(c.cutoff_label||'14:00')} · ${no.length}", 1)
+
+
+# Keep the readiness heading full-width and its actions in two compact rows.
+# Scoped styles preserve the same buttons, handlers and layouts in other views.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', """<style id="readiness-compact-layout-style">
+#employeeReadiness{width:100%;min-width:0}
+#employeeReadiness>.section-head{display:block;margin:10px 0 8px}
+#employeeReadiness>.section-head>div:first-child{width:100%;min-width:0}
+#readinessTitle{width:100%;font-size:clamp(18px,4.7vw,20px);line-height:1.25;white-space:normal;margin:0;overflow-wrap:normal}
+#readinessDayLabel{font-size:11px;line-height:1.3;margin:3px 0 0}
+#employeeReadiness .section-actions.readiness-actions{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));width:100%;max-width:none;gap:6px;margin-top:8px;align-items:stretch;justify-content:stretch}
+#employeeReadiness .readiness-actions>button{box-sizing:border-box;min-width:0;min-height:44px;width:100%;margin:0;padding:6px 8px;border-radius:10px;font-size:12px;line-height:1.2;white-space:normal}
+#employeeReadiness #readinessHistoryBtn{grid-column:1/4;grid-row:1;padding:5px 6px}
+#employeeReadiness #readinessHistoryBtn b{display:block;font-size:12px;line-height:1.15}
+#employeeReadiness #readinessHistoryBtn br{display:none}
+#employeeReadiness #readinessHistoryBtn small{display:block;margin-top:1px;font-size:10px!important;line-height:1.1}
+#employeeReadiness .readiness-actions #readinessRemindersBtn{grid-column:4/5;grid-row:1;width:100%;min-width:0;padding:4px;font-size:22px}
+#employeeReadiness #readinessAvralBtn{grid-column:5/7;grid-row:1;white-space:nowrap;padding-left:4px;padding-right:4px}
+#employeeReadiness #readinessCountBtn{grid-column:1/4;grid-row:2}
+#employeeReadiness #readinessSendBtn{grid-column:4/7;grid-row:2}
+#employeeReadiness #readinessSummary{gap:6px;margin:8px 0}
+#employeeReadiness #readinessSummary .metric{padding:8px 10px;border-radius:12px}
+#employeeReadiness #readinessSummary .metric b{font-size:18px;line-height:1.15}
+#employeeReadiness #readinessSummary .metric span{margin-top:2px;font-size:11px;line-height:1.2}
+#employeeReadiness .group-block{margin-bottom:8px;border-radius:14px}
+#employeeReadiness .group-title{padding:9px 10px;font-size:14px}
+#employeeReadiness .group-stats{gap:4px;padding:0 8px 8px}
+#employeeReadiness .group-stats button{min-width:0;min-height:44px;padding:5px 2px;font-size:9px;line-height:1.15}
+#employeeReadiness .group-stats b{font-size:15px;line-height:1.3}
+@media(max-width:350px){#employeeReadiness .readiness-actions>button{font-size:11px;padding-left:4px;padding-right:4px}#employeeReadiness #readinessHistoryBtn small{font-size:9px!important}}
+</style></head>""", 1)
