@@ -6048,7 +6048,7 @@ def owner_cabinet_employees(db: Session = Depends(get_db), user: TelegramUser = 
 
 @app.get("/api/owner/brigadier-cabinet")
 def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends(get_db),
-                            user: TelegramUser = Depends(require_app_user)):
+                            user: TelegramUser = Depends(require_app_user), active_only: bool = False):
     if not _can_use_owner_cabinet(db, user.id):
         raise HTTPException(403, "Кабинет не подключён или доступ отключён")
     today = datetime.now(MOSCOW).date()
@@ -6063,10 +6063,10 @@ def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends
     orders = db.scalars(select(Order).join(Assignment, Assignment.order_id == Order.id).join(
         Employee, Employee.id == Assignment.employee_id).where(
         Employee.tg_id == user.id, Employee.active.is_(True), _visible_employee(),
-        Assignment.role == "brigadier", Order.work_date == selected,
-        Order.status != "cancelled").order_by(Order.issue_time, Order.id)).unique().all()
+        Assignment.role == "brigadier", True if active_only else Order.work_date == selected,
+        Order.status.notin_(["closed", "cancelled"]) if active_only else Order.status != "cancelled").order_by(Order.work_date, Order.issue_time, Order.id)).unique().all()
     cards = db.scalars(select(NumberCardEvent).where(
-        NumberCardEvent.tg_id == user.id, NumberCardEvent.work_date == selected,
+        NumberCardEvent.tg_id == user.id, True if active_only else NumberCardEvent.work_date == selected,
         _visible_number_card()).order_by(NumberCardEvent.sent_at, NumberCardEvent.id)).all()
     statuses = number_card_statuses(db, cards)
     contacts = {row.event_id: bool(row.confirmed) for row in db.scalars(
@@ -6079,10 +6079,12 @@ def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends
               "contact_time": statuses[card.id]["contact_time"],
               "on_contact": bool(contacts.get(card.id)), **effective_order_photo(db, card), **cabinet_extra_state(db, card),
               **cabinet_order_deletion_info(db, card)} for card in cards]
+    if active_only:
+        items = [item for item in items if not item.get('tea_received')]
     def contact_sort_key(item):
         clock = item["contact_time"]
         minutes = sum(int(value) * factor for value, factor in zip(clock.split(":"), (60, 1))) if clock else 1440
-        return minutes, item["id"]
+        return item["work_date"], minutes, item["id"]
     items.sort(key=contact_sort_key)
     username = config.bot_username or ""
     valid_username = bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", username))
@@ -6095,7 +6097,7 @@ def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends
     return JSONResponse({
         "user": {"id": user.id, "name": user.full_name}, "profile": profile,
         "avatar": avatar.image if avatar else "",
-        "today": today.isoformat(), "work_date": selected.isoformat(),
+        "today": today.isoformat(), "work_date": selected.isoformat(), "active_only": active_only,
         "tomorrow": (today + timedelta(days=1)).isoformat(),
         "readiness": _owner_cabinet_readiness(db, employee, selected),
         "tomorrow_readiness": _owner_cabinet_readiness(db, employee, today + timedelta(days=1)),
@@ -6299,9 +6301,10 @@ function openCabinetAvatar(){
 }
 async function ownerCabinetAction(key,cardId=null){
   if(!state.bootstrap?.can_use_owner_cabinet||currentViewId()!=='ownerCabinetView')return;
-  const data=ownerCabinetData,uid=data?.user.id;
+  let data=ownerCabinetData;const uid=data?.user.id;
   const card=cardId===null?null:data?.number_cards?.find(c=>Number(c.id)===Number(cardId));
   if(cardId!==null&&!card)return;
+  if(card)data={...data,work_date:card.work_date};
   const prepared=card&&(card.prepared??card.composition_closed);
   if(card&&(key==='delete'||key==='number')&&!card.can_delete){toast(card.delete_reason||'Удаление доступно до первого фото по заказу');return}
   if(key==='photo'&&(!prepared||data.work_date!==data.today||(data.can_record_cash!==false&&card.source==='private'&&!card.cash))){toast('Фото доступно в день заказа после выполнения предыдущих этапов.');return}
@@ -6551,6 +6554,7 @@ function cabinetPhotoInfo(c){
   return {total,received,complete:received===total,label:received===total?'Фото получены':received?`Фото ${received}/${total}`:(c.photo_time?`Фото в ${c.photo_time}`:'Фото ожидается')};
 }
 function cabinetNextAction(c,data){
+  data={...data,work_date:c.work_date};
   if(!c.photo_time)return {key:'schedule',title:'Указать время фото',icon:'clock'};
   if(!(c.prepared??c.composition_closed))return {key:'close',title:'Отчёт о закрытии заказа',icon:'check'};
   if(c.work_date===data.today&&!c.on_contact)return {key:'contact',title:'Бригада на связи',icon:'phone'};
@@ -6565,12 +6569,13 @@ function ownerCabinetCardsHtml(data){
   const cards=(data.number_cards||[]).filter(c=>!c.tea_received),orders=data.orders||[];
   const cardRows=cards.map(c=>{
     const photo=cabinetPhotoInfo(c),next=cabinetNextAction(c,data),done=photo.complete&&c.tea_received;
-    return `<article class="cabinet-order"><div class="cabinet-order-top"><span class="cabinet-kind ${c.source==='gbu'?'gbu':''}">${c.source==='gbu'?'ГБУ':'Частный'}</span>${cabinetOrderTools(c)}</div><button type="button" class="cabinet-order-open" data-cabinet-detail="${Number(c.id)}"><h3>ум: ${esc(c.surname)}</h3></button><div class="cabinet-order-statuses"><span class="${(c.prepared??c.composition_closed)?'cabinet-done':''}">${cabinetIcon((c.prepared??c.composition_closed)?'check':'clock')}${(c.prepared??c.composition_closed)?'Закрытие подтверждено':'Оформление заказа'}</span><span>${esc(photo.label)} · ${photo.received}/${photo.total}</span></div>${done?'<p class="cabinet-done">✅ Заказ завершён</p>':next?cabinetButton(next.key,next.title,next.icon,c,true):'<p>Фото доступно в день заказа</p>'}<button type="button" class="cabinet-back" data-cabinet-detail="${Number(c.id)}">Все этапы заказа ${cabinetIcon('chevron')}</button></article>`;
+    return `<article class="cabinet-order"><div class="cabinet-order-top"><span class="cabinet-kind ${c.source==='gbu'?'gbu':''}">${c.source==='gbu'?'ГБУ':'Частный'}</span><small class="cabinet-card-date">${esc(fmtDate(c.work_date))}</small>${cabinetOrderTools(c)}</div><button type="button" class="cabinet-order-open" data-cabinet-detail="${Number(c.id)}"><h3>ум: ${esc(c.surname)}</h3></button><div class="cabinet-order-statuses"><span class="${(c.prepared??c.composition_closed)?'cabinet-done':''}">${cabinetIcon((c.prepared??c.composition_closed)?'check':'clock')}${(c.prepared??c.composition_closed)?'Закрытие подтверждено':'Оформление заказа'}</span><span>${esc(photo.label)} · ${photo.received}/${photo.total}</span></div>${done?'<p class="cabinet-done">✅ Заказ завершён</p>':next?cabinetButton(next.key,next.title,next.icon,c,true):'<p>Фото доступно в день заказа</p>'}<button type="button" class="cabinet-back" data-cabinet-detail="${Number(c.id)}">Все этапы заказа ${cabinetIcon('chevron')}</button></article>`;
   }).join('');
   const assigned=orders.map(o=>`<button type="button" class="cabinet-order cabinet-assigned" data-cabinet-order="${Number(o.id)}"><div class="cabinet-order-top"><span class="cabinet-kind">${esc(o.source_label)}</span><b>${esc(o.issue_time)}</b></div><h3>ум: ${esc(o.deceased_name||'Не указано')}</h3><p>${esc(o.route||'Маршрут не указан')}</p><small>${esc(o.status_label)}</small></button>`).join('');
-  return `${cardRows}${orders.length?`<details class="cabinet-assignments"${cards.length?'':' open'}><summary>Назначения из диспетчерской <span>${orders.length}</span></summary><div>${assigned}</div></details>`:''}${!cards.length&&!orders.length?'<div class="cabinet-empty">Активных заказов на эту дату нет.</div>':''}`;
+  return `${cardRows}${orders.length?`<details class="cabinet-assignments"${cards.length?'':' open'}><summary>Назначения из диспетчерской <span>${orders.length}</span></summary><div>${assigned}</div></details>`:''}${!cards.length&&!orders.length?'<div class="cabinet-empty">Активных заказов нет.</div>':''}`;
 }
 function ownerCabinetDetailHtml(c,data){
+  data={...data,work_date:c.work_date};
   const photo=cabinetPhotoInfo(c),today=data.work_date===data.today,next=cabinetNextAction(c,data),prepared=(c.prepared??c.composition_closed),privateOrder=c.source==='private';
   const stage=(key,icon,title,subtitle,done,action)=>`<section class="cabinet-stage ${done?'is-done':action?.key===next?.key?'is-next':''}"><div class="cabinet-stage-head">${cabinetIcon(done?'check':icon)}<div><h3>${title}</h3><p>${esc(subtitle)}</p></div></div>${action?cabinetButton(action.key,action.title,icon,c,action.key===next?.key,!!action.disabled):''}<div data-stage-host="${key}"></div></section>`;
   return `<button type="button" class="cabinet-back" id="cabinetBack">${cabinetIcon('back')}Мои заказы</button><article class="cabinet-order cabinet-detail"><div class="cabinet-detail-head"><div class="cabinet-order-top"><span class="cabinet-kind">${privateOrder?'Частный':'ГБУ'}</span>${cabinetOrderTools(c)}</div><h2>ум: ${esc(c.surname)}</h2><p>${esc(fmtDate(data.work_date))} · Фото ${esc(c.photo_time||'⏳')}</p>${photo.complete&&c.tea_received?'<p class="cabinet-done">✅ Заказ завершён</p>':''}</div><div data-stage-host="delete"></div><div data-stage-host="edit"></div><div class="cabinet-stages">${stage('number','check','1. Номер в группу','Карточка отправлена',true,null)}${stage('schedule','clock','2. Время фото',c.photo_time||'Укажите плановое время',!!c.photo_time,c.photo_time?null:{key:'schedule',title:'Указать время фото'})}${stage('close','check','3. Отчёт о закрытии',prepared?'Сохранён. Сотрудников назначает диспетчер':'Связь с агентом и время связи с бригадой',prepared,prepared?null:{key:'close',title:'Отчёт о закрытии',disabled:!c.photo_time})}${stage('contact','phone','Связь с бригадой',c.on_contact?'Бригада на связи':`План: ${c.contact_time||'не указан'}`,c.on_contact,c.on_contact?null:{key:'contact',title:'Бригада на связи',disabled:!today})}${privateOrder?stage('cash','wallet','4. Касса',c.cash?`${cabinetMoney(c.cash.commission)} ₽ · Откат ${cabinetMoney(c.cash.kickback)} ₽`:'Заполните перед отправкой фото',!!c.cash,{key:'cash',title:c.work_date>data.today?'Доступно в день заказа':!c.on_contact?'Сначала бригада на связи':c.cash?'Изменить кассу':'Заполнить кассу',disabled:!prepared||!c.on_contact||c.work_date>data.today}):''}${stage('photo','camera',`${privateOrder?5:4}. Фотоотчёт`,`${photo.received} из ${photo.total} · ${c.source==='gbu'?(c.first_received?'✅':'⬜️')+(c.second_received?'✅':'⬜️'):(c.first_received?'✅':'⬜️')}`,photo.complete,photo.complete?null:{key:'photo',title:privateOrder&&!c.cash?'Фото — после кассы':today?(c.source==='gbu'&&c.first_received?'Отправить второе фото':'Отправить фото'):'Доступно в день заказа',disabled:!prepared||!today||(privateOrder&&!c.cash)})}${stage('tea','tea',`${privateOrder?6:5}. Итоговый отчёт`,c.tea_received?`Заказ завершён ✅ · Чай ${cabinetMoney(c.tea_amount)} ₽`:'Откроется после всех фото',photo.complete&&c.tea_received,{key:'tea',title:c.tea_received?'Изменить отчёт':'Завершить заказ',disabled:!prepared||!photo.complete||data.work_date>data.today})}</div></article>`;
@@ -6587,13 +6592,12 @@ function renderOwnerCabinet(data){
     const r=data.tomorrow_readiness;
     root.innerHTML=`${sessionStorage.getItem('cabinet-pending:'+uid)?'<button type="button" id="cabinetPending" class="cabinet-secondary cabinet-wide">Проверить последнее действие</button>':''}${ownerCabinetProfileHtml(data)}
       <article class="cabinet-readiness"><div><small>Готовность на завтра · ${esc(fmtDate(data.tomorrow))}</small><strong class="${r.status==='ready'?'cabinet-done':''}">${esc(r.label)}</strong></div><button type="button" class="cabinet-secondary" data-cabinet-action="readiness">${r.status==='no_response'?'Выбрать':'Изменить'}</button>${r.text?`<p>${esc(r.text)}</p>`:''}</article>
-      <section class="cabinet-my-orders"><div class="cabinet-section-heading"><h2>Мои заказы</h2><button type="button" class="cabinet-number-link" data-cabinet-action="number">${cabinetIcon('plus')}Номер в группу</button></div><div class="cabinet-day-shortcuts"><button type="button" data-cabinet-day="${data.today}" class="${day===data.today?'active':''}" aria-pressed="${day===data.today}">Сегодня</button><button type="button" data-cabinet-day="${data.tomorrow}" class="${day===data.tomorrow?'active':''}" aria-pressed="${day===data.tomorrow}">Завтра</button><label class="cabinet-date-picker">${cabinetIcon('calendar')}<input id="cabinetDate" type="date" value="${esc(day)}" aria-label="Дата моих заказов"></label></div>${day!==data.today&&day!==data.tomorrow?`<p class="cabinet-selected-date">${esc(fmtDate(day))}</p>`:''}${ownerCabinetCardsHtml(data)}</section>
+      <section class="cabinet-my-orders"><div class="cabinet-section-heading"><h2>Активные заказы</h2><button type="button" class="cabinet-number-link" data-cabinet-action="number">${cabinetIcon('plus')}Номер в группу</button></div>${ownerCabinetCardsHtml(data)}</section>
       <div class="cabinet-personal-links"><button type="button" id="cabinetFinanceLink">${cabinetIcon('wallet')}<span>Касса и заработок</span>${cabinetIcon('chevron')}</button><button type="button" id="cabinetEmployees">${cabinetIcon('team')}<span>Сотрудники</span>${cabinetIcon('chevron')}</button></div>`;
     if(qs('#cabinetPending',root))qs('#cabinetPending',root).onclick=cabinetResumePending;
     qs('#cabinetAvatar',root).onclick=openCabinetAvatar;
     qs('#cabinetEmployees',root).onclick=openCabinetEmployees;
     qs('#cabinetFinanceLink',root).onclick=()=>openCabinetFinance();
-    qs('#cabinetDate',root).onchange=e=>{if(e.target.value){ownerCabinetSelectedCard=null;loadBootstrap(e.target.value).catch(e=>toast(e.message))}};
     qsa('[data-cabinet-day]',root).forEach(btn=>btn.onclick=()=>{ownerCabinetSelectedCard=null;loadBootstrap(btn.dataset.cabinetDay).catch(e=>toast(e.message))});
     qsa('[data-cabinet-detail]',root).forEach(btn=>btn.onclick=()=>{ownerCabinetSelectedCard=Number(btn.dataset.cabinetDetail);renderOwnerCabinet(data)});
     qsa('[data-cabinet-order]',root).forEach(btn=>btn.onclick=()=>openOrder(Number(btn.dataset.cabinetOrder)).catch(e=>toast(e.message)));
@@ -6611,7 +6615,7 @@ async function loadOwnerCabinet(){
   const active=()=>request===ownerCabinetRequest&&currentViewId()==='ownerCabinetView'&&state.bootstrap?.can_use_owner_cabinet&&state.selectedDate===day&&state.bootstrap?.user?.id===uid;
   if(ownerCabinetData?.work_date!==day){ownerCabinetData=null;ownerCabinetSignature='';ownerCabinetSelectedCard=null;root.innerHTML='<p class="cabinet-bot-hint" role="status">Загрузка вашего кабинета…</p>'}
   try{
-    const data=await api(`/api/owner/brigadier-cabinet?work_date=${encodeURIComponent(day)}`,{cache:'no-store'});
+    const data=await api(`/api/owner/brigadier-cabinet?work_date=${encodeURIComponent(day)}&active_only=true`,{cache:'no-store'});
     if(!active()||data.work_date!==day||data.user.id!==uid)return;
     ownerCabinetData=data;
     const signature=JSON.stringify(data);
