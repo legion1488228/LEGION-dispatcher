@@ -4313,6 +4313,16 @@ class OrderPhotoOverrideInput(BaseModel):
     received: bool | None = Field(..., strict=True)
 
 
+def _canonical_cabinet_clock(value):
+    raw = str(value or '').strip()
+    if re.fullmatch(r'\d{3,4}', raw):
+        raw = raw[:-2] + ':' + raw[-2:]
+    match = re.fullmatch(r'(\d{1,2})[:.](\d{2})', raw)
+    if not match or int(match[1]) > 23 or int(match[2]) > 59:
+        return None
+    return f'{int(match[1]):02d}:{int(match[2]):02d}'
+
+
 def effective_order_photo(db: Session, card):
     key = f'card:{card.chat_id}:{card.message_id}'
     control = db.get(OrderPhotoControl, key)
@@ -4325,7 +4335,7 @@ def effective_order_photo(db: Session, card):
     return {'first_received': first if manual_first is None else manual_first,
             'second_received': second if manual_second is None else manual_second,
             'first_manual': manual_first is not None, 'second_manual': manual_second is not None,
-            'photo_time': control.photo_time if control else None}
+            'photo_time': _canonical_cabinet_clock(control.photo_time) if control else None}
 
 
 @app.patch('/api/photo-control/{event_id}')
@@ -6249,7 +6259,7 @@ async function openCabinetEmployees(){
       qs('#cabinetStaffCount',root).textContent=`Найдено: ${rows.length} из ${people.length}`;
       qs('#cabinetStaffList',root).innerHTML=rows.length?groups.map(([code,label])=>{
         const members=rows.filter(p=>p.group_code===code);
-        return members.length?`<section class="cabinet-directory-group"><h4>${label} · ${members.length}</h4>${members.map(personHtml).join('')}</section>`:'';
+        return members.length?`<section class="cabinet-directory-group"><h4>${label} · ${members.length}</h4><div class="cabinet-directory-grid">${members.map(personHtml).join('')}</div></section>`:'';
       }).join(''):'<p class="cabinet-empty">Сотрудники не найдены. Попробуйте другое имя или метро.</p>';
       qsa('[data-staff-telegram]',root).forEach(link=>link.onclick=e=>{
         if(!active()){e.preventDefault();return}
@@ -6359,7 +6369,10 @@ async function ownerCabinetAction(key,cardId=null){
   if(key==='cash'&&data.can_record_cash===false){toast('В вашем кабинете ведение кассы отключено');return}
   if(key==='cash'&&(!prepared||card.source!=='private')){toast('Сначала отправьте отчёт о закрытии заказа');return}
   if(key==='tea'&&(!prepared||!cabinetPhotoInfo(card).complete)){toast('Сначала отправьте все фото по заказу');return} 
-  const input=(name,label,value='',type='text',extra='')=>`<label>${label}<input name="${name}" type="${type}" value="${esc(value??'')}" ${extra}></label>`;
+  const input=(name,label,value='',type='text',extra='')=>{
+    const clock=type==='time',shown=clock?(normalizeCabinetClock(value)||String(value??'')):value;
+    return `<label${clock?' class="cabinet-clock-label"':''}>${clock?'🕒 ':''}${label}<input name="${name}" type="${clock?'text':type}" value="${esc(shown??'')}" ${clock?'data-cabinet-clock inputmode="numeric" placeholder="Например, 06:30" maxlength="5" autocomplete="off" aria-describedby="cabinetClockHelp"':''} ${extra}>${clock?'<small class="cabinet-clock-help">Нажмите на поле и введите время, например 06:30 или 0630</small>':''}</label>`;
+  };
   const source=value=>`<label>Тип заказа<select name="source" ${key==='edit'&&(card?.first_received||card?.cash)?'disabled':''}><option value="private" ${value==='private'?'selected':''}>Частный</option><option value="gbu" ${value==='gbu'?'selected':''}>ГБУ</option></select></label>`;
   let title='',fields='',submit='Сохранить';
   if(key==='number'){
@@ -6414,6 +6427,11 @@ async function ownerCabinetAction(key,cardId=null){
     host.scrollIntoView?.({behavior:'smooth',block:'nearest'});
   }else showModal(title,formHtml);
   const form=qs('#cabinetNativeForm'),button=qs('button[type=submit]',form),status=qs('#cabinetActionStatus',form);
+  const clockHelp=qs('.cabinet-clock-help',form);if(clockHelp)clockHelp.id='cabinetClockHelp';
+  qsa('[data-cabinet-clock]',form).forEach(field=>{
+    field.oninput=()=>field.setCustomValidity('');
+    field.onblur=()=>{const clock=normalizeCabinetClock(field.value);if(clock)field.value=clock};
+  });
   let requestId=crypto.randomUUID(),body=null,posted=false,busy=false,previewUrl=null;
   const fileInput=qs('input[type=file]',form);
   const photoCaption=key==='photo'?qs('[name=comment]',form):null;
@@ -6432,6 +6450,12 @@ async function ownerCabinetAction(key,cardId=null){
     try{
       if(!body){
         const values=Object.fromEntries(new FormData(form));
+        for(const field of qsa('[data-cabinet-clock]',form)){
+          if(!field.value.trim()&&!field.required){values[field.name]='';continue}
+          const clock=normalizeCabinetClock(field.value);
+          if(!clock){field.setCustomValidity('Укажите время от 00:00 до 23:59, например 06:30');field.reportValidity();throw Error('Укажите время в формате ЧЧ:ММ, например 06:30')}
+          field.value=clock;values[field.name]=clock;
+        }
         if(key==='edit'&&(card.first_received||card.cash))values.source=card.source;
         if(key==='cash'){for(const k of ['team_size','commission','kickback','reserve'])values[k]=Number(values[k]);values.version=card.cash?.version||0;if(values.reserve>values.team_size)throw Error('Резерва не может быть больше состава бригады')}
         if(key==='photo'){
@@ -6859,6 +6883,8 @@ async function loadOwnerCabinet(){
 </style></head>''', 1)
 
 
+
+
 INLINE_INDEX_HTML = _owner_brigadier_cabinet_html(INLINE_INDEX_HTML)
 
 # Native cabinet commands are durable; only the bot executes Telegram effects.
@@ -6927,6 +6953,16 @@ def cabinet_command_create(data: CabinetCommandInput, db: Session = Depends(get_
             raise HTTPException(409, 'Этот запрос уже использован. Откройте форму заново')
         return {'id': existing.id, 'status': existing.status, **json.loads(existing.result)}
     payload = {'action': data.action, 'values': dict(data.values), 'tg_id': user.id}
+    clock_fields = {'schedule': ('photo_time',), 'close': ('contact_time',),
+                    'edit': ('photo_time', 'contact_time')}.get(data.action, ())
+    for field in clock_fields:
+        value = payload['values'].get(field)
+        if data.action == 'edit' and not value:
+            continue
+        clock = _canonical_cabinet_clock(value)
+        if clock is None:
+            raise HTTPException(422, 'Укажите время от 00:00 до 23:59 в формате ЧЧ:ММ')
+        payload['values'][field] = clock
     if not _is_cabinet_owner(db, user.id):
         payload['access_version'] = db.get(BrigadierCabinetAccess, user.id).version
     if data.action == 'number':
@@ -7028,6 +7064,22 @@ def cabinet_command_finish(data: CabinetCommandResult, db: Session = Depends(get
     if row.status not in {'done','error'}:
         result = dict(data.result)
         intent = json.loads(row.payload)
+        if data.status == 'done' and intent.get('action') in {'schedule', 'edit'}:
+            key = str(intent.get('report_key') or '')
+            clock = _canonical_cabinet_clock(intent.get('values', {}).get('photo_time'))
+            if clock and re.fullmatch(r'card:-?\d+:\d+', key):
+                _, chat, message = key.split(':')
+                card = db.scalar(select(NumberCardEvent).where(NumberCardEvent.chat_id == int(chat),
+                    NumberCardEvent.message_id == int(message), NumberCardEvent.tg_id == row.tg_id,
+                    _visible_number_card()).with_for_update())
+                if card:
+                    control = db.get(OrderPhotoControl, key)
+                    if control is None:
+                        control = OrderPhotoControl(report_key=key, tg_id=row.tg_id)
+                        db.add(control)
+                    control.tg_id = row.tg_id
+                    control.photo_time = clock
+                    result['photo_time'] = clock
         if data.status == 'done' and intent.get('action') == 'tea':
             key = str(intent.get('report_key') or '')
             if re.fullmatch(r'card:-?\d+:\d+', key):
@@ -8596,12 +8648,9 @@ function fitOwnerCashMatrix(scroller,count,days){
  const modal=qs('#modal'),viewport=window.visualViewport?.height||window.innerHeight;
  const bottom=modal?.getBoundingClientRect().bottom||viewport-82;
  const available=Math.max(160,bottom-scroller.getBoundingClientRect().top-8);
- const header=table.querySelector('thead').getBoundingClientRect().height||44;
- const row=Math.max(18,Math.min(36,Math.floor((available-header-5)/16)));
- scroller.style.setProperty('--cash-row',row+'px');
+ const header=table.querySelector('thead').offsetHeight||table.querySelector('thead').getBoundingClientRect().height||44;
  if(modal?.classList.contains('owner-cash-modal')){
-  scroller.style.height=Math.min(available,header+16*row+5)+'px';
-  scroller.style.maxHeight=available+'px';
+  fitTwoPeriodPages(scroller,available,header,false);
  }
 }
 function bindOwnerCashDetails(body,ledger,active){
@@ -8704,18 +8753,210 @@ function fitPersonalFirstHalf(grid){
  const viewport=window.visualViewport?.height||window.innerHeight;
  const bottom=modal.getBoundingClientRect().bottom||viewport-76;
  const available=Math.max(160,bottom-grid.getBoundingClientRect().top-8);
- const header=grid.querySelector('thead').getBoundingClientRect().height||42;
- const subtotal=grid.querySelector('.personal-total')?.getBoundingClientRect().height||28;
- const row=Math.max(16,Math.min(36,Math.floor((available-header-subtotal-4)/15)));
- grid.style.setProperty('--personal-half-row',row+'px');
- grid.style.height=(header+15*row+subtotal+4)+'px';
+ const header=grid.querySelector('thead').offsetHeight||grid.querySelector('thead').getBoundingClientRect().height||42;
+ fitTwoPeriodPages(grid,available,header,true);
 }
 window.addEventListener('resize',()=>{const grid=qs('#personalGrid');if(grid)fitPersonalFirstHalf(grid)});
 window.visualViewport?.addEventListener('resize',()=>{const grid=qs('#personalGrid');if(grid)fitPersonalFirstHalf(grid)});
-function resizeOwnerCashFirstHalf(){const scroller=qs('#cashMatrixScroller');if(!qs('#modal')?.classList.contains('owner-cash-modal')||!scroller)return;fitOwnerCashMatrix(scroller,scroller.querySelectorAll('thead th').length-2,scroller.querySelectorAll('[data-owner-cash-day]').length)}
+function resizeOwnerCashFirstHalf(){const scroller=qs('#cashMatrixScroller');if(!qs('#modal')?.classList.contains('owner-cash-modal')||!scroller)return;fitOwnerCashMatrix(scroller,scroller.querySelector('thead').querySelectorAll('th').length-2,scroller.querySelectorAll('[data-owner-cash-day]').length)}
 window.addEventListener('resize',resizeOwnerCashFirstHalf);
 window.visualViewport?.addEventListener('resize',resizeOwnerCashFirstHalf);
 </script></body>''', 1)
 
 
 INLINE_INDEX_HTML = _personal_first_half_view_html(INLINE_INDEX_HTML)
+
+# Give each half its own screen of rows, including its subtotal and the month
+# total on screen two. Daily values and drill-down handlers remain unchanged.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
+<style>
+#modal.personal-first-half-modal #personalGrid,#modal.owner-cash-modal #cashMatrixScroller{scroll-snap-type:y mandatory;scroll-padding-top:0}
+#modal .period-table-page{position:relative;overflow:clip;scroll-snap-align:start;scroll-snap-stop:always;box-sizing:border-box}
+#modal .period-table-page>table{transform-origin:top left}
+#modal .period-table-page>table thead th{position:static!important}
+#modal .period-table-page>table thead .cash-day{position:sticky!important;top:auto}
+#modal .period-table-page>table thead .cash-total{position:sticky!important;top:auto}
+#modal.personal-first-half-modal #personalGrid .personal-table th:first-child{width:42px;min-width:42px;max-width:42px;overflow-wrap:normal}
+#modal.personal-first-half-modal #personalGrid .personal-total th:first-child{white-space:nowrap;font-size:10px;line-height:1.2}
+#modal.personal-first-half-modal #personalGrid .personal-total td{white-space:nowrap;overflow-wrap:normal}
+#modal.personal-first-half-modal #personalGrid tr[data-period-day]>th,
+#modal.personal-first-half-modal #personalGrid tr[data-period-day]>td,
+#modal.owner-cash-modal .owner-cash-matrix tr[data-period-day]>td{height:var(--period-row)!important;box-sizing:border-box}
+#modal.personal-first-half-modal #personalGrid tr[data-period-day] .personal-cell{height:calc(var(--period-row) - 5px);font-size:inherit}
+#modal.owner-cash-modal .owner-cash-matrix tr[data-period-day] button{height:calc(var(--period-row) - 1px)}
+#modal.personal-first-half-modal #personalGrid tr[data-period-page="1"],
+#modal.owner-cash-modal .owner-cash-matrix tr[data-period-page="1"]{--period-row:var(--period-first-row)}
+#modal.personal-first-half-modal #personalGrid tr[data-period-page="2"],
+#modal.owner-cash-modal .owner-cash-matrix tr[data-period-page="2"]{--period-row:var(--period-second-row)}
+#modal.personal-first-half-modal #personalGrid tr[data-period-start],
+#modal.owner-cash-modal .owner-cash-matrix tr[data-period-start]{scroll-snap-align:start}
+#modal.personal-first-half-modal #personalGrid .period-page-gap>td,
+#modal.owner-cash-modal .owner-cash-matrix .period-page-gap>td{padding:0;border:0;height:var(--period-gap);min-height:0;background:var(--panel);line-height:0;font-size:0;box-sizing:border-box}
+#modal.owner-cash-modal .owner-cash-matrix .cash-subtotal>td{height:28px;box-sizing:border-box;font-size:12px}
+</style>
+<script>
+function fitTwoPeriodPages(scroller,available,header,personal){
+ const table=scroller.querySelector('table');if(!table)return;
+ const previousHeight=Number(scroller.dataset.periodPageHeight)||available;
+ const position=scroller.scrollTop/previousHeight;
+ scroller.style.height=available+'px';scroller.style.maxHeight=available+'px';
+ if(scroller.querySelector('.gbu-comment-row'))return;
+ if(!scroller.querySelector('.period-table-page')){
+  const body=table.querySelector('tbody');if(!body)return;
+  const groups=[[],[]];let page=0;
+  for(const row of Array.from(body.rows)){
+   if(row.classList.contains('period-page-gap')){row.remove();continue}
+   const total=row.classList.contains(personal?'personal-total':'cash-subtotal');
+   const day=total?0:personal?Number(row.firstElementChild?.textContent):Number((row.dataset.ownerCashDay||'').slice(-2));
+   if(day){page=day>15?1:0;row.dataset.periodDay=String(day)}
+   else if(!total)continue;
+   row.dataset.periodPage=String(page+1);groups[page].push(row);
+   if(personal&&total){const label=row.firstElementChild;label.title=label.title||label.textContent;label.textContent=page===0?'1–15':groups[page].filter(r=>r.classList.contains('personal-total')).length===1?'16–'+groups[page].filter(r=>r.dataset.periodDay).at(-1)?.dataset.periodDay:'Месяц'}
+  }
+  if(groups.some(rows=>!rows.some(row=>row.dataset.periodDay)))return;
+  // Separate tables include separate headers. Their fixed-height containers
+  // make the last scroll position start with day 16, regardless of row minima.
+  const second=table.cloneNode(true);second.querySelector('tbody').replaceChildren();
+  groups[1].forEach(row=>second.querySelector('tbody').append(row));
+  const fragment=document.createDocumentFragment();
+  [table,second].forEach((item,index)=>{const panel=document.createElement('section');panel.className='period-table-page';panel.dataset.periodPage=String(index+1);panel.setAttribute('aria-label',index?'16–конец месяца и итоги':'1–15 и итог');panel.append(item);fragment.append(panel)});
+  scroller.replaceChildren(fragment);
+ }
+ const pageHeight=Math.max(1,available-(scroller.offsetHeight-scroller.clientHeight||0));
+ scroller.dataset.periodPageHeight=String(pageHeight);
+ Array.from(scroller.querySelectorAll('.period-table-page')).forEach((panel,index)=>{
+  const item=panel.querySelector('table'),days=Array.from(item.querySelectorAll('tbody tr[data-period-day]')),totals=Array.from(item.querySelectorAll(personal?'.personal-total':'.cash-subtotal'));
+  item.style.transform='none';item.style.width=table.style.width;
+  panel.style.height=pageHeight+'px';panel.style.width=personal?'100%':table.style.width;
+  const ownHeader=item.querySelector('thead').offsetHeight||header;
+  const totalHeight=totals.reduce((sum,row)=>sum+(row.offsetHeight||28),0);
+  const rowHeight=Math.min(48,Math.max(1,(pageHeight-ownHeader-totalHeight-2)/days.length));
+  scroller.style.setProperty(index?'--period-second-row':'--period-first-row',rowHeight+'px');
+  days[0].dataset.periodStart=String(index+1);
+  // CSS table row heights are minima. Measure actual layout and fit it too.
+  const natural=item.offsetHeight||ownHeader+days.length*rowHeight+totalHeight;
+  const scale=Math.min(1,(pageHeight-1)/natural);
+  if(scale<1)item.style.transform='scaleY('+scale+')';
+  panel.dataset.periodFitScale=String(scale);
+ });
+ scroller.scrollTop=Math.min(1,position)*pageHeight;
+}
+document.addEventListener('toggle',event=>{if(event.target.matches?.('.personal-help')){const grid=qs('#personalGrid');if(grid)fitPersonalFirstHalf(grid)}},true);
+</script></body>''', 1)
+
+# Group the brigadier's read-only contact directory into two compact columns.
+# Scope every style to this directory so dispatch editing stays unchanged.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', r'''
+<style id="brigadier-directory-compact-style">
+#modal:has(#cabinetDirectory){left:6px;right:6px;top:6px;bottom:calc(76px + var(--safe-bottom));width:auto;max-width:1100px;margin:0 auto;transform:none;max-height:none;padding:8px;overflow:auto}
+#modal:has(#cabinetDirectory)>.modal-head{position:relative;top:auto;margin:0 0 8px;min-height:34px}
+#modal:has(#cabinetDirectory)>.modal-head::before{display:none}
+#modal:has(#cabinetDirectory)>.modal-head h3{margin:0;font-size:18px}
+#cabinetDirectory .cabinet-directory-search,#cabinetDirectory .cabinet-directory-filter{font-size:11px;margin-bottom:7px}
+#cabinetDirectory .cabinet-directory-search input,#cabinetDirectory .cabinet-directory-filter select{font-size:13px;min-height:36px;margin-top:3px;padding:6px 8px;border-radius:8px}
+#cabinetDirectory #cabinetStaffCount{font-size:11px;margin:5px 0 8px}
+#cabinetDirectory .cabinet-directory-group{margin:8px 0 0;border:1px solid var(--line);border-radius:12px;background:var(--panel);overflow:hidden}
+#cabinetDirectory .cabinet-directory-group h4{margin:0;padding:8px 7px;font-size:13px;line-height:1.25;color:var(--gold);font-weight:800;background:#211d15;border-bottom:1px solid var(--line)}
+#cabinetDirectory .cabinet-directory-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0;align-items:stretch;padding:0 5px}
+#cabinetDirectory .cabinet-directory-person{min-width:0;margin:0;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent}
+#cabinetDirectory .cabinet-directory-person:nth-child(odd){border-right:1px solid var(--line)}
+#cabinetDirectory .cabinet-directory-person summary{min-height:36px;padding:3px 4px;gap:4px}
+#cabinetDirectory .cabinet-directory-person summary>span{flex:1;min-width:0;overflow-wrap:anywhere}
+#cabinetDirectory .cabinet-directory-person b{font-size:11px;font-weight:400;line-height:1.25;white-space:normal}
+#cabinetDirectory .cabinet-directory-person summary>.cabinet-icon{width:12px;height:12px;flex-shrink:0;color:var(--muted)}
+#cabinetDirectory .cabinet-directory-contacts{display:flex;flex-direction:column;gap:4px;padding:0 4px 5px;min-width:0}
+#cabinetDirectory .cabinet-directory-contacts a{font-size:11px;min-height:36px;padding:5px 4px;gap:4px;border-radius:7px;overflow-wrap:anywhere}
+#cabinetDirectory .cabinet-directory-contacts a>.cabinet-icon{width:13px;height:13px;flex-shrink:0}
+#cabinetDirectory .cabinet-directory-contacts span{font-size:10px;padding:3px 0;overflow-wrap:anywhere}
+</style></head>''', 1)
+
+
+def _compact_earnings_toolbar_html(html):
+    start = html.index('async function openPersonalTables(resume=null){')
+    end = html.index('</script>', start)
+    section = html[start:end]
+    allowance_bar = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"><button class="secondary" id="earningsVladAllowance">💰 Надбавка Владу</button></div>'
+    if section.count(allowance_bar) != 1:
+        raise RuntimeError('Earnings allowance toolbar anchor missing')
+    section = section.replace(allowance_bar, '', 1)
+    section, removed = re.subn(r'<details class="personal-help">.*?</details>', '', section, count=1, flags=re.S)
+    if removed != 1:
+        raise RuntimeError('Earnings help anchor missing')
+    toolbar = '<div style="display:flex;gap:6px;overflow:auto;margin:12px 0"><button class="primary" data-personal-kind="earnings">'
+    if section.count(toolbar) != 1:
+        raise RuntimeError('Earnings tabs anchor missing')
+    section = section.replace(toolbar, '<div class="personal-table-tabs"><button class="primary" data-personal-kind="earnings">', 1)
+    cash_button = '<button type="button" class="secondary" id="earningsTables">Расширенная касса</button>'
+    if section.count(cash_button) != 1:
+        raise RuntimeError('Expanded cash tab anchor missing')
+    section = section.replace(cash_button, cash_button + '<button type="button" class="secondary" id="earningsVladAllowance" aria-label="Надбавка Владу">💵 Владу</button>', 1)
+    html = html[:start] + section + html[end:]
+    return html.replace('</head>', r'''
+<style id="compact-earnings-toolbar-style">
+#modal.personal-first-half-modal>.personal-table-tabs{display:grid!important;grid-template-columns:minmax(0,1fr) minmax(0,.75fr) minmax(0,1.55fr) minmax(0,.8fr);gap:4px!important;overflow:visible;margin:4px 0!important}
+#modal.personal-first-half-modal>.personal-table-tabs>button{min-width:0;min-height:30px;padding:6px 4px;font-size:clamp(9px,2.8vw,12px);line-height:1.2;white-space:nowrap;border-radius:8px}
+</style></head>''', 1)
+
+
+INLINE_INDEX_HTML = _compact_earnings_toolbar_html(INLINE_INDEX_HTML)
+
+
+# Compact employee directories in every cabinet; dispatch users keep editing.
+def _all_cabinet_employee_directory_html(html):
+    start = html.index('async function loadEmployees(){')
+    end = html.index('async function loadControl(){', start)
+    section = html[start:end]
+    render_start = section.index("  qs('#employeesList').innerHTML=filtered.length")
+    render_end = section.index("  wireContactButtons(qs('#employeesList'));", render_start)
+    section = section[:render_start] + r"""  const canEdit=state.bootstrap?.can_manage_cash===true&&!state.bootstrap?.cabinet_only;
+  const entries=filtered.map((person,index)=>({person,index}));
+  const directoryGroups=[['brigadier','Бригадиры'],['main','Основной состав'],['cashless','Безнал состав'],['reserve','Резерв']];
+  qs('#employeesList').innerHTML=filtered.length?directoryGroups.map(([code,label])=>{
+    const members=entries.filter(entry=>entry.person.group_code===code);
+    if(!members.length)return '';
+    return `<section class="staff-directory-group"><h4>${esc(label)} · ${members.length}</h4><div class="staff-directory-grid">${members.map(({person:x,index})=>
+      `<article class="staff-directory-person${canEdit?' is-editable':''}"><details><summary><span>${esc(readinessEmployeeName(x).replace(/\s+см$/,''))}${x.has_car?' 🚗':''}</span><span class="staff-contact-chevron" aria-hidden="true">›</span></summary><div class="staff-directory-contacts">${contactButtons(x)||'<small>Контакты не указаны</small>'}${cabinetAccessButton(x)}</div></details>${canEdit?`<button type="button" class="secondary" data-profile-edit="${index}" aria-label="Изменить данные сотрудника">✍🏻</button>`:''}</article>`
+    ).join('')}</div></section>`;
+  }).join(''):'<div class="empty">Ничего не найдено</div>';
+
+""" + section[render_end:]
+    html=html[:start]+section+html[end:]
+    return html.replace('</head>', r"""
+<style id="all-cabinet-employee-directory-style">
+#cabinetNativeForm .cabinet-clock-label{font-weight:700;color:var(--text)}
+#cabinetNativeForm [data-cabinet-clock]{min-height:56px;padding:12px 14px;font-size:22px;font-weight:700;color:var(--text);background:#25221b;border:2px solid var(--gold);border-radius:12px;letter-spacing:.04em;cursor:text}
+#cabinetNativeForm [data-cabinet-clock]::placeholder{font-size:16px;color:#cdbf9f;font-weight:400;letter-spacing:normal;opacity:1}
+#cabinetNativeForm [data-cabinet-clock]:focus{outline:2px solid var(--gold);outline-offset:2px;background:#302a1e}
+#cabinetNativeForm .cabinet-clock-help{display:block;margin-top:6px;font-size:11px;font-weight:400;line-height:1.35;color:var(--muted)}
+#employeesList{display:block}
+#employeesList .staff-directory-group{margin:8px 0;border:1px solid var(--line);border-radius:12px;background:var(--panel);overflow:hidden}
+#employeesList .staff-directory-group h4{margin:0;padding:8px 7px;color:var(--gold);font-size:13px;line-height:1.25;background:#211d15;border-bottom:1px solid var(--line)}
+#employeesList .staff-directory-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0;padding:0 5px;align-items:stretch}
+#employeesList .staff-directory-person{min-width:0;display:grid;grid-template-columns:minmax(0,1fr);align-items:start;padding:2px 3px;border-bottom:1px solid var(--line);gap:3px}
+#employeesList .staff-directory-person.is-editable{grid-template-columns:minmax(0,1fr) 32px}
+#employeesList .staff-directory-person:nth-child(odd){border-right:1px solid var(--line)}
+#employeesList .staff-directory-person details{min-width:0}
+#employeesList .staff-directory-person summary{display:flex;align-items:center;justify-content:space-between;min-height:32px;gap:3px;font-size:11px;font-weight:400;line-height:1.25;cursor:pointer;list-style:none}
+#employeesList .staff-directory-person summary::-webkit-details-marker{display:none}
+#employeesList .staff-directory-person summary>span:first-child{min-width:0;overflow-wrap:anywhere}
+#employeesList .staff-contact-chevron{color:var(--muted);flex-shrink:0}
+#employeesList .staff-directory-person details[open] .staff-contact-chevron{transform:rotate(90deg)}
+#employeesList .staff-directory-person>button{width:32px;min-width:32px;min-height:32px;padding:2px;font-size:15px;border-radius:7px}
+#employeesList .staff-directory-contacts{min-width:0;font-size:10px;padding-bottom:4px}
+#employeesList .contact-btns{display:flex;flex-direction:column;gap:4px;margin:3px 0}
+#employeesList .contact-btn{min-width:0;min-height:32px;font-size:10px;padding:5px 4px;white-space:normal;overflow-wrap:anywhere}
+#employeesList .cabinet-access-control{padding:4px 0;min-width:0}
+#employeesList .cabinet-role-select{min-width:0;max-width:100%;font-size:10px}
+#employeesList .cabinet-access-button{min-width:0;max-width:100%;font-size:10px;white-space:normal}
+</style></head>""",1).replace('</body>', r"""
+<script>
+function normalizeCabinetClock(value){
+ const raw=String(value??'').trim();
+ const compact=/^\d{3,4}$/.test(raw)?raw.slice(0,-2)+':'+raw.slice(-2):raw;
+ const match=/^(\d{1,2})[:.](\d{2})$/.exec(compact);
+ return match&&Number(match[1])<24&&Number(match[2])<60?match[1].padStart(2,'0')+':'+match[2]:'';
+}
+</script></body>""",1)
+
+
+INLINE_INDEX_HTML = _all_cabinet_employee_directory_html(INLINE_INDEX_HTML)
