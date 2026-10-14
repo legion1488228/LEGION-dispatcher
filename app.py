@@ -6367,7 +6367,8 @@ async function ownerCabinetAction(key,cardId=null){
       `<div class="cabinet-cash-result"><span>В личную кассу</span><strong id="cabinetCashPreview">${cabinetMoney(cash.commission??0)} ₽</strong></div><p>Откат учитывается отдельно. После сохранения кассы откроется фото в день заказа.</p>`;
   }else if(key==='photo'){
     title=card.source==='gbu'?(card.first_received?'Второе фото · конечная точка':'Первое фото'):'Фото по заказу';submit='Отправить фото';
-    fields='<label>Фото<input name="photo" type="file" accept="image/*" required></label><img id="cabinetPhotoPreview" alt="Выбранное фото" hidden style="max-width:100%;max-height:240px;border-radius:12px">'+(card.source==='gbu'&&card.first_received?'<p>Второе фото сохранится. Два фото и итоговый отчёт появятся в группе после всех первых фото ГБУ.</p>':'');
+    const captionFields=card.source==='private'?`<p class="cabinet-photo-surname">${esc(String(card.surname||'').toUpperCase())}</p><label>Комментарий к фото<textarea name="comment" required maxlength="500" rows="2" placeholder="Название морга, во сколько быть в морге"></textarea></label><p>Фамилия будет первой строкой подписи к фото.</p>`:(!card.first_received?input('surname','Фамилия умершего','','text','required maxlength="100" autocomplete="off"'):'');
+    fields=captionFields+'<label>Фото<input name="photo" type="file" accept="image/*" required></label><img id="cabinetPhotoPreview" alt="Выбранное фото" hidden style="max-width:100%;max-height:240px;border-radius:12px">'+(card.source==='gbu'&&card.first_received?'<p>Второе фото сохранится. Два фото и итоговый отчёт появятся в группе после всех первых фото ГБУ.</p>':'');
   }else if(key==='tea'){
     title='Итоговый отчёт';submit=card.tea_received?'Изменить отчёт':'Завершить заказ';
     fields=input('amount','Чай по заказу, ₽',card.tea_amount??'','number','required min="0" max="10000000" step="1" inputmode="numeric"')+'<p>Если чая не было, укажите 0. После сохранения заказ будет отмечен завершённым ✅.</p>';
@@ -6398,8 +6399,17 @@ async function ownerCabinetAction(key,cardId=null){
   const form=qs('#cabinetNativeForm'),button=qs('button[type=submit]',form),status=qs('#cabinetActionStatus',form);
   let requestId=crypto.randomUUID(),body=null,posted=false,busy=false,previewUrl=null;
   const fileInput=qs('input[type=file]',form);
+  const photoCaption=key==='photo'?qs('[name=surname],[name=comment]',form):null;
+  const photoReady=()=>!fileInput||(!!fileInput.files[0]&&(!photoCaption||!!photoCaption.value.trim()));
+  if(key==='photo'){
+    button.disabled=!photoReady();
+    if(photoCaption)photoCaption.oninput=()=>{
+      if(photoCaption.name==='surname')photoCaption.value=photoCaption.value.toUpperCase();
+      button.disabled=busy||!photoReady();
+    };
+  }
   if(key==='cash')qs('[name=commission]',form).oninput=e=>{qs('#cabinetCashPreview').textContent=cabinetMoney(Number(e.target.value)||0)+' ₽'};
-  if(fileInput)fileInput.onchange=()=>{if(previewUrl)URL.revokeObjectURL(previewUrl);const img=qs('#cabinetPhotoPreview',form);if(fileInput.files[0]){previewUrl=URL.createObjectURL(fileInput.files[0]);img.src=previewUrl;img.hidden=false;img.onload=()=>URL.revokeObjectURL(previewUrl)}};
+  if(fileInput)fileInput.onchange=()=>{button.disabled=busy||!photoReady();if(previewUrl)URL.revokeObjectURL(previewUrl);const img=qs('#cabinetPhotoPreview',form);img.hidden=!fileInput.files[0];if(fileInput.files[0]){previewUrl=URL.createObjectURL(fileInput.files[0]);img.src=previewUrl;img.hidden=false;img.onload=()=>URL.revokeObjectURL(previewUrl)}};
   form.onsubmit=async e=>{
     e.preventDefault();if(busy||state.bootstrap?.user?.id!==uid||!state.bootstrap?.can_use_owner_cabinet)return;
     busy=true;button.disabled=true;
@@ -6408,7 +6418,11 @@ async function ownerCabinetAction(key,cardId=null){
         const values=Object.fromEntries(new FormData(form));
         if(key==='edit'&&(card.first_received||card.cash))values.source=card.source;
         if(key==='cash'){for(const k of ['team_size','commission','kickback','reserve'])values[k]=Number(values[k]);values.version=card.cash?.version||0;if(values.reserve>values.team_size)throw Error('Резерва не может быть больше состава бригады')}
-        if(key==='photo'){values.image=await cabinetImage(fileInput.files[0]);delete values.photo;values.ordinal=card.source==='gbu'&&card.first_received?2:1}
+        if(key==='photo'){
+          if(photoCaption&&!photoCaption.value.trim())throw Error(card.source==='gbu'?'Укажите фамилию умершего':'Укажите название морга и во сколько быть в морге');
+          if(photoCaption)values[photoCaption.name]=photoCaption.name==='surname'?photoCaption.value.trim().toUpperCase():photoCaption.value.trim();
+          values.image=await cabinetImage(fileInput.files[0]);delete values.photo;values.ordinal=card.source==='gbu'&&card.first_received?2:1;
+        }
         if(key==='tea')values.amount=Number(values.amount);
         if(key==='readiness'||key==='number')values.work_date=data.tomorrow;
         body=JSON.stringify({request_id:requestId,action:key,card_id:cardId,values});
@@ -6447,7 +6461,7 @@ async function ownerCabinetAction(key,cardId=null){
       }
       status.textContent='Действие сохранено и ожидает бота. Можно закрыть окно и вернуться позже.';button.textContent='Проверить результат';
     }catch(error){status.textContent=error.message;button.textContent=posted?'Проверить результат':body?'Повторить тот же запрос':submit}
-    finally{busy=false;button.disabled=false}
+    finally{busy=false;button.disabled=key==='photo'&&!body&&!photoReady()}
   };
 }
 function cabinetButton(key,label,icon,card=null,primary=false,disabled=false){
@@ -6910,6 +6924,23 @@ def cabinet_command_create(data: CabinetCommandInput, db: Session = Depends(get_
             raise HTTPException(404, 'Заказ удалён или передан другому бригадиру')
         if data.action == 'cash':
             cabinet_cash_stage_guard(db, card)
+        if data.action == 'photo':
+            values = payload['values']
+            ordinal = values.get('ordinal')
+            if type(ordinal) is not int or ordinal not in {1, 2} or (card.source == 'private' and ordinal != 1):
+                raise HTTPException(400, 'Откройте карточку фото заново')
+            if card.source == 'gbu' and ordinal == 1:
+                raw_surname = values.get('surname')
+                surname = ' '.join(raw_surname.split()).upper() if isinstance(raw_surname, str) else ''
+                if not surname or len(surname) > 100 or not re.fullmatch(r"[А-ЯЁA-Z\s.'’\-]+", surname):
+                    raise HTTPException(400, 'Укажите фамилию умершего')
+                values['surname'] = surname
+            elif card.source == 'private':
+                raw_comment = values.get('comment')
+                comment = raw_comment.strip() if isinstance(raw_comment, str) else ''
+                if not comment or len(comment) > 500:
+                    raise HTTPException(400, 'Укажите комментарий к фото: название морга, во сколько быть в морге (до 500 символов)')
+                values['comment'] = comment
         if data.action == 'delete' or data.action == 'number':
             deletion = cabinet_order_deletion_info(db, card)
             if not deletion['can_delete']:
