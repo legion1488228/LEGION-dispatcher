@@ -8000,7 +8000,8 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('Не отписались к 15:3
 @app.get('/api/owner/brigade-control')
 def owner_brigade_control(work_date: date, db: Session = Depends(get_db),
         user: TelegramUser = Depends(require_app_user)):
-    require_management_owner(db, user)
+    if not _dispatcher_access(db, user.id) or cabinet_kind(db, user.id) not in {'owner', 'assistant'}:
+        raise HTTPException(403, 'Контроль доступен владельцу и помощникам с диспетчерской')
     cards = db.scalars(select(NumberCardEvent).where(NumberCardEvent.work_date == work_date,
         NumberCardEvent.source.in_(('private', 'gbu')), NumberCardEvent.tg_id.notin_(HIDDEN_TG_IDS),
         _visible_number_card())).all()
@@ -8089,11 +8090,14 @@ def _owner_brigade_control_html(html):
     replace('<section id="ownerManagementView" class="view">', '<section id="ownerBrigadeControlView" class="view"><div id="ownerBrigadeControlContent"></div></section>\n<section id="ownerManagementView" class="view">')
     replace('<button data-view="ownerManagementView" hidden aria-hidden="true"></button>', '<button data-view="ownerManagementView" hidden aria-hidden="true"></button><button data-view="ownerBrigadeControlView" hidden aria-hidden="true"></button>')
     replace("{key:'management',title:'Управление',icon:()=>'<span>⚙</span>'}", "{key:'brigadeControl',title:'Контроль',icon:()=>cabinetIcon('control')}")
+    replace("  if(kind==='assistant')return [{...readiness,title:'Заказы'},staff,cash,earnings,{key:'own',title:'Личный кабинет',icon:()=>cabinetIcon('user')}];",
+        "  if(kind==='assistant')return [{...readiness,title:'Заказы'},staff,cash,earnings,{key:'own',title:'Личный кабинет',icon:()=>cabinetIcon('user')},...(canUseBrigadeControl()?[{key:'brigadeControl',title:'Контроль',icon:()=>cabinetIcon('control')}]:[])];")
+    replace("  const identity=state.bootstrap.user.id+':'+kind;", "  const identity=state.bootstrap.user.id+':'+kind+':'+canUseBrigadeControl();")
     replace("  own.hidden=true;", """  own.hidden=true;
   const management=qs('#ownerManagementTop'),owner=kind==='owner'&&state.bootstrap.can_manage_cabinets===true;
   management.hidden=!owner;management.classList.toggle('active',owner&&roleNavigationActive==='management');management.setAttribute('aria-current',owner&&roleNavigationActive==='management'?'page':'false');
   management.onclick=()=>roleNavigate('management').catch(e=>toast(e.message));
-  if(!owner){ownerBrigadeControlData=null;ownerBrigadeControlIdentity='';qs('#ownerBrigadeControlContent').replaceChildren()}""")
+  if(!canUseBrigadeControl()){ownerBrigadeControlData=null;ownerBrigadeControlIdentity='';qs('#ownerBrigadeControlContent').replaceChildren()}""")
     replace("  if(!roleNavigationItems(kind).some(item=>item.key===target))return;", "  if(!(target==='management'&&kind==='owner'&&state.bootstrap.can_manage_cabinets===true)&&!roleNavigationItems(kind).some(item=>item.key===target))return;")
     replace("  if(target==='management'){await roleActivateView('ownerManagementView');return}", "  if(target==='management'){await roleActivateView('ownerManagementView');return}\n  if(target==='brigadeControl'){await roleActivateView('ownerBrigadeControlView');return}")
     replace("  document.body.classList.toggle('management-open',v==='ownerManagementView');", "  document.body.classList.toggle('management-open',v==='ownerManagementView');\n  document.body.classList.toggle('owner-brigade-control-open',v==='ownerBrigadeControlView');")
@@ -8101,6 +8105,10 @@ def _owner_brigade_control_html(html):
     replace("  if(document.hidden||currentViewId()==='ownerManagementView') return;", "  if(document.hidden||currentViewId()==='ownerManagementView') return;\n  if(currentViewId()==='ownerBrigadeControlView'){try{await loadOwnerBrigadeControl()}catch{}return}")
     replace("function currentViewId() {", r"""let ownerBrigadeControlData=null,ownerBrigadeControlIdentity='',ownerBrigadeControlRequest=0;
 let ownerBrigadeControlSource='all',ownerBrigadeControlStage=null;
+function canUseBrigadeControl(){
+  const b=state.bootstrap;
+  return !!b&&((b.cabinet_kind==='owner'&&b.can_manage_cabinets===true)||(b.cabinet_kind==='assistant'&&b.cabinet_only===false));
+}
 function renderOwnerBrigadeControl(){
   const root=qs('#ownerBrigadeControlContent'),data=ownerBrigadeControlData;
   if(!data||currentViewId()!=='ownerBrigadeControlView')return;
@@ -8130,10 +8138,10 @@ function renderOwnerBrigadeControl(){
 }
 async function loadOwnerBrigadeControl(){
   const root=qs('#ownerBrigadeControlContent'),uid=state.bootstrap?.user?.id,day=state.selectedDate;
-  if(state.bootstrap?.cabinet_kind!=='owner'||state.bootstrap?.can_manage_cabinets!==true){ownerBrigadeControlData=null;root.textContent='Раздел доступен только владельцу';return}
+  if(!canUseBrigadeControl()){ownerBrigadeControlData=null;root.textContent='Раздел доступен владельцу и помощникам с диспетчерской';return}
   const identity=uid+':'+day,request=++ownerBrigadeControlRequest;
   if(ownerBrigadeControlIdentity!==identity){ownerBrigadeControlIdentity=identity;ownerBrigadeControlData=null;ownerBrigadeControlSource='all';ownerBrigadeControlStage=null;root.innerHTML='<p role="status">Загрузка контроля заказов…</p>'}
-  const active=()=>request===ownerBrigadeControlRequest&&currentViewId()==='ownerBrigadeControlView'&&state.selectedDate===day&&state.bootstrap?.user?.id===uid&&state.bootstrap?.cabinet_kind==='owner'&&state.bootstrap?.can_manage_cabinets===true;
+  const active=()=>request===ownerBrigadeControlRequest&&currentViewId()==='ownerBrigadeControlView'&&state.selectedDate===day&&state.bootstrap?.user?.id===uid&&canUseBrigadeControl();
   try{
     const data=await api('/api/owner/brigade-control?work_date='+encodeURIComponent(day),{cache:'no-store'});
     if(!active()||data.work_date!==day)return;
@@ -8144,6 +8152,7 @@ function currentViewId() {""")
     return html.replace('</head>', """<style id="owner-brigade-control-style">
 .owner-management-top[hidden]{display:none!important}.owner-management-top.active{color:var(--gold);border-color:var(--gold)}
 .topbar>div:first-child{min-width:0}.topbar>div:last-child{flex-shrink:0}.owner-management-top{font-size:23px}
+body[data-cabinet-kind="assistant"] .role-navigation small{font-size:9px;line-height:1.15;white-space:normal;overflow-wrap:anywhere}
 .owner-brigade-control-open #summary,.owner-brigade-control-open #selectedDayHeader,.owner-brigade-control-open main>h3,.owner-brigade-control-open #roleOwnOrders{display:none!important}
 #ownerBrigadeControlContent{padding:8px 0 16px}.bc-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}.bc-heading h2{font-size:21px;margin:0}.bc-heading p{font-size:12px;color:var(--muted);margin:4px 0 0}.bc-date{font-size:11px;color:var(--muted);text-align:right}.bc-date input{display:block;max-width:128px;min-height:32px;padding:4px 6px;border:1px solid var(--line);border-radius:10px;background:var(--panel2);color:var(--text);font-size:12px}
 .bc-counters{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.bc-counters button{min-width:0;min-height:70px;padding:8px 4px;border:1px solid var(--line);border-radius:13px;background:var(--panel);color:var(--text)}.bc-counters b{display:block;font-size:23px}.bc-counters span{display:block;font-size:11px;color:var(--muted);margin-top:3px}.bc-counters button[aria-pressed=true]{border-color:var(--gold);background:#211d15}
