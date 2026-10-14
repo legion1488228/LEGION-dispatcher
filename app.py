@@ -8541,10 +8541,10 @@ def _compact_owner_expanded_cash_html(html):
 #modal.owner-cash-modal #cashMonthTabs{display:flex;gap:4px;overflow-x:auto;margin:3px 0;scrollbar-width:none}
 #modal.owner-cash-modal .owner-cash-period{display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:10px;color:var(--muted);margin:3px 0}
 #modal.owner-cash-modal #cashReminder{padding:3px 6px;min-height:26px;font-size:11px;border-radius:7px}
-#modal.owner-cash-modal #cashMatrixScroller{--cash-col:38px;--cash-day:30px;--cash-total:54px;--cash-row:18px;overflow:auto;margin:0;border:1px solid var(--line);border-radius:8px;max-height:none}
-#modal.owner-cash-modal .owner-cash-matrix{border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:10.5px;font-variant-numeric:tabular-nums}
-#modal.owner-cash-modal .owner-cash-matrix th,#modal.owner-cash-modal .owner-cash-matrix td{padding:0 1px;height:var(--cash-row);text-align:center;border-bottom:1px solid var(--line);border-right:1px solid var(--line);white-space:nowrap;overflow:hidden}
-#modal.owner-cash-modal .owner-cash-matrix th{height:32px;background:var(--panel2);font-size:10px;font-weight:650;line-height:1.2;position:sticky;top:0;z-index:3}
+#modal.owner-cash-modal #cashMatrixScroller{--cash-col:72px;--cash-day:42px;--cash-total:80px;--cash-row:30px;overflow:auto;margin:0;border:1px solid var(--line);border-radius:8px;max-height:none}
+#modal.owner-cash-modal .owner-cash-matrix{border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:13px;font-variant-numeric:tabular-nums}
+#modal.owner-cash-modal .owner-cash-matrix th,#modal.owner-cash-modal .owner-cash-matrix td{padding:0 3px;height:var(--cash-row);text-align:center;border-bottom:1px solid var(--line);border-right:1px solid var(--line);white-space:nowrap;overflow:hidden}
+#modal.owner-cash-modal .owner-cash-matrix th{height:44px;background:var(--panel2);font-size:12px;font-weight:650;line-height:1.35;position:sticky;top:0;z-index:3}
 #modal.owner-cash-modal .owner-cash-matrix th button{padding:0 1px;font-size:inherit;font-weight:inherit;line-height:inherit}
 #modal.owner-cash-modal .owner-cash-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #modal.owner-cash-modal .owner-cash-matrix button{display:block;width:100%;height:100%;min-width:0;min-height:0;padding:0;border:0;border-radius:0;color:inherit;background:none;font-size:inherit;font-weight:inherit;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -8567,8 +8567,7 @@ function ownerCashControls(month){
 function ownerCashShortName(label){
  const parts=String(label||'').trim().split(/\s+/),first=parts.shift()||'—';
  const metro=parts.join(' ').replace(/\s+\d{3}(?:\s*см)?$/,'');
- const shortMetro=metro.replace(/Котельники/gi,'Котельн.').replace(/Медведково/gi,'Медведк.').replace(/Проспект/gi,'пр.').replace(/Преображенская/gi,'Преображ.').replace(/Лухмановская/gi,'Лухман.');
- return `<span class="owner-cash-name">${esc(first.length>10?first.slice(0,9)+'.':first)}</span><span class="owner-cash-name">${esc(shortMetro)}</span>`;
+ return `<span class="owner-cash-name">${esc(first)}</span><span class="owner-cash-name">${esc(metro)}</span>`;
 }
 function ownerCashMatrix(ledger){
  const brigs=ledger.brigadiers||[],days=ledger.days||[];
@@ -8590,13 +8589,12 @@ function ownerCashMatrix(ledger){
  return `<div id="cashMatrixScroller" role="region" aria-label="Расширенная касса по дням и бригадирам"><table class="owner-cash-matrix"><colgroup><col style="width:var(--cash-day)">${brigs.map(()=>'<col style="width:var(--cash-col)">').join('')}<col style="width:var(--cash-total)"></colgroup><thead><tr><th class="cash-day">День</th>${brigs.map(b=>`<th><button type="button" data-owner-cash-name="${b.tg_id}" aria-label="${esc(b.name)}" title="${esc(b.name)}">${ownerCashShortName(b.name)}</button></th>`).join('')}<th class="cash-total">Итого</th></tr></thead><tbody>${rows}</tbody></table></div><p class="owner-cash-hint">Нажмите сумму — подробности · ↔ остальные бригадиры</p>`;
 }
 function fitOwnerCashMatrix(scroller,count,days){
- const width=scroller.clientWidth||Math.max(280,window.innerWidth-14),day=30,total=54;
- const col=(width-day-total)/Math.min(8,count),table=scroller.querySelector('table');
+ const width=scroller.clientWidth||Math.max(280,window.innerWidth-14),day=42,total=80;
+ const col=Math.max(64,(width-day-total)/Math.min(4,count)),table=scroller.querySelector('table');
  scroller.style.setProperty('--cash-col',col+'px');scroller.style.setProperty('--cash-day',day+'px');scroller.style.setProperty('--cash-total',total+'px');
  table.style.width=(day+total+col*count)+'px';
  const modal=qs('#modal'),available=window.innerHeight-scroller.getBoundingClientRect().top-82;
- const row=Math.max(14,Math.min(22,(available-46)/(days+3)));
- scroller.style.setProperty('--cash-row',row+'px');
+ scroller.style.setProperty('--cash-row','30px');
  if(modal?.classList.contains('owner-cash-modal'))scroller.style.maxHeight=Math.max(160,available)+'px';
 }
 function bindOwnerCashDetails(body,ledger,active){
