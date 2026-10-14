@@ -8388,3 +8388,32 @@ body.dashboard-compact #readinessGroups .group-stats b{font-size:16px;line-heigh
 
 
 INLINE_INDEX_HTML = _dense_readiness_dashboard_html(INLINE_INDEX_HTML)
+
+
+def _square_photo_indicators_html(html):
+    replacements = (
+        ('function renderOwnerBrigadeControl(){', r'''function controlPhotoMarkers(card){
+  const received=card.source==='gbu'?[card.first_received,card.second_received]:[card.first_received];
+  return '<span class="bc-photo-marks">'+received.map((ready,index)=>
+    `<span class="bc-photo-mark" data-photo-slot="${index+1}" title="Фото ${index+1}: ${ready?'получено':'ожидается'}">${ready?'✅':'⬜️'}</span>`
+  ).join('')+'</span>';
+}
+function renderOwnerBrigadeControl(){'''),
+        ('${count!==null?esc(count):ready?cabinetIcon(\'check\'):waiting}',
+         '${count!==null?(key===\'photo\'?count:esc(count)):ready?cabinetIcon(\'check\'):waiting}'),
+        ('card.photos_complete,`${card.photos_received}/${card.photos_required}`)',
+         'card.photos_complete,controlPhotoMarkers(card))'),
+    )
+    for old, new in replacements:
+        if html.count(old) != 1:
+            raise ValueError('Square photo indicator anchor missing: ' + old[:100])
+        html = html.replace(old, new, 1)
+    return html.replace('</head>', """<style id="square-photo-indicators-style">
+#ownerBrigadeControlContent .bc-photo-marks{display:inline-flex;align-items:center;gap:1px;white-space:nowrap;vertical-align:middle}
+#ownerBrigadeControlContent .bc-photo-mark{display:inline-block;flex:none;font-size:10px;line-height:1}
+#ownerBrigadeControlContent .bc-stage-photo b{white-space:nowrap;overflow-wrap:normal}
+@media(max-width:350px){#ownerBrigadeControlContent .bc-stage-photo{grid-template-columns:8px minmax(0,1fr) auto;gap:1px}#ownerBrigadeControlContent .bc-stage-photo .cabinet-icon{width:8px;height:8px}#ownerBrigadeControlContent .bc-stage-photo b{font-size:9px}#ownerBrigadeControlContent .bc-photo-mark{font-size:9px}}
+</style></head>""", 1)
+
+
+INLINE_INDEX_HTML = _square_photo_indicators_html(INLINE_INDEX_HTML)
