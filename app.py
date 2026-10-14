@@ -8500,3 +8500,127 @@ async function openReadinessGroupedList(mode,day=state.selectedDate){'''),
 
 
 INLINE_INDEX_HTML = _compact_ready_employee_rows_html(INLINE_INDEX_HTML)
+
+
+def _compact_owner_expanded_cash_html(html):
+    start = html.index('async function openCashTable(){')
+    end = html.index('let ownerCabinetRequest=', start)
+    section = html[start:end]
+    def replace(old, new):
+        nonlocal section
+        if old not in section:
+            raise RuntimeError('Expanded cash UI anchor missing: ' + old[:70])
+        section = section.replace(old, new, 1)
+    replace('  const resume=cashTableReturnState;',
+            '  const compactCash=!!state.bootstrap?.is_owner;\n  const resume=cashTableReturnState;')
+    replace("showModal('📒 Мои таблицы', `", "showModal(compactCash?'Касса':'📒 Мои таблицы', compactCash?ownerCashControls(cashMonth):`")
+    replace('  const cashSession=cashModalGeneration;',
+            "  qs('#modal').classList.toggle('owner-cash-modal',compactCash);\n  const cashSession=cashModalGeneration;")
+    replace('const matrix=brigadiers.length ? `', 'const matrix=compactCash?ownerCashMatrix(ledger):brigadiers.length ? `')
+    replace('      body.innerHTML=`\n        <div class="summary-grid compact">',
+            '''      body.innerHTML=compactCash?`<div class="owner-cash-period"><span>Суммы в ₽ · точка — откат</span><button type="button" class="secondary" id="cashReminder" ${cashReminderSending?'disabled':''}>🔔 Сверка</button></div>${matrix}<div id="ownerCashDetail" hidden></div>`:`
+        <div class="summary-grid compact">''')
+    replace("      qsa('[data-cash-edit]',body)", '''      if(compactCash)bindOwnerCashDetails(body,ledger,cashActive);
+      qsa('[data-cash-edit]',body)''')
+    replace('if(currentScroller){currentScroller.scrollLeft=savedTableScroll;',
+            'if(compactCash&&currentScroller)fitOwnerCashMatrix(currentScroller,brigadiers.length,days.length);\n        if(currentScroller){currentScroller.scrollLeft=savedTableScroll;')
+    html = html[:start] + section + html[end:]
+    html = html.replace('function showModal(title, body) {',
+        "function showModal(title, body) {qs('#modal').classList.remove('owner-cash-modal');", 1)
+    return html.replace('</body>', r'''
+<style>
+#modal.owner-cash-modal{left:0;right:0;top:4px;bottom:calc(72px + var(--safe-bottom));width:auto;max-width:1100px;margin:0 auto;transform:none;padding:6px;border-radius:12px;overflow:auto;max-height:none}
+#modal.owner-cash-modal .modal-head{margin:0 0 4px;min-height:30px;gap:6px}
+#modal.owner-cash-modal .modal-head h3{font-size:18px;margin:0}
+#modal.owner-cash-modal .close-btn{width:30px;height:30px;min-height:30px;padding:0;border-radius:8px;font-size:20px}
+#modal.owner-cash-modal .owner-cash-controls{display:flex;align-items:center;gap:4px;margin-bottom:4px}
+#modal.owner-cash-modal .owner-cash-controls button,#modal.owner-cash-modal [data-cash-range],#modal.owner-cash-modal #cashMonthTabs button{padding:4px 6px;min-height:28px;font-size:11px;border-radius:7px;white-space:nowrap}
+#modal.owner-cash-modal .owner-cash-controls label{flex:1;min-width:0}
+#modal.owner-cash-modal #cashMonth{width:100%;min-width:0;box-sizing:border-box;padding:3px 5px;font-size:14px;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:7px;min-height:28px}
+#modal.owner-cash-modal .owner-cash-ranges{display:flex;gap:4px}
+#modal.owner-cash-modal #cashMonthTabs{display:flex;gap:4px;overflow-x:auto;margin:3px 0;scrollbar-width:none}
+#modal.owner-cash-modal .owner-cash-period{display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:10px;color:var(--muted);margin:3px 0}
+#modal.owner-cash-modal #cashReminder{padding:3px 6px;min-height:26px;font-size:11px;border-radius:7px}
+#modal.owner-cash-modal #cashMatrixScroller{--cash-col:38px;--cash-day:30px;--cash-total:54px;--cash-row:18px;overflow:auto;margin:0;border:1px solid var(--line);border-radius:8px;max-height:none}
+#modal.owner-cash-modal .owner-cash-matrix{border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:10.5px;font-variant-numeric:tabular-nums}
+#modal.owner-cash-modal .owner-cash-matrix th,#modal.owner-cash-modal .owner-cash-matrix td{padding:0 1px;height:var(--cash-row);text-align:center;border-bottom:1px solid var(--line);border-right:1px solid var(--line);white-space:nowrap;overflow:hidden}
+#modal.owner-cash-modal .owner-cash-matrix th{height:32px;background:var(--panel2);font-size:10px;font-weight:650;line-height:1.2;position:sticky;top:0;z-index:3}
+#modal.owner-cash-modal .owner-cash-matrix th button{padding:0 1px;font-size:inherit;font-weight:inherit;line-height:inherit}
+#modal.owner-cash-modal .owner-cash-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#modal.owner-cash-modal .owner-cash-matrix button{display:block;width:100%;height:100%;min-width:0;min-height:0;padding:0;border:0;border-radius:0;color:inherit;background:none;font-size:inherit;font-weight:inherit;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#modal.owner-cash-modal .owner-cash-matrix .cash-day{position:sticky;left:0;z-index:2;background:var(--panel)}
+#modal.owner-cash-modal .owner-cash-matrix .cash-total{position:sticky;right:0;z-index:2;color:var(--gold);background:#211d15;font-weight:650}
+#modal.owner-cash-modal .owner-cash-matrix thead .cash-day,#modal.owner-cash-modal .owner-cash-matrix thead .cash-total{z-index:5}
+#modal.owner-cash-modal .owner-cash-matrix .cash-subtotal td{background:#211d15;color:var(--gold);height:calc(var(--cash-row) + 3px);font-weight:650}
+#modal.owner-cash-modal .owner-cash-value{position:relative;display:inline-block;max-width:calc(100% - 5px);vertical-align:middle}
+#modal.owner-cash-modal .cash-kickback-dot{position:absolute;right:-4px;top:0;width:3px;height:3px;border-radius:50%;background:var(--gold);pointer-events:none}
+#modal.owner-cash-modal .owner-cash-hint{font-size:10px;color:var(--muted);text-align:center;margin:4px 0 0}
+#modal.owner-cash-modal #ownerCashDetail{padding:10px;margin-top:6px;border:1px solid var(--line);border-radius:10px;background:var(--panel2)}
+#modal.owner-cash-modal #ownerCashDetail h4{margin:0 0 6px;font-size:14px}
+#modal.owner-cash-modal #ownerCashDetail p{font-size:12px;margin:4px 0;overflow-wrap:anywhere}
+#modal.owner-cash-modal #ownerCashDetail button{font-size:12px;padding:5px 8px;margin-top:6px}
+</style>
+<script>
+function ownerCashControls(month){
+ return `<div class="owner-cash-controls"><button type="button" class="secondary" onclick="rememberCashTablePosition();openPersonalTables(earningsReturnState)" aria-label="Назад к заработку">←</button><button type="button" class="secondary" id="cashPrevMonth" aria-label="Предыдущий месяц">‹</button><label><span class="hidden">Месяц кассы</span><input id="cashMonth" type="month" value="${esc(month)}" aria-label="Месяц кассы"></label><button type="button" class="secondary" id="cashNextMonth" aria-label="Следующий месяц">›</button></div><div class="owner-cash-ranges"><button type="button" class="primary" data-cash-range="month">Месяц</button><button type="button" class="secondary" data-cash-range="first">1–15</button><button type="button" class="secondary" data-cash-range="second">16–конец</button></div><div id="cashMonthTabs"></div><div id="cashTableBody">Загрузка…</div>`;
+}
+function ownerCashShortName(label){
+ const parts=String(label||'').trim().split(/\s+/),first=parts.shift()||'—';
+ const metro=parts.join(' ').replace(/\s+\d{3}(?:\s*см)?$/,'');
+ const shortMetro=metro.replace(/Котельники/gi,'Котельн.').replace(/Медведково/gi,'Медведк.').replace(/Проспект/gi,'пр.').replace(/Преображенская/gi,'Преображ.').replace(/Лухмановская/gi,'Лухман.');
+ return `<span class="owner-cash-name">${esc(first.length>10?first.slice(0,9)+'.':first)}</span><span class="owner-cash-name">${esc(shortMetro)}</span>`;
+}
+function ownerCashMatrix(ledger){
+ const brigs=ledger.brigadiers||[],days=ledger.days||[];
+ if(!brigs.length)return '<div class="empty">Кассовые бригадиры пока не добавлены</div>';
+ const n=v=>String(Number(v)||0),value=(commission,kickback,empty=false)=>`<span class="owner-cash-value">${empty&&!Number(commission)?'—':esc(n(commission))}${Number(kickback)?'<i class="cash-kickback-dot" aria-hidden="true"></i>':''}</span>`;
+ const btn=(commission,kickback,attrs,label,empty=false)=>`<button type="button" ${attrs} aria-label="${esc(label)}. Касса ${n(commission)} ₽, откат ${n(kickback)} ₽">${value(commission,kickback,empty)}</button>`;
+ const cell=(day,id)=>(day.cells||[]).find(c=>String(c.brigadier_tg_id)===String(id))||{};
+ function summary(label,subset){
+  const sum=(id,key)=>subset.reduce((a,d)=>a+Number(id===null?d.day?.[key]||0:cell(d,id)[key]||0),0);
+  return `<tr class="cash-subtotal" data-cash-subtotal="${esc(label)}"><td class="cash-day">${esc(label)}</td>${brigs.map(b=>`<td>${btn(sum(b.tg_id,'commission_rub'),sum(b.tg_id,'kickback_rub'),`data-owner-cash-summary="${esc(label)}" data-owner-cash-brig="${b.tg_id}"`,b.name+' · '+label)}</td>`).join('')}<td class="cash-total">${btn(sum(null,'commission_rub'),sum(null,'kickback_rub'),`data-owner-cash-summary="${esc(label)}"`,label+' · все бригадиры')}</td></tr>`;
+ }
+ let rows='';
+ for(const day of days){
+  rows+=`<tr data-owner-cash-day="${esc(day.work_date)}"><td class="cash-day"><button type="button" data-owner-cash-check="${esc(day.work_date)}" aria-label="Проверить кассу за ${esc(day.work_date)}">${dayNumber(day.work_date)}</button></td>${brigs.map(b=>{const c=cell(day,b.tg_id);return `<td>${btn(c.commission_rub,c.kickback_rub,`data-owner-cash-date="${esc(day.work_date)}" data-owner-cash-brig="${b.tg_id}"`,b.name+' · '+fmtDate(day.work_date),true)}</td>`}).join('')}<td class="cash-total">${btn(day.day?.commission_rub,day.day?.kickback_rub,`data-owner-cash-date="${esc(day.work_date)}"`,'Итого · '+fmtDate(day.work_date))}</td></tr>`;
+  if(Number(dayNumber(day.work_date))===15)rows+=summary('1–15',days.filter(d=>dayNumber(d.work_date)<=15));
+ }
+ if(days.some(d=>dayNumber(d.work_date)>15))rows+=summary('16–'+dayNumber(days.at(-1).work_date),days.filter(d=>dayNumber(d.work_date)>15));
+ rows+=summary(days[0]?.work_date.slice(-2)==='01'&&dayNumber(days.at(-1)?.work_date)>15?'Месяц':'Период',days);
+ return `<div id="cashMatrixScroller" role="region" aria-label="Расширенная касса по дням и бригадирам"><table class="owner-cash-matrix"><colgroup><col style="width:var(--cash-day)">${brigs.map(()=>'<col style="width:var(--cash-col)">').join('')}<col style="width:var(--cash-total)"></colgroup><thead><tr><th class="cash-day">День</th>${brigs.map(b=>`<th><button type="button" data-owner-cash-name="${b.tg_id}" aria-label="${esc(b.name)}" title="${esc(b.name)}">${ownerCashShortName(b.name)}</button></th>`).join('')}<th class="cash-total">Итого</th></tr></thead><tbody>${rows}</tbody></table></div><p class="owner-cash-hint">Нажмите сумму — подробности · ↔ остальные бригадиры</p>`;
+}
+function fitOwnerCashMatrix(scroller,count,days){
+ const width=scroller.clientWidth||Math.max(280,window.innerWidth-14),day=30,total=54;
+ const col=(width-day-total)/Math.min(8,count),table=scroller.querySelector('table');
+ scroller.style.setProperty('--cash-col',col+'px');scroller.style.setProperty('--cash-day',day+'px');scroller.style.setProperty('--cash-total',total+'px');
+ table.style.width=(day+total+col*count)+'px';
+ const modal=qs('#modal'),available=window.innerHeight-scroller.getBoundingClientRect().top-82;
+ const row=Math.max(14,Math.min(22,(available-46)/(days+3)));
+ scroller.style.setProperty('--cash-row',row+'px');
+ if(modal?.classList.contains('owner-cash-modal'))scroller.style.maxHeight=Math.max(160,available)+'px';
+}
+function bindOwnerCashDetails(body,ledger,active){
+ const host=qs('#ownerCashDetail',body);let request=0;
+ const money=n=>new Intl.NumberFormat('ru-RU').format(Number(n)||0)+' ₽';
+ const show=(title,content)=>{host.hidden=false;host.innerHTML=`<h4>${esc(title)}</h4>${content}<button type="button" class="secondary" data-owner-cash-hide>Свернуть</button>`;host.querySelector('[data-owner-cash-hide]').onclick=()=>{request++;host.hidden=true};host.scrollIntoView?.({block:'nearest'})};
+ body.onclick=async event=>{
+  const button=event.target.closest('button');if(!button||!body.contains(button)||!active())return;
+  if(button.dataset.ownerCashCheck){rememberCashTablePosition();openCashDayCheck(button.dataset.ownerCashCheck);return}
+  if(button.dataset.ownerCashName){const b=ledger.brigadiers.find(b=>String(b.tg_id)===button.dataset.ownerCashName);if(b)show(b.name,'');return}
+  const date=button.dataset.ownerCashDate,label=button.dataset.ownerCashSummary,id=button.dataset.ownerCashBrig;
+  if(!date&&!label)return;
+  const seq=++request,b=id?ledger.brigadiers.find(b=>String(b.tg_id)===id):null;
+  const days=date?ledger.days.filter(d=>d.work_date===date):ledger.days.filter(d=>label==='1–15'?dayNumber(d.work_date)<=15:label.startsWith('16–')?dayNumber(d.work_date)>15:true);
+  const totals=days.reduce((out,d)=>{const c=id?(d.cells||[]).find(c=>String(c.brigadier_tg_id)===id)||{}:d.day||{};out.commission+=Number(c.commission_rub)||0;out.kickback+=Number(c.kickback_rub)||0;return out},{commission:0,kickback:0});
+  show((b?.name||'Все бригадиры')+' · '+(date?fmtDate(date):label),`<p>Касса: <b>${money(totals.commission)}</b></p><p>Откат отдельно: <b>${money(totals.kickback)}</b></p>${date?'<div data-owner-cash-entries>Загрузка записей…</div>':''}`);
+  if(!date)return;
+  try{const result=await api('/api/cash?work_date='+encodeURIComponent(date));if(!active()||seq!==request)return;
+   const rows=(result.rows||[]).filter(x=>!id||String(x.brigadier_tg_id)===id);
+   host.querySelector('[data-owner-cash-entries]').innerHTML=rows.map(x=>`<p>${esc(x.brigadier_name)} · ${esc(x.category_label||x.category||'')} · ${Number(x.team_size)||0} чел${x.reserve_count?' · резерв '+Number(x.reserve_count):''}<br>Касса ${money(x.commission_rub)} · откат ${money(x.kickback_rub)}</p>`).join('')||'<p>Записей за этот день нет.</p>';
+  }catch(e){if(active()&&seq===request)host.querySelector('[data-owner-cash-entries]').textContent=e.message}
+ };
+}
+</script></body>''', 1)
+
+
+INLINE_INDEX_HTML = _compact_owner_expanded_cash_html(INLINE_INDEX_HTML)
