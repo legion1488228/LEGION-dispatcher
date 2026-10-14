@@ -5586,26 +5586,24 @@ function updateMoneyButton(data){
 async function openVladAllowance(resume=null){
  if(!(state.bootstrap?.is_owner||state.bootstrap?.can_view_vlad_allowance)){toast('Нет доступа к надбавке');return}
  let month=resume?.month||state.selectedDate?.slice(0,7)||new Date().toLocaleDateString('sv-SE',{timeZone:'Europe/Moscow'}).slice(0,7);
- let period='month',data=null,revision=0,signature='';
- const title=state.bootstrap?.is_owner?'💰 Надбавка Владу Рязанскому':'💰 Моя надбавка';
- showModal(title,`<button class="secondary" id="vladAllowanceBack" style="margin-bottom:12px">← Назад</button>
- <p class="muted">1 сотрудник = 100 ₽. По всем частным заказам и ГБУ за день, без выносов. Суммы обновляются автоматически.</p>
- <label>Месяц<input type="month" id="vladAllowanceMonth" value="${esc(month)}" style="width:100%;box-sizing:border-box"></label>
- <div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0"><button class="primary" data-vlad-period="month">Весь месяц</button><button class="secondary" data-vlad-period="first">1–15</button><button class="secondary" data-vlad-period="second">16–конец</button></div>
+ let data=null,revision=0,signature='';
+ const title=state.bootstrap?.is_owner?'💵 Владу':'💵 Моя надбавка';
+ showModal(title,`<button type="button" class="secondary" id="vladAllowanceBack" aria-label="Назад">←</button>
+ <label class="vlad-month-picker"><input type="month" id="vladAllowanceMonth" value="${esc(month)}" aria-label="Месяц надбавки"></label>
+ <p class="muted vlad-month-note">1 сотрудник = 100 ₽ · без выносов</p>
  <div id="vladAllowanceBody">Загрузка…</div><small class="muted" id="vladAllowanceStatus" role="status"></small>`);
  const body=qs('#vladAllowanceBody'),status=qs('#vladAllowanceStatus'),input=qs('#vladAllowanceMonth'),session=cashModalGeneration;
+ qs('#modal .modal-head').prepend(qs('#vladAllowanceBack'));qs('#modal').scrollTop=0;
  const active=()=>session===cashModalGeneration && qs('#vladAllowanceBody')===body && !qs('#modal').classList.contains('hidden');
  const rub=value=>new Intl.NumberFormat('ru-RU',{maximumFractionDigits:0}).format(Number(value||0)/100)+' ₽';
  qs('#vladAllowanceBack').onclick=()=>resume?openPersonalTables(resume):closeModal();
  function draw(){
   if(!active()||!data)return;
-  const rows=data.daily.filter(x=>period==='month'||(period==='first'?x.day<=15:x.day>=16));
-  const total=rows.reduce((sum,x)=>sum+x.amount,0),staff=rows.reduce((sum,x)=>sum+x.staff_count,0);
-  const pos=qs('#modal').scrollTop;
-  body.innerHTML=`<div class="attention" style="display:flex;justify-content:space-between;gap:12px;align-items:center"><div><b>${staff} сотрудников</b><p>По заказам за период</p></div><div style="text-align:right"><small class="muted">Итого надбавка</small><br><b style="font-size:24px;color:var(--gold)">${rub(total)}</b></div></div>
-  <table style="width:100%;border-collapse:collapse;margin-top:16px"><thead><tr><th style="text-align:left">День</th><th style="text-align:center">Сотрудников</th><th style="text-align:right">Надбавка</th></tr></thead><tbody>${rows.map(x=>`<tr style="border-bottom:1px solid var(--line,#303036);${x.work_date===state.selectedDate?'background:rgba(215,178,96,.10)':''}"><td style="padding:12px 4px;white-space:nowrap">${esc(shortCalendarDay(x.work_date))}</td><td style="text-align:center;padding:12px 4px">${x.staff_count}</td><td style="text-align:right;padding:12px 4px;font-weight:700;color:var(--gold)">${rub(x.amount)}</td></tr>`).join('')}</tbody></table>
-  <div style="display:grid;gap:8px;margin-top:16px"><div style="display:flex;justify-content:space-between"><span>Итого 1–15</span><b>${rub(data.first)}</b></div><div style="display:flex;justify-content:space-between"><span>Итого 16–${data.days}</span><b>${rub(data.second)}</b></div><div style="display:flex;justify-content:space-between;color:var(--gold)"><b>За месяц</b><b>${rub(data.total)}</b></div></div>`;
-  qs('#modal').scrollTop=pos;
+  const rows=data.daily;
+  const staff=days=>days.reduce((sum,x)=>sum+x.staff_count,0);
+  const totalRow=(label,count,amount)=>`<tr><th scope="row">${label}</th><td>${count}</td><td>${rub(amount)}</td></tr>`;
+  body.innerHTML=`<table class="vlad-month-table" aria-label="Надбавка за весь месяц"><colgroup><col style="width:22%"><col style="width:34%"><col style="width:44%"></colgroup><thead><tr><th scope="col">День</th><th scope="col">Сотрудников</th><th scope="col">Надбавка</th></tr></thead><tbody>${rows.map(x=>`<tr data-vlad-day="${x.day}"${x.work_date===state.selectedDate?' class="is-selected-day"':''}><td>${x.day}</td><td>${x.staff_count}</td><td>${rub(x.amount)}</td></tr>`).join('')}</tbody><tfoot>${totalRow('1–15',staff(rows.filter(x=>x.day<=15)),data.first)}${totalRow('16–'+data.days,staff(rows.filter(x=>x.day>=16)),data.second)}${totalRow('За месяц',staff(rows),data.total)}</tfoot></table>`;
+  fitVladAllowanceMonth();
  }
  async function load(){
   const request=++revision,wanted=month;
@@ -5615,10 +5613,11 @@ async function openVladAllowance(resume=null){
    const next=JSON.stringify(fresh);data=fresh;
    if(next!==signature){signature=next;draw()}
    status.textContent='Обновляется автоматически';
+   fitVladAllowanceMonth();
+   requestAnimationFrame(()=>{if(active())fitVladAllowanceMonth()});
   }catch(e){if(active()&&request===revision)status.textContent=e.message}
  }
  input.onchange=()=>{if(!/^\d{4}-\d{2}$/.test(input.value))return;month=input.value;data=null;signature='';body.textContent='Загрузка…';status.textContent='';load()};
- qsa('[data-vlad-period]').forEach(btn=>btn.onclick=()=>{period=btn.dataset.vladPeriod;qsa('[data-vlad-period]').forEach(b=>b.className=b===btn?'primary':'secondary');draw()});
  await load();
  if(active())cashRefreshTimer=setInterval(()=>{if(active()&&!document.hidden)load()},10000);
 }
@@ -6881,6 +6880,8 @@ async function loadOwnerCabinet(){
 .cabinet-stage>button{width:100%;margin-top:14px}
 @media(max-width:350px){.cabinet-section-heading h2{font-size:20px}.cabinet-number-link{font-size:12px}.cabinet-order{padding:14px}.cabinet-order-statuses{font-size:11px;gap:7px}.cabinet-other-actions>div{grid-template-columns:1fr}}
 </style></head>''', 1)
+
+
 
 
 
@@ -9108,3 +9109,50 @@ body.owner-brigade-control-open #ownerBrigadeControlContent{padding:2px 0 12px}
 #ownerBrigadeControlContent .bc-list-caption{font-size:10px;margin:8px 0 5px}
 #ownerBrigadeControlContent .bc-missing{font-size:11px;margin:5px 0}
 </style></head>''', 1)
+
+
+# A full month of Vlad's allowance fits in one view, independently of other ledgers.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', r'''
+<style id="vlad-allowance-full-month-style">
+#modal:has(#vladAllowanceBody){display:flex;flex-direction:column;gap:5px;left:6px;right:6px;top:6px;bottom:calc(76px + var(--safe-bottom));width:auto;max-width:1100px;max-height:none;margin:0 auto;padding:8px;transform:none;overflow:hidden}
+#modal:has(#vladAllowanceBody)>.modal-head{position:relative;top:auto;display:grid;grid-template-columns:34px minmax(0,1fr) 34px;align-items:center;gap:5px;min-height:34px;margin:0;padding:0}
+#modal:has(#vladAllowanceBody)>.modal-head::before{display:none}
+#modal:has(#vladAllowanceBody)>.modal-head h3{text-align:center;font-size:18px;margin:0}
+#modal:has(#vladAllowanceBody)>.modal-head button{width:34px;min-width:34px;height:34px;min-height:34px;padding:4px;border-radius:9px;font-size:20px}
+#modal:has(#vladAllowanceBody) .vlad-month-picker{display:block;margin:0}
+#vladAllowanceMonth{display:block;width:100%;box-sizing:border-box;min-height:34px;margin:0;padding:5px 8px;text-align:center;font-size:14px;border-radius:9px}
+#modal:has(#vladAllowanceBody) .vlad-month-note{margin:0;text-align:center;font-size:11px;line-height:1.3}
+#vladAllowanceStatus{display:block;min-height:12px;line-height:12px;text-align:center;font-size:9px;margin:0}
+#vladAllowanceBody{flex:1;min-height:0;overflow:hidden;--vlad-row:16px;--vlad-font:12px}
+#vladAllowanceBody .vlad-month-table{width:100%;max-width:300px;margin:0 auto;table-layout:fixed;border-collapse:collapse;transform-origin:top center;font-size:var(--vlad-font);line-height:1.15;font-variant-numeric:tabular-nums}
+#vladAllowanceBody th,#vladAllowanceBody td{padding:0 3px;border-bottom:1px solid var(--line);white-space:nowrap}
+#vladAllowanceBody th:first-child,#vladAllowanceBody td:first-child{text-align:left}
+#vladAllowanceBody th:nth-child(2),#vladAllowanceBody td:nth-child(2){text-align:center}
+#vladAllowanceBody th:last-child,#vladAllowanceBody td:last-child{text-align:right}
+#vladAllowanceBody thead{background:var(--panel2)}
+#vladAllowanceBody thead tr{height:24px;font-size:11px}
+#vladAllowanceBody tbody tr{height:var(--vlad-row)}
+#vladAllowanceBody tbody td:last-child{font-weight:700;color:var(--gold)}
+#vladAllowanceBody .is-selected-day{background:rgba(215,178,96,.10)}
+#vladAllowanceBody tfoot tr{height:18px;color:var(--gold);font-weight:700;background:#211d15}
+#vladAllowanceBody tfoot tr:last-child{font-size:13px}
+</style></head>''', 1).replace('</body>', r'''
+<script>
+function fitVladAllowanceMonth(){
+ const body=qs('#vladAllowanceBody'),table=body?.querySelector('table');
+ if(!table||qs('#modal').classList.contains('hidden'))return;
+ const available=body.clientHeight||Math.max(1,(window.visualViewport?.height||window.innerHeight||700)-180);
+ table.style.transform='none';table.style.height=available+'px';
+ const header=table.tHead.offsetHeight||24,footer=Array.from(table.tFoot.rows).reduce((sum,row)=>sum+(row.offsetHeight||18),0);
+ const count=table.tBodies[0].rows.length;
+ const row=Math.max(1,(available-header-footer)/Math.max(1,count));
+ body.style.setProperty('--vlad-row',row+'px');body.style.setProperty('--vlad-font',Math.min(13,Math.max(10,row-3))+'px');
+ const natural=table.offsetHeight||available;
+ const scale=Math.min(1,available/natural);
+ if(scale<1)table.style.transform='scaleY('+scale+')';
+ body.dataset.monthFitScale=String(scale);
+}
+window.addEventListener('resize',fitVladAllowanceMonth);
+window.visualViewport?.addEventListener('resize',fitVladAllowanceMonth);
+</script></body>''', 1)
+
