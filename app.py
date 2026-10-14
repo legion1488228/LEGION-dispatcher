@@ -8349,10 +8349,9 @@ def _dense_readiness_dashboard_html(html):
 .dashboard-section-heading .dashboard-section-date{flex:none;margin:0;font-size:11px;line-height:1.25;text-align:right;white-space:nowrap;color:var(--muted)}
 body.dashboard-compact #brigadeWork .dashboard-section-heading h2{font-size:14px}
 body.dashboard-compact #employeeReadiness>.section-head{display:block;margin:5px 0}
-body.dashboard-compact #employeeReadiness .readiness-section-heading h2{font-size:11px;line-height:1.2;white-space:nowrap;width:auto;letter-spacing:-.02em}
-body.dashboard-compact #employeeReadiness .readiness-section-heading .dashboard-section-date{font-size:9px;margin:0}
-body.dashboard-compact #employeeReadiness .readiness-section-heading{margin:0 0 4px}
-@media(max-width:350px){body.dashboard-compact #employeeReadiness .readiness-section-heading h2{font-size:10px}body.dashboard-compact #employeeReadiness .readiness-section-heading{gap:5px}}
+body.dashboard-compact #employeeReadiness .readiness-section-heading h2{font-size:14px;line-height:1.2;white-space:nowrap;width:auto;flex:0 0 auto;letter-spacing:normal}
+body.dashboard-compact #employeeReadiness .readiness-section-heading .dashboard-section-date{font-size:9px;margin:0 0 0 auto}
+body.dashboard-compact #employeeReadiness .readiness-section-heading{margin:0 0 4px;flex-wrap:wrap;column-gap:6px;row-gap:2px}
 body.dashboard-compact #employeeReadiness .readiness-actions{margin-top:0}
 body.dashboard-compact #brigadeWork,body.dashboard-compact #orderPreparation{margin:5px 0!important;padding-top:4px}
 body.dashboard-compact #readinessSummary{gap:5px;margin:5px 0}
