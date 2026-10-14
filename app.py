@@ -8187,3 +8187,55 @@ function currentViewId() {""")
 
 
 INLINE_INDEX_HTML = _owner_brigade_control_html(INLINE_INDEX_HTML)
+
+
+def _compact_dispatcher_dashboard_html(html):
+    anchor = "  document.body.classList.toggle('owner-brigade-control-open',v==='ownerBrigadeControlView');"
+    if html.count(anchor) != 1:
+        raise ValueError('Compact dispatcher dashboard anchor missing')
+    html = html.replace(anchor, anchor + "\n  document.body.classList.toggle('dashboard-compact',v==='readinessView'&&!state.bootstrap?.cabinet_only);", 1)
+    date_label = '<label class="muted">Выбрать дату <input type="date" id="dashboardDate"'
+    if html.count(date_label) != 1:
+        raise ValueError('Dispatcher date label anchor missing')
+    html = html.replace(date_label, '<label class="muted"><span class="dashboard-date-prompt">Выбрать дату</span><span class="dashboard-orders-caption">Заказы</span> <input type="date" id="dashboardDate" aria-label="Дата заказов"', 1)
+    return html.replace('</head>', """<style id="compact-dispatcher-dashboard-style">
+.dashboard-orders-caption{display:none}
+body.dashboard-compact .topbar{padding:6px 12px 4px;gap:6px}
+body.dashboard-compact .topbar .eyebrow{font-size:9px;line-height:1.2}
+body.dashboard-compact .topbar h1{font-size:20px;line-height:1.2;margin:2px 0 0}
+body.dashboard-compact .topbar .icon-btn{width:42px;height:42px;border-radius:12px;font-size:21px}
+body.dashboard-compact #dateStrip{gap:5px;padding:4px 12px 5px}
+body.dashboard-compact #dateStrip .date-pill{min-width:66px;padding:6px;border-radius:10px}
+body.dashboard-compact #dateStrip .date-pill strong{font-size:11px;line-height:1.2}
+body.dashboard-compact #dateStrip .date-pill small{font-size:10px;line-height:1.2}
+body.dashboard-compact main{padding:0 12px}
+body.dashboard-compact #selectedDayHeader{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;align-items:center;margin:2px 0 6px}
+body.dashboard-compact #selectedDayHeader h2{font-size:17px;line-height:1.2;margin:0;min-width:0}
+body.dashboard-compact #selectedDayHeader label{display:flex;align-items:center;gap:5px;font-size:13px;line-height:1.2;margin:0;text-align:right}
+body.dashboard-compact .dashboard-date-prompt{display:none}
+body.dashboard-compact .dashboard-orders-caption{display:inline;font-weight:750;color:var(--text)}
+body.dashboard-compact #dashboardDate{display:block;width:116px;max-width:116px!important;min-height:28px;padding:3px 5px;margin:0;border-radius:9px;font-size:11px;background:var(--panel2);color:var(--text);border:1px solid var(--line)}
+body.dashboard-compact #selectedDayHeader+h3{display:none}
+body.dashboard-compact #summary{gap:5px;margin:0 0 6px}
+body.dashboard-compact #summary .metric{padding:7px 4px;min-height:74px;border-radius:11px;text-align:center}
+body.dashboard-compact #summary .metric b{font-size:18px!important;line-height:1.15}
+body.dashboard-compact #summary .metric b:nth-of-type(2){font-size:12px!important;margin-top:4px!important}
+body.dashboard-compact #summary .metric span{font-size:9px;line-height:1.2;margin-top:3px;white-space:normal;overflow:visible}
+body.dashboard-compact #dayCommentBtn{min-height:30px;margin-top:4px;padding:4px 2px;font-size:9px;border-radius:8px}
+body.dashboard-compact #brigadeWork,body.dashboard-compact #orderPreparation{margin:6px 0!important;padding-top:5px;border-top:1px solid var(--line)}
+body.dashboard-compact #brigadeWork h2,body.dashboard-compact #orderPreparation h2{font-size:16px;line-height:1.2;margin:0 0 3px}
+body.dashboard-compact #brigadeWork>p,body.dashboard-compact #orderPreparation>p{font-size:10px;line-height:1.3;margin:0 0 5px;overflow-wrap:anywhere}
+body.dashboard-compact #brigadeWork .summary-grid,body.dashboard-compact #orderPreparation .summary-grid{gap:5px;margin:0}
+body.dashboard-compact #brigadeWork .metric{min-height:58px;padding:7px 4px;border-radius:11px}
+body.dashboard-compact #brigadeWork .metric b{font-size:18px;line-height:1.15}
+body.dashboard-compact #brigadeWork .metric span{font-size:9px;line-height:1.2;margin-top:3px;white-space:normal;overflow:visible}
+body.dashboard-compact #numberCardsBtn{min-height:44px;margin-bottom:5px!important;padding:7px 8px;border-radius:10px;font-size:12px;line-height:1.2}
+body.dashboard-compact #orderPreparation .metric{min-height:60px;padding:7px 8px;border-radius:11px}
+body.dashboard-compact #orderPreparation .metric b{font-size:15px;line-height:1.2}
+body.dashboard-compact #orderPreparation .metric span{font-size:10px;line-height:1.2;margin-top:3px;white-space:normal;overflow:visible}
+body.dashboard-compact #employeeReadiness>.section-head{margin:6px 0 5px}
+@media(max-width:350px){body.dashboard-compact .topbar h1{font-size:18px}body.dashboard-compact #selectedDayHeader h2{font-size:15px}body.dashboard-compact #dashboardDate{width:112px;max-width:112px!important}}
+</style></head>""", 1)
+
+
+INLINE_INDEX_HTML = _compact_dispatcher_dashboard_html(INLINE_INDEX_HTML)
