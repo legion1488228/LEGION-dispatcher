@@ -8624,3 +8624,18 @@ function bindOwnerCashDetails(body,ledger,active){
 
 
 INLINE_INDEX_HTML = _compact_owner_expanded_cash_html(INLINE_INDEX_HTML)
+
+
+def _exclude_reserve_from_unanswered_html(html):
+    old = 'const sections=Object.entries(groupNames).map(([code,label])=>{'
+    new = "const sections=Object.entries(groupNames).filter(([code])=>mode!=='no_response'||['brigadier','main','cashless'].includes(code)).map(([code,label])=>{"
+    count = 'const currentNoResponse=groupEntries.reduce((sum,[,g])=>sum+Number(g?.counts?.no_response||0),0);'
+    filtered = "const currentNoResponse=groupEntries.filter(([code])=>['brigadier','main','cashless'].includes(code)).reduce((sum,[,g])=>sum+Number(g?.counts?.no_response||0),0);"
+    for before, after in ((old, new), (count, filtered)):
+        if html.count(before) != 1:
+            raise RuntimeError('Unanswered readiness UI anchor missing: ' + before)
+        html = html.replace(before, after, 1)
+    return html
+
+
+INLINE_INDEX_HTML = _exclude_reserve_from_unanswered_html(INLINE_INDEX_HTML)
