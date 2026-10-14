@@ -8296,3 +8296,95 @@ def _single_row_readiness_actions_html(html):
 
 
 INLINE_INDEX_HTML = _single_row_readiness_actions_html(INLINE_INDEX_HTML)
+
+
+def _dense_readiness_dashboard_html(html):
+    """Inline section dates and compact only employee readiness list dialogs."""
+    def replace(old, new):
+        if html.count(old) != 1:
+            raise ValueError('Dense readiness dashboard anchor missing: ' + old[:100])
+        return html.replace(old, new, 1)
+
+    html = replace('<h2>Контроль бригады утром</h2><p class="muted">${esc(fmtDate(day))}${future?\' · В день заказа\':\'\'}</p>',
+        '<div class="dashboard-section-heading"><h2>Контроль бригады утром</h2><p class="muted dashboard-section-date">${esc(fmtDate(day))}</p></div>')
+    html = replace('<h2>${closingTitle}</h2><p class="muted">${esc(fmtDate(day))} · Номера и закрытие относятся к дате заказа</p>',
+        '<h2>${closingTitle}</h2>')
+    html = replace('<h2 id="readinessTitle">Готовность сотрудников</h2><p id="readinessDayLabel" class="muted"></p>',
+        '<div class="dashboard-section-heading readiness-section-heading"><h2 id="readinessTitle">Готовность сотрудников</h2><p id="readinessDayLabel" class="muted dashboard-section-date"></p></div>')
+    html = replace("qs('#readinessDayLabel').textContent=fmtDate(nextReadinessDay(day))+' · Время сводки: '+(s.readiness_cutoff_label||'14:00');",
+        "qs('#readinessDayLabel').textContent=fmtDate(nextReadinessDay(day));")
+    html = replace("qs('#readinessDayLabel').textContent=fmtDate(day)+' · Время сводки: '+(r.cutoff_label||'14:00');",
+        "qs('#readinessDayLabel').textContent=fmtDate(day);")
+    html = replace("function showModal(title, body) {rememberCashTablePosition();",
+        "function showModal(title, body) {qs('#modal').classList.toggle('readiness-people-modal',body.includes('readiness-people-grid'));rememberCashTablePosition();")
+    # Scope grids to readiness rows; order, finance and profile forms are unchanged.
+    start = html.index('function readinessPersonRows(')
+    end = html.index('function captureEmployeeScroll()', start)
+    block = html[start:end]
+    if block.count('<div class="list">') != 1 or block.count('<div style="display:grid;gap:8px;margin-top:12px">') != 1:
+        raise ValueError('Readiness people/selector grid anchors missing')
+    block = block.replace('<div class="list">', '<div class="list readiness-people-grid">', 1)
+    block = block.replace('<div style="display:grid;gap:8px;margin-top:12px">', '<div class="readiness-people-grid readiness-choice-grid">', 1)
+    block = block.replace('employeeListName(x)', 'readinessEmployeeName(x)')
+    html = html[:start] + r'''function readinessEmployeeName(employee){
+  const name=String(employee.first_name||employee.full_name||employee.display_name||'').trim().split(/\s+/)[0]||'—';
+  const metro=String(employee.metro||'').trim()||'—';
+  const height=Number(employee.height_cm)||'—';
+  return `${name} ${metro} ${height} см`;
+}
+''' + block + html[end:]
+    start = html.index('function chooseUnansweredEmployee(')
+    end = html.index('async function loadReadiness()', start)
+    block = html[start:end]
+    if block.count('<div class="list">') != 1 or block.count('<div style="display:grid;gap:8px">') != 1:
+        raise ValueError('Grouped readiness grid anchors missing')
+    block = block.replace('<div class="list">', '<div class="list readiness-people-grid">', 1)
+    block = block.replace('<div style="display:grid;gap:8px">', '<div class="readiness-people-grid readiness-choice-grid">', 1)
+    block = block.replace('employeeListName(x)', 'readinessEmployeeName(x)')
+    block = block.replace('employeeListName(employee)', 'readinessEmployeeName(employee)')
+    html = html[:start] + block + html[end:]
+    return html.replace('</head>', """<style id="dense-readiness-dashboard-style">
+.dashboard-section-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 5px}
+.dashboard-section-heading h2{min-width:0;flex:1;margin:0!important}
+.dashboard-section-heading .dashboard-section-date{flex:none;margin:0;font-size:11px;line-height:1.25;text-align:right;white-space:nowrap;color:var(--muted)}
+body.dashboard-compact #brigadeWork .dashboard-section-heading h2{font-size:14px}
+body.dashboard-compact #employeeReadiness>.section-head{display:block;margin:5px 0}
+body.dashboard-compact #employeeReadiness .readiness-section-heading h2{font-size:11px;line-height:1.2;white-space:nowrap;width:auto;letter-spacing:-.02em}
+body.dashboard-compact #employeeReadiness .readiness-section-heading .dashboard-section-date{font-size:9px;margin:0}
+body.dashboard-compact #employeeReadiness .readiness-section-heading{margin:0 0 4px}
+@media(max-width:350px){body.dashboard-compact #employeeReadiness .readiness-section-heading h2{font-size:10px}body.dashboard-compact #employeeReadiness .readiness-section-heading{gap:5px}}
+body.dashboard-compact #employeeReadiness .readiness-actions{margin-top:0}
+body.dashboard-compact #brigadeWork,body.dashboard-compact #orderPreparation{margin:5px 0!important;padding-top:4px}
+body.dashboard-compact #readinessSummary{gap:5px;margin:5px 0}
+body.dashboard-compact #readinessSummary .metric{min-height:48px;padding:6px 8px;border-radius:10px}
+body.dashboard-compact #readinessSummary .metric b{font-size:18px;line-height:1.15}
+body.dashboard-compact #readinessSummary .metric span{font-size:10px;margin-top:2px}
+body.dashboard-compact #readinessGroups .group-block{margin-bottom:6px;border-radius:12px}
+body.dashboard-compact #readinessGroups .group-title{padding:8px 10px;font-size:14px}
+body.dashboard-compact #readinessGroups .group-stats{gap:4px;padding:0 6px 6px}
+body.dashboard-compact #readinessGroups .group-stats button{min-height:44px;padding:5px 2px;font-size:9px;border-radius:8px}
+body.dashboard-compact #readinessGroups .group-stats b{font-size:16px;line-height:1.1}
+#modal.readiness-people-modal{left:6px;right:6px;top:max(8px,env(safe-area-inset-top,0px));max-height:calc(100dvh - 16px - var(--safe-bottom));padding:10px 8px calc(10px + var(--safe-bottom));border-radius:15px}
+#modal.readiness-people-modal .modal-head{position:sticky;top:-10px;z-index:1;background:#111114;padding:2px 0 6px;gap:6px}
+#modal.readiness-people-modal .modal-head h3{font-size:17px;line-height:1.2;margin:0}
+#modal.readiness-people-modal .close-btn{min-width:44px;min-height:44px}
+#modal.readiness-people-modal .attention{padding:6px 8px;margin:0 0 6px;border-radius:9px}
+#modal.readiness-people-modal .attention h4{font-size:12px;margin:0}
+#modal.readiness-people-modal .attention p{font-size:10px;margin:2px 0}
+#modal.readiness-people-modal .drawer-section{margin-top:8px}
+#modal.readiness-people-modal .drawer-section h4{margin:0 0 4px;font-size:11px}
+#modal .readiness-people-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;align-items:start}
+#modal .readiness-people-grid .employee-row{display:grid;grid-template-columns:minmax(0,1fr) 44px;gap:0 3px;align-items:center;min-width:0;min-height:48px;padding:3px 4px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+#modal .readiness-people-grid .name{min-width:0;grid-column:1;grid-row:1}
+#modal .readiness-people-grid .name b{font-size:11px;line-height:1.25;white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere}
+#modal .readiness-people-grid .name small{font-size:9px;line-height:1.15;margin-top:1px}
+#modal .readiness-people-grid .car{grid-column:1;grid-row:2;font-size:11px;line-height:1;gap:3px!important;min-width:0}
+#modal .readiness-people-grid .car:empty{display:none!important}
+#modal .readiness-people-grid .car span{min-width:20px!important;height:20px!important;padding:0 3px!important;font-size:11px!important}
+#modal .readiness-people-grid .employee-row>button{grid-column:2;grid-row:1 / span 2;width:44px;min-width:44px!important;min-height:44px!important;padding:2px!important;font-size:16px!important;border-radius:7px}
+#modal .readiness-choice-grid>button{min-width:0;min-height:44px!important;padding:5px!important;font-size:11px;line-height:1.25;overflow-wrap:anywhere}
+@supports not(height:100dvh){#modal.readiness-people-modal{max-height:calc(100vh - 16px - var(--safe-bottom))}}
+</style></head>""", 1)
+
+
+INLINE_INDEX_HTML = _dense_readiness_dashboard_html(INLINE_INDEX_HTML)
