@@ -8144,6 +8144,7 @@ def owner_brigade_control(work_date: date, db: Session = Depends(get_db),
             'completed': sum(item['completed'] for item in entries)}
     totals['all'] = {field: totals['private'][field] + totals['gbu'][field] for field in totals['private']}
     return JSONResponse({'work_date': work_date.isoformat(), 'items': items, 'totals': totals,
+        'order_completion': order_completion_data(db, work_date),
         'updated_at': datetime.now(MOSCOW).isoformat()},
         headers={'Cache-Control': 'private, no-store'})
 
@@ -9020,3 +9021,55 @@ async function openGbuAgents(){
 
 
 INLINE_INDEX_HTML = _compact_gbu_agent_directory_html(INLINE_INDEX_HTML)
+
+
+# Evening preparation and morning reports share the selected Control date.
+def _control_morning_evening_layout_html(html):
+    start = html.index('function renderSummary() {')
+    end = html.index('\nasync function openContactBrigades(', start)
+    section = html[start:end]
+    section = section.replace("for(const id of ['orderPreparation','brigadeWork'])", "for(const id of ['brigadeWork'])", 1)
+    block_start = section.index("  const p=s.order_completion?.sources.private")
+    block_end = section.index("  qs('#brigadeWork').innerHTML=", block_start)
+    section = section[:block_start] + section[block_end:]
+    section = section.replace("const sections=future?['orderPreparation','brigadeWork','employeeReadiness']:['brigadeWork','orderPreparation','employeeReadiness'];", "const sections=['brigadeWork','employeeReadiness'];", 1)
+    html = html[:start] + section + html[end:]
+    heading = '<div class="bc-heading"><div><h2>Контроль заказов</h2><p>${esc(fmtDate(data.work_date))}</p></div>'
+    if html.count(heading) != 1:
+        raise RuntimeError('Control morning heading anchor missing')
+    html = html.replace(heading, '${controlEveningPreparationHtml(data)}<div class="bc-heading"><div><h2>Контроль заказов (утром)</h2></div>', 1)
+    binding = "  qs('#brigadeControlDate',root).onchange="
+    if html.count(binding) != 1:
+        raise RuntimeError('Control date handler anchor missing')
+    html = html.replace(binding, "  qs('#numberCardsBtn',root).onclick=()=>openNumberCards(data.work_date);\n" + binding, 1)
+    html = html.replace("async function openNumberCards(){\n const day=state.selectedDate;", "async function openNumberCards(workDay){\n const day=typeof workDay==='string'?workDay:state.selectedDate;", 1)
+    progress = 'state.bootstrap.summary.number_cards_count=r.count;state.bootstrap.summary.order_completion=r.progress;renderSummary();'
+    if html.count(progress) != 1:
+        raise RuntimeError('Number card progress anchor missing')
+    html = html.replace(progress, progress + "\n    if(currentViewId()==='ownerBrigadeControlView'&&ownerBrigadeControlData?.work_date===day){ownerBrigadeControlData.order_completion=r.progress;renderOwnerBrigadeControl()}", 1)
+    return html.replace('</head>', r'''
+<style id="control-morning-evening-style">
+#ownerBrigadeControlContent #orderPreparation{margin:6px 0 14px;padding:0 0 10px;border-bottom:1px solid var(--line)}
+#ownerBrigadeControlContent #orderPreparation h2{margin:0 0 8px;font-size:clamp(17px,4.4vw,21px);line-height:1.25}
+#ownerBrigadeControlContent #numberCardsBtn{width:100%;min-height:44px;margin-bottom:6px;padding:8px 6px;border-radius:11px;font-size:13px}
+#ownerBrigadeControlContent #orderPreparation .summary-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin:0}
+#ownerBrigadeControlContent #orderPreparation .metric{padding:9px 8px;min-height:68px;border-radius:12px}
+#ownerBrigadeControlContent #orderPreparation .metric b{font-size:16px;line-height:1.2}
+#ownerBrigadeControlContent #orderPreparation .metric span{font-size:11px;line-height:1.3;white-space:normal;overflow:visible;margin-top:3px}
+#ownerBrigadeControlContent .bc-heading{display:grid;grid-template-columns:minmax(0,1fr) minmax(104px,128px);align-items:center;gap:6px;margin-bottom:10px}
+#ownerBrigadeControlContent .bc-heading>div{min-width:0}
+#ownerBrigadeControlContent .bc-heading h2{font-size:clamp(12px,3.45vw,17px);line-height:1.25;white-space:nowrap}
+#ownerBrigadeControlContent .bc-date input{width:100%;max-width:128px;min-width:0}
+</style></head>''', 1).replace('</body>', r'''
+<script>
+function controlEveningPreparationHtml(data){
+ const progress=data.order_completion;
+ const p=progress?.sources?.private||{cards:data.totals.private.cards,expected:data.totals.private.orders,closed:0};
+ const g=progress?.sources?.gbu||{cards:data.totals.gbu.cards,expected:data.totals.gbu.orders,closed:0};
+ const cards=progress?.cards??(p.cards+g.cards),expected=progress?.expected??(p.expected+g.expected);
+ return `<section id="orderPreparation" aria-label="Закрытие заказов вечером"><h2>Закрытие заказов (вечером)</h2><button type="button" class="secondary" id="numberCardsBtn">📱 Номера в группе ${cards}/${expected} ›</button><div class="summary-grid"><div class="metric"><b>Частные</b><span>Номера ${p.cards}/${p.expected}</span><span>Закрыто ${p.closed}/${p.expected}</span></div><div class="metric"><b>ГБУ</b><span>Номера ${g.cards}/${g.expected}</span><span>Закрыто ${g.closed}/${g.expected}</span></div></div></section>`;
+}
+</script></body>''', 1)
+
+
+INLINE_INDEX_HTML = _control_morning_evening_layout_html(INLINE_INDEX_HTML)
