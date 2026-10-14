@@ -8416,3 +8416,37 @@ function renderOwnerBrigadeControl(){'''),
 
 
 INLINE_INDEX_HTML = _square_photo_indicators_html(INLINE_INDEX_HTML)
+
+
+def _compact_ready_employee_rows_html(html):
+    replacements = (
+        ('async function openReadinessGroupedList(mode,day=state.selectedDate){', r'''function readyEmployeeGroup(code,label,people){
+  return `<section class="drawer-section ready-employee-group" data-ready-group="${esc(code)}"><h4>${esc(label)} · ${people.length}</h4>${people.length?
+    `<div class="list readiness-people-grid ready-employee-grid">${people.map((employee,index)=>
+      `<div class="employee-row ready-employee-row"><div class="name"><b>${esc(readinessEmployeeName(employee).replace(/\s+см$/,''))}${employee.has_car?' <span class="ready-employee-car" role="img" aria-label="На автомобиле">🚗</span>':''}</b></div><button type="button" class="secondary" data-person-status="${esc(code)}:${index}" aria-label="Изменить готовность ${esc(readinessEmployeeName(employee))}" title="Изменить готовность">✍🏻</button></div>`
+    ).join('')}</div>`:'<p class="muted ready-group-empty">Готовых сотрудников нет</p>'}</section>`;
+}
+async function openReadinessGroupedList(mode,day=state.selectedDate){'''),
+        ('      editGroups.push({code,label:g.label||label,people});',
+         "      editGroups.push({code,label:g.label||label,people});\n      if(mode==='ready')return readyEmployeeGroup(code,g.label||label,people);"),
+        ("body.includes('readiness-people-grid')", "(body.includes('readiness-people-grid')||body.includes('ready-employee-group'))"),
+    )
+    for old, new in replacements:
+        if html.count(old) != 1:
+            raise ValueError('Compact ready employee rows anchor missing: ' + old[:100])
+        html = html.replace(old, new, 1)
+    return html.replace('</head>', """<style id="compact-ready-employee-rows-style">
+#modal.readiness-people-modal .ready-employee-group{width:100%;min-width:0;margin:8px 0 0;border:1px solid var(--line);border-radius:12px;background:var(--panel);overflow:hidden}
+#modal.readiness-people-modal .ready-employee-group h4{margin:0;padding:8px 7px;font-size:13px;line-height:1.25;letter-spacing:normal;text-transform:none;color:var(--gold);font-weight:800;background:#211d15;border-bottom:1px solid var(--line)}
+#modal .ready-employee-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:0;align-items:stretch;padding:0 5px}
+#modal .ready-employee-grid .ready-employee-row{grid-template-columns:minmax(0,1fr) 32px;gap:3px;min-height:36px;padding:2px 3px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent}
+#modal .ready-employee-grid .ready-employee-row:nth-child(odd){border-right:1px solid var(--line)}
+#modal .ready-employee-grid .name{grid-row:1}
+#modal .ready-employee-grid .name b{font-size:11px;font-weight:400;line-height:1.25;white-space:normal;overflow:visible;overflow-wrap:anywhere}
+#modal .ready-employee-grid .ready-employee-row>button{grid-row:1;width:32px;min-width:32px!important;min-height:32px!important;padding:2px!important;font-size:15px!important;border-radius:7px;background:var(--panel2)}
+#modal .ready-employee-car{font-size:11px;white-space:nowrap}
+#modal .ready-group-empty{margin:0;padding:8px 7px;font-size:11px}
+</style></head>""", 1)
+
+
+INLINE_INDEX_HTML = _compact_ready_employee_rows_html(INLINE_INDEX_HTML)
