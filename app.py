@@ -8420,15 +8420,18 @@ INLINE_INDEX_HTML = _square_photo_indicators_html(INLINE_INDEX_HTML)
 
 def _compact_ready_employee_rows_html(html):
     replacements = (
-        ('async function openReadinessGroupedList(mode,day=state.selectedDate){', r'''function readyEmployeeGroup(code,label,people){
+        ('async function openReadinessGroupedList(mode,day=state.selectedDate){', r'''function readyEmployeeGroup(code,label,people,options={}){
+  const statuses={ready:'Готов',not_ready:'На основной',day_off:'Выходной',responded:'Свободен',no_response:'Не отписался'};
   return `<section class="drawer-section ready-employee-group" data-ready-group="${esc(code)}"><h4>${esc(label)} · ${people.length}</h4>${people.length?
     `<div class="list readiness-people-grid ready-employee-grid">${people.map((employee,index)=>
-      `<div class="employee-row ready-employee-row"><div class="name"><b>${esc(readinessEmployeeName(employee).replace(/\s+см$/,''))}${employee.has_car?' <span class="ready-employee-car" role="img" aria-label="На автомобиле">🚗</span>':''}</b></div><button type="button" class="secondary" data-person-status="${esc(code)}:${index}" aria-label="Изменить готовность ${esc(readinessEmployeeName(employee))}" title="Изменить готовность">✍🏻</button></div>`
-    ).join('')}</div>`:'<p class="muted ready-group-empty">Готовых сотрудников нет</p>'}</section>`;
+      `<div class="employee-row ready-employee-row"><div class="name"><b>${esc(readinessEmployeeName(employee).replace(/\s+см$/,''))}${employee.has_car?' <span class="ready-employee-car" role="img" aria-label="На автомобиле">🚗</span>':''}</b>${options.showStatuses?`<small>${esc(statuses[employee.readiness_status]||'Отписался')}</small>`:''}</div><button type="button" class="secondary" ${options.indexOnly?`data-subgroup-edit="${index}"`:`data-person-status="${esc(code)}:${index}"`} aria-label="Изменить готовность ${esc(readinessEmployeeName(employee))}" title="Изменить готовность">✍🏻</button></div>`
+    ).join('')}</div>`:`<p class="muted ready-group-empty">${esc(options.emptyLabel||'Готовых сотрудников нет')}</p>`}</section>`;
 }
 async function openReadinessGroupedList(mode,day=state.selectedDate){'''),
         ('      editGroups.push({code,label:g.label||label,people});',
-         "      editGroups.push({code,label:g.label||label,people});\n      if(mode==='ready')return readyEmployeeGroup(code,g.label||label,people);"),
+         "      editGroups.push({code,label:g.label||label,people});\n      if(mode==='ready'||mode==='no_response')return readyEmployeeGroup(code,g.label||label,people,{emptyLabel:mode==='ready'?'Готовых сотрудников нет':'Все сотрудники отписались'});"),
+        ('${readinessPersonRows(rows,true)}',
+         "${readyEmployeeGroup(code,groupLabel,rows,{indexOnly:true,showStatuses:status==='wrote',emptyLabel:'В этой категории сотрудников нет'})}"),
         ("body.includes('readiness-people-grid')", "(body.includes('readiness-people-grid')||body.includes('ready-employee-group'))"),
     )
     for old, new in replacements:
