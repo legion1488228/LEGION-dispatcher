@@ -3713,6 +3713,7 @@ class PersonalCashDayInput(BaseModel):
     amounts: dict[str, int]
     own: int = Field(ge=0, le=100000000000, strict=True)
     legacy: int = Field(ge=-100000000000, le=100000000000, strict=True)
+    checked: dict[str, StrictBool] | None = None
 
 
 def personal_cash_day_data(db, owner_id, work_date):
@@ -3736,7 +3737,9 @@ def personal_cash_day_data(db, owner_id, work_date):
         if key not in active:
             items.append({'key': key, 'name': labels.get(key, 'Ранее сохранённый заказ'),
                           'surname': 'Заказ изменён или удалён — проверьте сумму'})
-    return {**values, 'items': items, 'version': saved.version if saved else 0,
+    checked = values.get('checked', {})
+    return {**values, 'checked': {x['key']: checked.get(x['key']) is True for x in items},
+            'items': items, 'version': saved.version if saved else 0,
             'total': sum(values.get('amounts', {}).values()) + values.get('own', 0) + values.get('legacy', 0)}
 
 
@@ -3756,7 +3759,12 @@ def save_personal_cash_day(work_date: date, change: PersonalCashDayInput,
     allowed = {x['key'] for x in current['items']}
     if set(change.amounts) != allowed or any(type(v) is not int or not 0 <= v <= 100000000000 for v in change.amounts.values()):
         raise HTTPException(422, 'Список заказов изменился или сумма некорректна. Откройте день заново.')
+    if change.checked is not None and not set(change.checked).issubset(allowed):
+        raise HTTPException(422, 'Список отметок изменился. Откройте день заново.')
+    checked = current['checked'] if change.checked is None else {
+        key: change.checked.get(key, False) for key in allowed}
     payload = json.dumps({'amounts': change.amounts, 'own': change.own, 'legacy': change.legacy,
+        'checked': checked,
         'labels': {x['key']: x['name'] for x in current['items']}}, ensure_ascii=False)
     if change.version:
         result = db.execute(update(PersonalCashDay).where(PersonalCashDay.owner_id == user.id,
@@ -5297,6 +5305,13 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     "if(kind==='earnings'&&column===0){openCashDayCheck",
     "if(kind==='earnings'&&column===2){openPersonalCashDay(`${month}-${String(day).padStart(2,'0')}`);return}\n   if(kind==='earnings'&&column===0){openCashDayCheck", 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
+<style>
+#privateCashBody .private-cash-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(70px,100px);gap:8px;align-items:center}
+#privateCashBody .private-cash-row.has-cash-mark{grid-template-columns:minmax(0,1fr) 44px minmax(70px,100px)}
+#privateCashBody .private-cash-row .name{min-width:0;overflow-wrap:anywhere}
+#privateCashBody .private-cash-mark{width:44px;height:44px;min-height:44px;min-width:44px;padding:4px;font-size:24px;display:flex;align-items:center;justify-content:center}
+#privateCashBody .private-cash-row input{width:100%;min-width:0;font-size:16px;padding:10px;border-radius:10px;background:var(--panel2);color:var(--text);border:1px solid var(--line)}
+</style>
 <script>
 async function openPersonalCashDay(day){
  const grid=qs('#personalGrid'),modal=qs('#modal');
@@ -5308,10 +5323,11 @@ async function openPersonalCashDay(day){
  try{
   const data=await api('/api/personal-cash-day/'+day);if(!active())return;
   const money=c=>new Intl.NumberFormat('ru-RU',{maximumFractionDigits:2}).format(c/100);
-  const field=(key,title,value,subtitle='')=>`<div class="employee-row"><div class="name"><b>${esc(title)}</b><small>${esc(subtitle)}</small></div><input data-private-cash="${esc(key)}" inputmode="decimal" aria-label="${esc(title)} — сумма в рублях" value="${value===undefined?'':esc(String(value/100))}" style="width:100px;max-width:35%;font-size:16px;padding:10px;border-radius:10px;background:var(--panel2);color:var(--text);border:1px solid var(--line)"></div>`;
+  const field=(key,title,value,subtitle='')=>{const mark=key!=='own'&&key!=='legacy',checked=data.checked?.[key]===true;return `<div class="employee-row private-cash-row${mark?' has-cash-mark':''}"><div class="name"><b>${esc(title)}</b><small>${esc(subtitle)}</small></div>${mark?`<button type="button" class="secondary private-cash-mark" data-private-cash-mark="${esc(key)}" aria-pressed="${checked}" aria-label="${esc(title)} — ручная отметка налички">${checked?'✅':'⬜️'}</button>`:''}<input data-private-cash="${esc(key)}" inputmode="decimal" aria-label="${esc(title)} — сумма в рублях" value="${value===undefined?'':esc(String(value/100))}"></div>`};
   body.innerHTML=`<div class="attention" style="margin-top:12px"><h4 style="text-align:right">Итого: <span id="privateCashTotal" style="color:var(--green,#53c68c)">${money(data.total)} ₽</span></h4><p>Частные заказы бригадиров без кассы. Укажите комиссию за каждый заказ.</p></div><form id="privateCashForm">${data.items.map((x,i)=>field(x.key,`${i+1}. ${x.name}`,data.amounts[x.key],x.surname||'Частный заказ')).join('')||'<p class="muted">Таких заказов за этот день нет.</p>'}${field('own','Мой выход',data.own,'Мой заработок за день')}${data.legacy?field('legacy','Ранее внесённая сумма',data.legacy,'Прежняя наличка сохранена. Уменьшите её, если распределяете эту сумму по заказам.'):''}<p id="privateCashStatus" class="muted"></p><button class="primary" type="submit">Сохранить</button></form>`;
   function values(){
-   const out={amounts:{},own:0,legacy:0,version:data.version};
+   const out={amounts:{},checked:{},own:0,legacy:0,version:data.version};
+   qsa('[data-private-cash-mark]',body).forEach(button=>{out.checked[button.dataset.privateCashMark]=button.getAttribute('aria-pressed')==='true'});
    qsa('[data-private-cash]',body).forEach(input=>{
     const raw=input.value.trim().replace(/\s/g,'').replace(',','.');
     if(raw&&!/^-?\d+(\.\d{1,2})?$/.test(raw))throw Error('Введите сумму с точностью до копеек');
@@ -5321,6 +5337,7 @@ async function openPersonalCashDay(day){
    });return out;
   }
   qsa('[data-private-cash]',body).forEach(input=>input.oninput=()=>{dirty=true;try{const v=values();qs('#privateCashTotal').textContent=money(Object.values(v.amounts).reduce((a,b)=>a+b,0)+v.own+v.legacy)+' ₽';qs('#privateCashStatus').textContent='Не сохранено'}catch(e){qs('#privateCashStatus').textContent=e.message}});
+  qsa('[data-private-cash-mark]',body).forEach(button=>button.onclick=()=>{if(busy)return;const checked=button.getAttribute('aria-pressed')!=='true';button.setAttribute('aria-pressed',String(checked));button.textContent=checked?'✅':'⬜️';dirty=true;qs('#privateCashStatus').textContent='Не сохранено'});
   qs('#privateCashForm').onsubmit=async e=>{
    e.preventDefault();if(busy)return;
    try{const payload=values();busy=true;qsa('input,button',body).forEach(x=>x.disabled=true);
