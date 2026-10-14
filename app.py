@@ -8239,3 +8239,30 @@ body.dashboard-compact #employeeReadiness>.section-head{margin:6px 0 5px}
 
 
 INLINE_INDEX_HTML = _compact_dispatcher_dashboard_html(INLINE_INDEX_HTML)
+
+
+def _single_row_readiness_actions_html(html):
+    replacements = (
+        ('<button class="primary small" id="readinessCountBtn">📊 Посчитать</button>', ''),
+        ("qs('#readinessCountBtn').onclick=refreshReadinessCount;", ''),
+        ('<button class="primary small" id="readinessSendBtn">Сверка в чат 📝</button>',
+         '<button class="primary small" id="readinessSendBtn" title="Сверка в чат" aria-label="Отправить сверку готовности в чат">📝</button>'),
+    )
+    for old, new in replacements:
+        if html.count(old) != 1:
+            raise ValueError('Single-row readiness action anchor missing: ' + old[:80])
+        html = html.replace(old, new, 1)
+    return html.replace('</head>', """<style id="single-row-readiness-actions-style">
+#employeeReadiness .section-actions.readiness-actions{grid-template-columns:minmax(0,1.65fr) 44px minmax(0,1.15fr) 44px;gap:5px;margin-top:6px}
+#employeeReadiness .readiness-actions>button{min-width:0;min-height:44px;padding:4px;font-size:11px;border-radius:10px}
+#employeeReadiness #readinessHistoryBtn{grid-column:1;grid-row:1;padding:4px}
+#employeeReadiness #readinessHistoryBtn b{font-size:11px;line-height:1.15}
+#employeeReadiness #readinessHistoryBtn small{font-size:9px!important;line-height:1.1;margin-top:1px}
+#employeeReadiness .readiness-actions #readinessRemindersBtn{grid-column:2;grid-row:1;font-size:20px;padding:3px}
+#employeeReadiness #readinessAvralBtn{grid-column:3;grid-row:1;font-size:11px;padding:4px 2px}
+#employeeReadiness #readinessSendBtn{grid-column:4;grid-row:1;font-size:20px;padding:3px}
+@media(max-width:350px){#employeeReadiness #readinessAvralBtn{font-size:10px}}
+</style></head>""", 1)
+
+
+INLINE_INDEX_HTML = _single_row_readiness_actions_html(INLINE_INDEX_HTML)
