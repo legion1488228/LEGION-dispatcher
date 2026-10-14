@@ -8197,9 +8197,25 @@ def _compact_dispatcher_dashboard_html(html):
     date_label = '<label class="muted">Выбрать дату <input type="date" id="dashboardDate"'
     if html.count(date_label) != 1:
         raise ValueError('Dispatcher date label anchor missing')
-    html = html.replace(date_label, '<label class="muted"><span class="dashboard-date-prompt">Выбрать дату</span><span class="dashboard-orders-caption">Заказы</span> <input type="date" id="dashboardDate" aria-label="Дата заказов"', 1)
+    html = html.replace(date_label, '<label class="muted"><span class="dashboard-date-prompt">Выбрать дату</span><span class="dashboard-date-picker"><span class="dashboard-date-value" aria-hidden="true">${esc(dashboardOrderDateText(day))}${cabinetIcon("chevron")}</span><input type="date" id="dashboardDate" aria-label="Дата заказов"', 1)
+    date_end = 'value="${day}" style="max-width:160px"></label>'
+    heading = '<h2>${esc(fmtDate(day))}</h2><label class="muted">'
+    if html.count(date_end) != 1 or html.count(heading) != 1 or html.count('function renderSummary() {') != 1:
+        raise ValueError('Dispatcher weekday/date heading anchor missing')
+    html = html.replace(date_end, 'value="${day}" style="max-width:160px"></span></label>', 1)
+    html = html.replace(heading, '<h2><span class="dashboard-orders-heading">ЗАКАЗЫ</span><span class="dashboard-selected-day">${esc(fmtDate(day))}</span></h2><label class="muted">', 1)
+    html = html.replace('function renderSummary() {', """function dashboardOrderDateText(day){
+  const label=new Date(day+'T12:00:00Z').toLocaleDateString('ru-RU',{weekday:'short',day:'numeric',month:'short',year:'numeric',timeZone:'Europe/Moscow'});
+  return label.charAt(0).toLocaleUpperCase('ru-RU')+label.slice(1);
+}
+function renderSummary() {""", 1)
+    date_change = "  qs('#dashboardDate').onchange=e=>{if(e.target.value)loadBootstrap(e.target.value).catch(e=>toast(e.message))};"
+    if html.count(date_change) != 1:
+        raise ValueError('Dispatcher date change handler anchor missing')
+    html = html.replace(date_change, date_change + "\n  qs('#dashboardDate').onclick=event=>{if(!document.body.classList.contains('dashboard-compact'))return;try{event.currentTarget.showPicker?.()}catch{}};", 1)
     return html.replace('</head>', """<style id="compact-dispatcher-dashboard-style">
-.dashboard-orders-caption{display:none}
+.dashboard-orders-heading,.dashboard-date-value{display:none}
+.dashboard-date-picker{display:inline-block}
 body.dashboard-compact .topbar{padding:6px 12px 4px;gap:6px}
 body.dashboard-compact .topbar .eyebrow{font-size:9px;line-height:1.2}
 body.dashboard-compact .topbar h1{font-size:20px;line-height:1.2;margin:2px 0 0}
@@ -8213,8 +8229,13 @@ body.dashboard-compact #selectedDayHeader{display:grid;grid-template-columns:min
 body.dashboard-compact #selectedDayHeader h2{font-size:17px;line-height:1.2;margin:0;min-width:0}
 body.dashboard-compact #selectedDayHeader label{display:flex;align-items:center;gap:5px;font-size:13px;line-height:1.2;margin:0;text-align:right}
 body.dashboard-compact .dashboard-date-prompt{display:none}
-body.dashboard-compact .dashboard-orders-caption{display:inline;font-weight:750;color:var(--text)}
-body.dashboard-compact #dashboardDate{display:block;width:116px;max-width:116px!important;min-height:28px;padding:3px 5px;margin:0;border-radius:9px;font-size:11px;background:var(--panel2);color:var(--text);border:1px solid var(--line)}
+body.dashboard-compact .dashboard-orders-heading{display:inline;font-weight:800;color:var(--text);letter-spacing:.02em}
+body.dashboard-compact .dashboard-selected-day{display:none}
+body.dashboard-compact .dashboard-date-picker{position:relative;display:inline-flex;align-items:center;min-height:32px;padding:5px 8px;border:1px solid var(--line);border-radius:9px;background:var(--panel2);color:var(--text)}
+body.dashboard-compact .dashboard-date-picker:focus-within{border-color:var(--gold)}
+body.dashboard-compact .dashboard-date-value{display:flex;align-items:center;gap:5px;font-size:11px;line-height:1.2;white-space:nowrap;pointer-events:none}
+body.dashboard-compact .dashboard-date-value .cabinet-icon{width:10px;height:10px;transform:rotate(90deg)}
+body.dashboard-compact #dashboardDate{position:absolute;inset:0;display:block;width:100%;max-width:none!important;height:100%;min-height:32px;opacity:0;cursor:pointer;margin:0;z-index:1}
 body.dashboard-compact #selectedDayHeader+h3{display:none}
 body.dashboard-compact #summary{gap:5px;margin:0 0 6px}
 body.dashboard-compact #summary .metric{padding:7px 4px;min-height:74px;border-radius:11px;text-align:center}
@@ -8234,7 +8255,7 @@ body.dashboard-compact #orderPreparation .metric{min-height:60px;padding:7px 8px
 body.dashboard-compact #orderPreparation .metric b{font-size:15px;line-height:1.2}
 body.dashboard-compact #orderPreparation .metric span{font-size:10px;line-height:1.2;margin-top:3px;white-space:normal;overflow:visible}
 body.dashboard-compact #employeeReadiness>.section-head{margin:6px 0 5px}
-@media(max-width:350px){body.dashboard-compact .topbar h1{font-size:18px}body.dashboard-compact #selectedDayHeader h2{font-size:15px}body.dashboard-compact #dashboardDate{width:112px;max-width:112px!important}}
+@media(max-width:350px){body.dashboard-compact .topbar h1{font-size:18px}body.dashboard-compact #selectedDayHeader h2{font-size:15px}body.dashboard-compact .dashboard-date-value{font-size:10px}}
 </style></head>""", 1)
 
 
