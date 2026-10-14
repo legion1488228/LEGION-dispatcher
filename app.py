@@ -8512,6 +8512,7 @@ def _compact_owner_expanded_cash_html(html):
         section = section.replace(old, new, 1)
     replace('  const resume=cashTableReturnState;',
             '  const compactCash=!!state.bootstrap?.is_owner;\n  const resume=cashTableReturnState;')
+    replace("let cashRange=resume?.range||'month'", "let cashRange=compactCash?'month':resume?.range||'month'")
     replace("showModal('📒 Мои таблицы', `", "showModal(compactCash?'Касса':'📒 Мои таблицы', compactCash?ownerCashControls(cashMonth):`")
     replace('  const cashSession=cashModalGeneration;',
             "  qs('#modal').classList.toggle('owner-cash-modal',compactCash);\n  const cashSession=cashModalGeneration;")
@@ -8561,7 +8562,7 @@ def _compact_owner_expanded_cash_html(html):
 </style>
 <script>
 function ownerCashControls(month){
- return `<div class="owner-cash-controls"><button type="button" class="secondary" onclick="rememberCashTablePosition();openPersonalTables(earningsReturnState)" aria-label="Назад к заработку">←</button><button type="button" class="secondary" id="cashPrevMonth" aria-label="Предыдущий месяц">‹</button><label><span class="hidden">Месяц кассы</span><input id="cashMonth" type="month" value="${esc(month)}" aria-label="Месяц кассы"></label><button type="button" class="secondary" id="cashNextMonth" aria-label="Следующий месяц">›</button></div><div class="owner-cash-ranges"><button type="button" class="primary" data-cash-range="month">Месяц</button><button type="button" class="secondary" data-cash-range="first">1–15</button><button type="button" class="secondary" data-cash-range="second">16–конец</button></div><div id="cashMonthTabs"></div><div id="cashTableBody">Загрузка…</div>`;
+ return `<div class="owner-cash-controls"><button type="button" class="secondary" onclick="rememberCashTablePosition();openPersonalTables(earningsReturnState)" aria-label="Назад к заработку">←</button><button type="button" class="secondary" id="cashPrevMonth" aria-label="Предыдущий месяц">‹</button><label><span class="hidden">Месяц кассы</span><input id="cashMonth" type="month" value="${esc(month)}" aria-label="Месяц кассы"></label><button type="button" class="secondary" id="cashNextMonth" aria-label="Следующий месяц">›</button></div><div class="owner-cash-ranges"><button type="button" class="primary" data-cash-range="month">Месяц</button></div><div id="cashMonthTabs"></div><div id="cashTableBody">Загрузка…</div>`;
 }
 function ownerCashShortName(label){
  const parts=String(label||'').trim().split(/\s+/),first=parts.shift()||'—';
@@ -8592,9 +8593,16 @@ function fitOwnerCashMatrix(scroller,count,days){
  const col=Math.max(64,(width-day-total)/Math.min(4,count)),table=scroller.querySelector('table');
  scroller.style.setProperty('--cash-col',col+'px');scroller.style.setProperty('--cash-day',day+'px');scroller.style.setProperty('--cash-total',total+'px');
  table.style.width=(day+total+col*count)+'px';
- const modal=qs('#modal'),available=window.innerHeight-scroller.getBoundingClientRect().top-82;
- scroller.style.setProperty('--cash-row','30px');
- if(modal?.classList.contains('owner-cash-modal'))scroller.style.maxHeight=Math.max(160,available)+'px';
+ const modal=qs('#modal'),viewport=window.visualViewport?.height||window.innerHeight;
+ const bottom=modal?.getBoundingClientRect().bottom||viewport-82;
+ const available=Math.max(160,bottom-scroller.getBoundingClientRect().top-8);
+ const header=table.querySelector('thead').getBoundingClientRect().height||44;
+ const row=Math.max(18,Math.min(36,Math.floor((available-header-5)/16)));
+ scroller.style.setProperty('--cash-row',row+'px');
+ if(modal?.classList.contains('owner-cash-modal')){
+  scroller.style.height=Math.min(available,header+16*row+5)+'px';
+  scroller.style.maxHeight=available+'px';
+ }
 }
 function bindOwnerCashDetails(body,ledger,active){
  const host=qs('#ownerCashDetail',body);let request=0;
@@ -8636,3 +8644,78 @@ def _exclude_reserve_from_unanswered_html(html):
 
 
 INLINE_INDEX_HTML = _exclude_reserve_from_unanswered_html(INLINE_INDEX_HTML)
+
+
+def _personal_first_half_view_html(html):
+    start = html.index('async function openPersonalTables(resume=null){')
+    end = html.index('</script>', start)
+    section = html[start:end]
+    cash_button = '<button class="secondary" id="earningsTables">📒 Мои таблицы</button>'
+    if cash_button not in section:
+        raise RuntimeError('Expanded cash navigation button missing')
+    section = section.replace(cash_button, '', 1)
+    section = section.replace('<button class="secondary" data-personal-kind="kickbacks">Откаты</button></div>',
+        '<button class="secondary" data-personal-kind="kickbacks">Откаты</button><button type="button" class="secondary" id="earningsTables">Расширенная касса</button></div>', 1)
+    section = section.replace('<button class="secondary" id="personalAdd">＋ Столбец</button>', '', 1)
+    add_handler = " qs('#personalAdd').onclick=()=>{if(busy||!data)return;const value=prompt('Название нового столбца');if(value!==null)save({action:'add',value})};"
+    if add_handler not in section:
+        raise RuntimeError('Personal add-column handler missing')
+    section = section.replace(add_handler, '', 1)
+    old = '<p class="muted">Касса и «Марине» — из общей кассы.'
+    if old not in section:
+        raise RuntimeError('Personal earnings introduction missing')
+    section = section.replace(old, '<details class="personal-help"><summary>Как считается заработок</summary><p class="muted">Касса и «Марине» — из общей кассы.', 1)
+    section = section.replace('Сохранение после каждой правки.</p><label>Месяц',
+        'Сохранение после каждой правки.</p></details><label class="personal-month-label">Месяц', 1)
+    old = " const grid=qs('#personalGrid'),status=qs('#personalStatus'),session=cashModalGeneration;"
+    if old not in section:
+        raise RuntimeError('Personal earnings grid missing')
+    section = section.replace(old, old + "\n qs('#modal').classList.add('personal-first-half-modal');\n if(!resume){grid.scrollTop=0;qs('#modal').scrollTop=0}", 1)
+    old = "  grid.scrollLeft=left;grid.scrollTop=top;qs('#modal').scrollTop=modalTop;"
+    if old not in section:
+        raise RuntimeError('Personal earnings scroll restoration missing')
+    section = section.replace(old, "  fitPersonalFirstHalf(grid);\n" + old, 1)
+    html = html[:start] + section + html[end:]
+    html = html.replace('function showModal(title, body) {',
+        "function showModal(title, body) {qs('#modal').classList.remove('personal-first-half-modal');", 1)
+    return html.replace('</body>', r'''
+<style>
+#modal.personal-first-half-modal{left:4px;right:4px;top:4px;bottom:calc(76px + var(--safe-bottom));width:auto;max-width:1100px;margin:0 auto;transform:none;max-height:none;padding:8px 6px;overflow:auto}
+#modal.personal-first-half-modal>.modal-head{position:relative;top:auto;margin:0 0 6px;min-height:32px}
+#modal.personal-first-half-modal>.modal-head::before{display:none}
+#modal.personal-first-half-modal>.modal-head h3{font-size:18px;margin:0}
+#modal.personal-first-half-modal .close-btn{width:32px;height:32px;min-height:32px;padding:0;font-size:20px}
+#modal.personal-first-half-modal>div:not(#personalGrid):not(.modal-head){margin:4px 0!important;gap:4px!important}
+#modal.personal-first-half-modal .secondary,#modal.personal-first-half-modal .primary{font-size:12px;padding:6px 9px;min-height:30px;border-radius:9px}
+#modal.personal-first-half-modal .personal-help{font-size:11px;color:var(--muted);margin:4px 0}
+#modal.personal-first-half-modal .personal-help summary{cursor:pointer}
+#modal.personal-first-half-modal .personal-month-label{display:flex;align-items:center;gap:7px;font-size:11px;margin:4px 0}
+#modal.personal-first-half-modal #personalMonth{flex:1;min-width:0;width:auto!important;min-height:30px;padding:3px 5px;font-size:14px;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:7px}
+#modal.personal-first-half-modal #personalStatus:empty{display:none}
+#modal.personal-first-half-modal #personalGrid{--personal-half-row:26px;max-height:none!important;margin-top:5px!important;overflow:auto}
+#modal.personal-first-half-modal #personalGrid .personal-table tbody tr:not(.personal-total):not(.gbu-comment-row)>th,#modal.personal-first-half-modal #personalGrid .personal-table tbody tr:not(.personal-total):not(.gbu-comment-row)>td{height:var(--personal-half-row);padding:2px 1px;box-sizing:border-box}
+#modal.personal-first-half-modal #personalGrid .personal-cell{height:calc(var(--personal-half-row) - 5px);min-height:0!important;padding:1px 0;font-size:inherit;line-height:1.15;box-sizing:border-box}
+#modal.personal-first-half-modal #personalGrid .personal-column{min-height:38px;height:auto;padding:2px 0;font-size:inherit;border-radius:4px}
+#modal.personal-first-half-modal #personalGrid .personal-table .personal-total th,#modal.personal-first-half-modal #personalGrid .personal-table .personal-total td{height:28px;padding:2px 1px;box-sizing:border-box}
+</style>
+<script>
+function fitPersonalFirstHalf(grid){
+ const modal=qs('#modal');if(!modal?.classList.contains('personal-first-half-modal')||!grid.querySelector('table'))return;
+ const viewport=window.visualViewport?.height||window.innerHeight;
+ const bottom=modal.getBoundingClientRect().bottom||viewport-76;
+ const available=Math.max(160,bottom-grid.getBoundingClientRect().top-8);
+ const header=grid.querySelector('thead').getBoundingClientRect().height||42;
+ const subtotal=grid.querySelector('.personal-total')?.getBoundingClientRect().height||28;
+ const row=Math.max(16,Math.min(36,Math.floor((available-header-subtotal-4)/15)));
+ grid.style.setProperty('--personal-half-row',row+'px');
+ grid.style.height=(header+15*row+subtotal+4)+'px';
+}
+window.addEventListener('resize',()=>{const grid=qs('#personalGrid');if(grid)fitPersonalFirstHalf(grid)});
+window.visualViewport?.addEventListener('resize',()=>{const grid=qs('#personalGrid');if(grid)fitPersonalFirstHalf(grid)});
+function resizeOwnerCashFirstHalf(){const scroller=qs('#cashMatrixScroller');if(!qs('#modal')?.classList.contains('owner-cash-modal')||!scroller)return;fitOwnerCashMatrix(scroller,scroller.querySelectorAll('thead th').length-2,scroller.querySelectorAll('[data-owner-cash-day]').length)}
+window.addEventListener('resize',resizeOwnerCashFirstHalf);
+window.visualViewport?.addEventListener('resize',resizeOwnerCashFirstHalf);
+</script></body>''', 1)
+
+
+INLINE_INDEX_HTML = _personal_first_half_view_html(INLINE_INDEX_HTML)
