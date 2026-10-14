@@ -9073,3 +9073,38 @@ function controlEveningPreparationHtml(data){
 
 
 INLINE_INDEX_HTML = _control_morning_evening_layout_html(INLINE_INDEX_HTML)
+
+
+# Compact the Control chrome while preserving every existing action and counter.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', r'''
+<style id="compact-control-menu-style">
+body.owner-brigade-control-open .topbar{padding:9px 12px 7px}
+body.owner-brigade-control-open .topbar .eyebrow{font-size:10px}
+body.owner-brigade-control-open .topbar h1{font-size:20px;margin:2px 0 0}
+body.owner-brigade-control-open .topbar .icon-btn{width:36px;height:36px;border-radius:11px;font-size:20px}
+body.owner-brigade-control-open #dateStrip{gap:5px;padding:2px 12px 7px}
+body.owner-brigade-control-open #dateStrip .date-pill{min-width:66px;min-height:62px;padding:7px 5px;border-radius:11px}
+body.owner-brigade-control-open #dateStrip .date-pill strong{font-size:12px;line-height:1.2}
+body.owner-brigade-control-open #dateStrip .date-pill small{font-size:10px;line-height:1.2!important;margin-top:3px!important}
+body.owner-brigade-control-open #ownerBrigadeControlContent{padding:2px 0 12px}
+#ownerBrigadeControlContent #orderPreparation{margin:0 0 7px;padding:8px;border:1px solid var(--line);border-radius:13px;background:var(--panel)}
+#ownerBrigadeControlContent #orderPreparation h2{margin:0 0 5px;font-size:clamp(15px,4.1vw,18px);line-height:1.2}
+#ownerBrigadeControlContent #numberCardsBtn{min-height:36px;margin-bottom:4px;padding:6px 5px;font-size:12px;border-radius:9px}
+#ownerBrigadeControlContent #orderPreparation .summary-grid{gap:4px}
+#ownerBrigadeControlContent #orderPreparation .metric{min-height:54px;padding:6px 7px;border-radius:9px;background:var(--panel2)}
+#ownerBrigadeControlContent #orderPreparation .metric b{font-size:14px;line-height:1.2}
+#ownerBrigadeControlContent #orderPreparation .metric span{font-size:10px;line-height:1.2;margin-top:2px}
+#ownerBrigadeControlContent .bc-heading{padding:7px 7px 6px;margin:0;border:1px solid var(--line);border-bottom:0;border-radius:13px 13px 0 0;background:var(--panel);grid-template-columns:minmax(0,1fr) minmax(100px,116px);gap:5px}
+#ownerBrigadeControlContent .bc-heading h2{font-size:clamp(12px,3.35vw,16px);line-height:1.2}
+#ownerBrigadeControlContent .bc-date{font-size:10px;line-height:1.2}
+#ownerBrigadeControlContent .bc-date input{min-height:30px;padding:3px 5px;font-size:11px;border-radius:8px}
+#ownerBrigadeControlContent .bc-counters{gap:4px;padding:0 7px 5px;border-left:1px solid var(--line);border-right:1px solid var(--line);background:var(--panel)}
+#ownerBrigadeControlContent .bc-counters button{min-height:54px;padding:6px 3px;border-radius:9px;background:var(--panel2)}
+#ownerBrigadeControlContent .bc-counters button[aria-pressed=true]{background:#211d15;border-color:var(--gold)}
+#ownerBrigadeControlContent .bc-counters b{font-size:20px;line-height:1.1}
+#ownerBrigadeControlContent .bc-counters span{font-size:10px;line-height:1.2;margin-top:3px}
+#ownerBrigadeControlContent .bc-sources{gap:3px;margin-top:0;padding:3px 7px 6px;border-top:0;border-radius:0 0 13px 13px;background:var(--panel)}
+#ownerBrigadeControlContent .bc-sources button{min-height:34px;padding:5px 2px;font-size:11px;border-radius:8px}
+#ownerBrigadeControlContent .bc-list-caption{font-size:10px;margin:8px 0 5px}
+#ownerBrigadeControlContent .bc-missing{font-size:11px;margin:5px 0}
+</style></head>''', 1)
