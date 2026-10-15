@@ -7165,12 +7165,14 @@ class CabinetCommandResult(BaseModel):
 
 @app.post('/api/bot/cabinet/result', dependencies=[Depends(_bot_key)])
 def cabinet_command_finish(data: CabinetCommandResult, db: Session = Depends(get_db)):
-    row=db.get(CabinetCommand,data.id)
+    row=db.scalar(select(CabinetCommand).where(CabinetCommand.id == data.id).with_for_update())
     if not row:
         raise HTTPException(404,'Действие не найдено')
     if row.status not in {'done','error'}:
         result = dict(data.result)
         intent = json.loads(row.payload)
+        if data.status == 'done' and intent.get('action') == 'cash_summary':
+            record_cash_period_reconciliation(db, row, intent)
         if data.status == 'done' and intent.get('action') in {'schedule', 'edit'}:
             key = str(intent.get('report_key') or '')
             clock = _canonical_cabinet_clock(intent.get('values', {}).get('photo_time'))
@@ -9405,3 +9407,212 @@ function cabinetActionNotice(message,kind='success'){
 
 
 INLINE_INDEX_HTML = _cabinet_action_notices_html(INLINE_INDEX_HTML)
+
+
+class CashPeriodReconciliation(Base):
+    __tablename__ = 'cash_period_reconciliation'
+    period_start = Column(Date, primary_key=True)
+    tg_id = Column(BigInteger, primary_key=True)
+    checked = Column(Boolean, nullable=False)
+    source = Column(String(20), nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class CashReconciliationMark(BaseModel):
+    checked: StrictBool
+    version: StrictInt = Field(ge=0)
+
+
+def cash_reconciliation_period(month, half):
+    import calendar
+    try:
+        period = CabinetCashSummaryPeriod(month=month, half=half)
+    except ValueError:
+        raise HTTPException(422, 'Выберите месяц и половину месяца')
+    first = date.fromisoformat(period.month+'-01')
+    return first.replace(day=1 if half == 1 else 16), first.replace(
+        day=15 if half == 1 else calendar.monthrange(first.year, first.month)[1])
+
+
+def cash_reconciliation_cashiers(db):
+    return [employee for employee in db.scalars(select(Employee).where(
+        Employee.active.is_(True), Employee.group_code == 'brigadier',
+        Employee.is_cashier.is_(True), _visible_employee()))
+        if employee.tg_id and not _cashier_excluded(db, employee)]
+
+
+def record_cash_period_reconciliation(db, command, intent):
+    values = intent.get('values') or {}
+    start, _ = cash_reconciliation_period(values.get('month'), values.get('half'))
+    # Use the same account lock as manual edits, including first-row creation.
+    db.scalar(select(Employee).where(Employee.tg_id == command.tg_id).with_for_update().limit(1))
+    mark = db.get(CashPeriodReconciliation, (start, command.tg_id))
+    if mark is None:
+        mark = CashPeriodReconciliation(period_start=start,tg_id=command.tg_id,version=0)
+        db.add(mark)
+    mark.checked = True
+    mark.source = 'auto'
+    mark.version += 1
+    mark.updated_at = datetime.utcnow()
+
+
+@app.get('/api/cash/reconciliation')
+def cash_reconciliation(month: str, half: int, db: Session = Depends(get_db),
+        user: TelegramUser = Depends(require_admin)):
+    _require_cash_manager(db, user)
+    start, end = cash_reconciliation_period(month, half)
+    employees = cash_reconciliation_cashiers(db)
+    people = {int(e.tg_id): e for e in employees}
+    sums = defaultdict(lambda: {'cash':0, 'kickback':0, 'orders':0})
+    for entry in _all_cash_rows(db, start, end):
+        uid = int(entry.brigadier_tg_id)
+        if uid in people:
+            sums[uid]['cash'] += int(entry.commission_rub or 0)
+            sums[uid]['kickback'] += int(entry.kickback_rub or 0)
+            sums[uid]['orders'] += 1
+    # Earlier successful summaries predate these marks; their retained intents
+    # are trustworthy receipts, not guessed from text in Telegram messages.
+    automatic = set()
+    if people:
+        commands = db.scalars(select(CabinetCommand).where(CabinetCommand.tg_id.in_(people),
+            CabinetCommand.status == 'done', CabinetCommand.payload.contains('cash_summary'),
+            CabinetCommand.payload.contains(month)))
+        for command in commands:
+            intent = json.loads(command.payload)
+            if intent.get('action') == 'cash_summary' and intent.get('values') == {'month':month,'half':half}:
+                automatic.add(command.tg_id)
+    marks = {m.tg_id:m for m in db.scalars(select(CashPeriodReconciliation).where(
+        CashPeriodReconciliation.period_start == start))}
+    items = []
+    for uid, employee in people.items():
+        parts = str(employee.full_name or '').split()
+        name = ' '.join(str(x) for x in (parts[0] if parts else 'Бригадир', employee.metro, employee.height_cm) if x)
+        values = sums[uid]
+        mark = marks.get(uid)
+        items.append({'tg_id':uid,'name':name,**values,'total':values['cash']+values['kickback'],
+            'checked':bool(mark.checked if mark else uid in automatic),
+            'source':mark.source if mark else 'auto' if uid in automatic else None,
+            'version':mark.version if mark else 0})
+    items.sort(key=lambda item:(item['name'].casefold(),item['tg_id']))
+    return JSONResponse({'month':month,'half':half,'start':start.isoformat(),'end':end.isoformat(),
+        'can_mark':_is_cabinet_owner(db,user.id),'items':items,
+        'checked_count':sum(item['checked'] for item in items),
+        'total':sum(item['total'] for item in items)},headers={'Cache-Control':'private, no-store'})
+
+
+@app.put('/api/cash/reconciliation/{tg_id}')
+def cash_reconciliation_mark(tg_id: int, month: str, half: int, change: CashReconciliationMark,
+        db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    if not _is_cabinet_owner(db,user.id):
+        raise HTTPException(403, 'Ручная отметка доступна только владельцу')
+    start, _ = cash_reconciliation_period(month, half)
+    db.scalar(select(Employee).where(Employee.tg_id == tg_id).with_for_update().limit(1))
+    if tg_id not in {int(e.tg_id) for e in cash_reconciliation_cashiers(db)}:
+        raise HTTPException(404, 'Кассовый бригадир не найден')
+    mark = db.get(CashPeriodReconciliation,(start,tg_id))
+    if (mark.version if mark else 0) != change.version:
+        raise HTTPException(409, 'Отметка уже изменилась. Обновите карточки')
+    if mark is None:
+        mark = CashPeriodReconciliation(period_start=start,tg_id=tg_id,version=0)
+        db.add(mark)
+    mark.checked = change.checked
+    mark.source = 'manual'
+    mark.version += 1
+    mark.updated_at = datetime.utcnow()
+    db.commit()
+    return {'checked':mark.checked,'source':mark.source,'version':mark.version}
+
+
+def _cash_reconciliation_cards_html(html):
+    html = html.replace("if(!body||!table||!modal||modal.classList.contains('hidden'))return;",
+        "if(!body||(!table&&!qs('.cash-reconciliation-grid',body))||!modal||modal.classList.contains('hidden'))return;",1)
+    html = html.replace('tableScroll:table.scrollLeft,tableTop:table.scrollTop',
+        'tableScroll:table?.scrollLeft||0,tableTop:table?.scrollTop||0',1)
+    controls = '<button type="button" class="primary" data-cash-range="month">Месяц</button></div>'
+    if html.count(controls) != 1:
+        raise RuntimeError('Cash reconciliation controls missing')
+    html = html.replace(controls, '<button type="button" class="primary" data-cash-range="month">Месяц</button><button type="button" class="secondary" data-cash-range="first">1–15</button><button type="button" class="secondary" data-cash-range="second">16–конец месяца</button></div>',1)
+    start = html.index('async function openCashTable(){')
+    end = html.index('let ownerCabinetRequest=',start)
+    section = html[start:end]
+    section = section.replace("let cashRange=compactCash?'month':resume?.range||'month', cashRequest=0;",
+        "let cashRange=resume?.range||'month', cashRequest=0, cashMarkSaving=false;",1)
+    section = section.replace('if(!body || !cashActive()) return;',
+        'if(!body || !cashActive() || cashMarkSaving) return;',1)
+    section = section.replace("qsa('[data-cash-range]')", "qsa('button[data-cash-range]')")
+    reminder_start = section.index("      const reminder=qs('#cashReminder');")
+    reminder_end = section.index("      const refresh=qs('#cashRefreshNow');",reminder_start)
+    reminder = section[reminder_start:reminder_end]
+    anchor = '      const ledger=await api(`/api/cash/ledger?'
+    at = section.index(anchor)
+    branch = r'''
+      qs('#modal').classList.toggle('cash-reconciliation-open',compactCash&&cashRange!=='month');
+      if(compactCash&&cashRange!=='month'){
+        const half=cashRange==='first'?1:2;
+        const report=await api(`/api/cash/reconciliation?month=${encodeURIComponent(cashMonth)}&half=${half}`,{cache:'no-store'});
+        if(!cashActive()||request!==cashRequest||requestedMonth!==cashMonth||requestedRange!==cashRange)return;
+        body.innerHTML=ownerCashReconciliationHtml(report);
+        qsa('[data-reconcile-mark]',body).forEach(button=>button.onclick=async()=>{
+          if(cashMarkSaving||!cashActive())return;
+          const item=report.items.find(item=>String(item.tg_id)===button.dataset.reconcileMark);
+          if(!report.can_mark||!item)return;
+          cashMarkSaving=true;button.disabled=true;
+          try{
+            await api(`/api/cash/reconciliation/${item.tg_id}?month=${encodeURIComponent(report.month)}&half=${report.half}`,{method:'PUT',body:JSON.stringify({checked:!item.checked,version:item.version})});
+            toast(item.checked?'Ручная отметка снята':'Отмечено вручную ✅');
+          }catch(error){toast(error.message)}
+          finally{cashMarkSaving=false;if(cashActive())await drawCash()}
+        });
+''' + reminder + r'''
+        requestAnimationFrame(()=>{if(cashActive()&&request===cashRequest){qs('#modal').scrollTop=0;fitCashReconciliation();rememberCashTablePosition()}});
+        return;
+      }
+'''
+    section = section[:at]+branch+section[at:]
+    html = html[:start]+section+html[end:]
+    html = html.replace('function showModal(title, body) {',
+        "function showModal(title, body) {qs('#modal').classList.remove('cash-reconciliation-open');",1)
+    return html.replace('</head>', r'''<style id="cash-reconciliation-style">
+#modal.owner-cash-modal.cash-reconciliation-open{overflow:hidden;display:flex;flex-direction:column}
+#modal.cash-reconciliation-open #cashTableBody{min-height:0;flex:1;display:flex;flex-direction:column}
+.cash-reconciliation-toolbar{display:flex;align-items:center;justify-content:space-between;gap:5px;font-size:11px;color:var(--muted);margin:5px 0}
+.cash-reconciliation-toolbar strong{color:var(--text);font-size:12px}
+.cash-reconciliation-grid{display:grid;grid-template-columns:repeat(var(--reconcile-cols,4),minmax(0,1fr));gap:5px;min-height:0}
+.cash-reconciliation-card{min-width:0;min-height:0;padding:4px;border:1px solid var(--line);border-radius:10px;background:var(--panel);font-size:var(--reconcile-font,10px);line-height:1.15;display:flex;flex-direction:column;font-variant-numeric:tabular-nums}
+.cash-reconciliation-card.is-checked{border-color:#377b50}
+.cash-reconciliation-name{position:relative;padding-right:20px;min-height:2.3em;overflow-wrap:anywhere;margin-bottom:2px}
+.cash-reconciliation-name strong{font-size:inherit;font-weight:600}
+.cash-reconciliation-mark{position:absolute;right:-2px;top:-2px;border:0!important;background:transparent!important;padding:0!important;width:23px;min-height:23px!important;height:23px;font-size:17px!important;line-height:23px;display:grid;place-items:center;cursor:pointer}
+.cash-reconciliation-mark:disabled{opacity:.6}.cash-reconciliation-mark[aria-readonly=true]{cursor:default}
+.cash-reconciliation-line{display:flex;align-items:baseline;justify-content:space-between;gap:2px;margin:0;white-space:nowrap}
+.cash-reconciliation-line span{color:var(--muted)}.cash-reconciliation-line b{font-weight:500}
+.cash-reconciliation-total{margin-top:auto;padding-top:2px;border-top:1px solid var(--line);color:var(--gold);font-weight:700}
+.cash-reconciliation-total span{color:var(--gold)}.cash-reconciliation-total b{font-weight:750}
+.cash-reconciliation-legend{margin:5px 0 0;font-size:10px;color:var(--muted);line-height:1.3}
+</style></head>''',1).replace('</body>',r'''<script>
+function ownerCashReconciliationHtml(report){
+ const number=value=>Number(value||0).toLocaleString('ru-RU');
+ const cards=(report.items||[]).map((item,index)=>`<article class="cash-reconciliation-card${item.checked?' is-checked':''}"><div class="cash-reconciliation-name"><strong>${index+1}. ${esc(item.name)}</strong>${report.can_mark?`<button type="button" class="cash-reconciliation-mark" data-reconcile-mark="${item.tg_id}" aria-pressed="${item.checked}" aria-label="${item.checked?'Снять отметку':'Отметить вручную'}: ${esc(item.name)}" title="${item.source==='manual'?'Отмечено вручную':item.checked?'Подсчёт отправлен из личного кабинета':'Подсчёт не отправлен'}">${item.checked?'✅':'⬜️'}</button>`:`<span class="cash-reconciliation-mark" aria-readonly="true">${item.checked?'✅':'⬜️'}</span>`}</div><div class="cash-reconciliation-line"><span>Заказов:</span><b>${number(item.orders)}</b></div><div class="cash-reconciliation-line"><span>Касса:</span><b>${number(item.cash)}</b></div><div class="cash-reconciliation-line"><span>Откат:</span><b>${number(item.kickback)}</b></div><div class="cash-reconciliation-line cash-reconciliation-total"><span>Итого:</span><b>${number(item.total)}</b></div></article>`).join('');
+ return `<div class="cash-reconciliation-toolbar"><span>Суммы в ₽</span><strong>Сверились: ${report.checked_count} из ${report.items.length}</strong><button type="button" class="secondary" id="cashReminder" ${cashReminderSending?'disabled':''}>🔔 Сверка</button></div>${cards?`<div class="cash-reconciliation-grid">${cards}</div>`:'<div class="empty">Кассовых бригадиров пока нет</div>'}<p class="cash-reconciliation-legend">⬜️ Не сверился · ✅ Подсчёт отправлен${report.can_mark?' или отмечено вами вручную':''}</p>`;
+}
+function fitCashReconciliation(){
+ const modal=qs('#modal'),grid=qs('.cash-reconciliation-grid',modal);
+ if(!modal?.classList.contains('cash-reconciliation-open')||!grid)return;
+ const count=grid.children.length;if(!count)return;
+ const width=grid.clientWidth||Math.max(240,window.innerWidth-26),bottom=modal.getBoundingClientRect().bottom||(window.visualViewport?.height||window.innerHeight)-76;
+ const top=grid.getBoundingClientRect().top||180,available=Math.max(120,bottom-top-35);
+ let best={score:0,cols:1,rows:count};
+ for(let cols=1;cols<=Math.min(4,count);cols++){
+  const rows=Math.ceil(count/cols),score=Math.min((width-5*(cols-1))/cols,(available-5*(rows-1))/rows);
+  if(score>best.score)best={score,cols,rows};
+ }
+ grid.style.setProperty('--reconcile-cols',best.cols);grid.style.setProperty('--reconcile-font',Math.min(12,Math.max(8,best.score/10))+'px');
+ grid.style.gridTemplateRows=`repeat(${best.rows},minmax(0,1fr))`;grid.style.height=available+'px';
+}
+window.addEventListener('resize',fitCashReconciliation);
+window.visualViewport?.addEventListener('resize',fitCashReconciliation);
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML = _cash_reconciliation_cards_html(INLINE_INDEX_HTML)
