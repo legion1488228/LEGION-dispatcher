@@ -9766,3 +9766,78 @@ scheduleOrdersScreenFit();
 
 
 INLINE_INDEX_HTML = _one_screen_orders_html(INLINE_INDEX_HTML)
+
+
+# Shared warm light palette for dispatcher, personal cabinets and dialogs.
+def _warm_light_interface_html(html):
+    palette = {}
+    def colors(old, new):
+        for color in old.split():
+            palette[color] = new
+    colors('#09090b #0a0a0b', '#e8e7e3')
+    colors('#101013 #111114 #121215', '#f5f3ee')
+    colors('#17171c #18181c #1b1b1f #202026 #232328 #24242a #26262c', '#e9e7e1')
+    colors('#2a2a30 #303038 #34343b #3a3a40 #4a4a52', '#d4d1c8')
+    colors('#f5f5f5 #fff #ddd #ccc #cfcfd4 #333', '#303330')
+    colors('#9a9aa3 #777', '#686d68')
+    colors('#171208 #17130b #1b160c', '#40351d')
+    colors('#211d15 #211d14 #2a251b #302719 #272216 #282315 #19170f #25221b #302a1e #2b2315 #25251f #211a14', '#efe4c9')
+    colors('#433923 #5b5036 #4c3a28 #8f7442', '#b4a078')
+    colors('#d8b46a #d9c59a #f6dfac #f0d397 #cdbf9f #ead39d #ffd45c', '#967539')
+    colors('#1b3325 #284330 #17221c #14231b #274132 #14241a #14281d #20382b', '#e0ece3')
+    colors('#58c785 #53c68c #55c98b #7ee0a2 #83dfaa #a9dfbd #305c40 #326c4b #377b50', '#388167')
+    colors('#07120b', '#f5f3ee')
+    colors('#201d27 #23212a #241c22', '#eee5ef')
+    colors('#d7c7f1 #d3cadf #edc7df', '#775780')
+    colors('#241616 #221616 #332021 #492326 #291b1d', '#f1dedb')
+    colors('#5a2d2d #512c2c #764447 #7b3a40', '#d5aaa4')
+    colors('#e06969 #ff5555 #ff5c5c #ff7979 #ff7b7b #ffaaaa #ffb5b5 #ffb7b7', '#a44740')
+    colors('#e3b454', '#997526')
+    colors('#6ca6e8 #9fc8ff', '#416e94')
+    colors('#000b', '#302c2433')
+    colors('#000', '#302c2426')
+    html = re.sub(r'(?<![\w-])#[0-9a-fA-F]{3,8}\b',
+                  lambda match: palette.get(match.group().lower(), match.group()), html)
+    html = html.replace('rgba(13,13,15,.95)', 'rgba(245,243,238,.97)')
+    html = html.replace('rgba(0,0,0,.62)', 'rgba(48,51,48,.24)')
+    html = html.replace('rgba(0,0,0,.6)', 'rgba(48,51,48,.12)')
+    html = html.replace('color-scheme:dark', 'color-scheme:light')
+    html = html.replace('</head>', r'''<style id="warm-light-interface-style">
+:root{color-scheme:light;--bg:#e8e7e3;--panel:#f5f3ee;--panel2:#e9e7e1;--line:#d4d1c8;--text:#303330;--muted:#686d68;--gold:#967539;--gold2:#b4a078;--green:#388167;--red:#a44740;--amber:#997526;--blue:#416e94}
+html,body{background:var(--bg);color:var(--text)}
+.topbar{background:linear-gradient(180deg,#e8e7e3 85%,rgba(232,231,227,0))}
+.primary,.primary.small{background:#e5cd93;color:#40351d}
+.primary:disabled{opacity:.5}
+.secondary,.icon-btn,.search,input,select,textarea{color:var(--text)}
+input,select,textarea{color-scheme:light}
+.date-pill.active{background:#efe4c9;border-color:#a88b50}
+.segmented button.active{background:#efe4c9;color:#775c27}
+.group-stats button{background:#e9e7e1;color:var(--muted)}
+.group-stats button.has-people{box-shadow:inset 0 0 0 1px #d4d1c8}
+.group-stats button:active{background:#e0ddd5}
+.danger{background:#f1dedb;border-color:#d5aaa4;color:#a44740}
+#readinessAvralBtn{background:#f1dedb!important;color:#a44740!important;border-color:#d5aaa4!important}
+#readinessSendBtn{background:#e5cd93;color:#40351d}
+.bottom-nav,.role-navigation{background:rgba(245,243,238,.97);border-top-color:var(--line)}
+.bottom-nav button,.role-navigation button{color:#737975}
+.bottom-nav button.active,.role-navigation button.active{color:#967539}
+.modal,.drawer{background:#f5f3ee;box-shadow:0 12px 45px rgba(48,51,48,.12)}
+.backdrop{background:rgba(48,51,48,.24)}
+#toast{background:#303330;color:#f5f3ee;border:1px solid #5b605a}
+#fatal{background:#f5f3ee;color:#a44740}
+#dayCommentBtn{background:#efe4c9;color:#775c27;border-color:#b4a078}
+.cabinet-status-note,.attention{color:var(--text)}
+</style></head>''', 1)
+    return html.replace('</body>', r'''<script>
+function applyLegionLightTelegramChrome(){
+ const webApp=window.Telegram?.WebApp;
+ try{webApp?.setHeaderColor?.('#e8e7e3')}catch{}
+ try{webApp?.setBackgroundColor?.('#e8e7e3')}catch{}
+ try{webApp?.setBottomBarColor?.('#f5f3ee')}catch{}
+}
+applyLegionLightTelegramChrome();
+try{window.Telegram?.WebApp?.onEvent?.('themeChanged',applyLegionLightTelegramChrome)}catch{}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML = _warm_light_interface_html(INLINE_INDEX_HTML)
