@@ -277,7 +277,7 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
         reminder.disabled=true;
         try{
           const result=await api('/api/cash/reminder',{method:'POST'});
-          toast(`Отправлено в группы: ${result.sent_chats} из ${result.sent_chats+result.failed_chats}`);
+          toast(`Отправлено: ${result.sent_chats}. Уже напомнили сегодня: ${result.already_sent_chats||0}.${result.failed_chats?' Не отправлено: '+result.failed_chats+'.':''}${result.unconfirmed_chats?' Требуют проверки: '+result.unconfirmed_chats+'. Повтор отключён, чтобы не создать дубль.':''}`,7000);
         }catch(error){toast(error.message || 'Не удалось отправить напоминание')}
         finally{
           cashReminderSending=false;
@@ -3547,6 +3547,14 @@ class CashReminderSettings(BaseModel):
     chat_ids: list[int] = Field(max_length=1000)
 
 
+class CashReminderDelivery(Base):
+    __tablename__ = 'cash_reminder_delivery'
+    work_date = Column(Date, primary_key=True)
+    chat_id = Column(BigInteger, primary_key=True)
+    status = Column(String(20), nullable=False, default='pending')
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
 @app.post("/api/bot/cash/chat-settings", dependencies=[Depends(_bot_key)])
 def sync_cash_reminder_settings(data: CashReminderSettings, db: Session = Depends(get_db)):
     # Only group destinations, deduplicated even when cashiers share a group.
@@ -3570,24 +3578,67 @@ async def send_cash_reminder(db: Session = Depends(get_db),
         CashReminderConfig.id == 1).with_for_update()).scalar_one_or_none()
     if row is None or now - row.updated_at > timedelta(minutes=5):
         raise HTTPException(409, "Связь с ботом не обновлена. Проверьте, что новый bot.py запущен, и повторите через минуту.")
-    if row.sent_at and now - row.sent_at < timedelta(seconds=60):
-        raise HTTPException(429, "Напоминание уже отправлялось. Повторите через минуту.")
     chat_ids = sorted({int(chat_id) for chat_id in json.loads(row.payload) if int(chat_id) < 0})
     if not chat_ids:
         raise HTTPException(409, "Нет подключённых групп действующих кассиров.")
-    row.sent_at = now
-    db.commit()
-    sent, failed = 0, 0
+    today = datetime.now(MOSCOW).date()
+    sent, failed, already, unconfirmed = 0, 0, 0, 0
+    claimed = []
+    legacy_sent_today = bool(row.sent_at and
+        row.sent_at.replace(tzinfo=timezone.utc).astimezone(MOSCOW).date() == today and
+        db.scalar(select(CashReminderDelivery.chat_id).where(
+            CashReminderDelivery.work_date == today).limit(1)) is None)
+    # The config row lock serializes owners/assistants, across browser windows
+    # and service replicas. Commit each destination's claim before any send.
     for chat_id in chat_ids:
+        delivery = db.get(CashReminderDelivery, (today, chat_id))
+        if delivery is None and legacy_sent_today:
+            # The previous version stored only a bulk attempt timestamp. Its
+            # individual results are unknown; installing this version must not
+            # cause that same day's reminder to be broadcast again.
+            db.add(CashReminderDelivery(work_date=today,chat_id=chat_id,status='unknown',updated_at=now))
+            unconfirmed += 1
+            continue
+        if delivery and delivery.status == 'sent':
+            already += 1
+            continue
+        if delivery and delivery.status != 'failed':
+            unconfirmed += 1
+            continue
+        if delivery is None:
+            delivery = CashReminderDelivery(work_date=today, chat_id=chat_id)
+            db.add(delivery)
+        delivery.status = 'pending'
+        delivery.updated_at = now
+        claimed.append(chat_id)
+    if claimed:
+        row.sent_at = now
+    db.commit()
+    message = ('напоминаю о сверке кассы сегодня 🔔\n\n'
+        'Кнопка подсчёта кассы находится в разделе «Касса» в личном кабинете бригадира 👍')
+    for chat_id in claimed:
+        outcome = 'unknown'
         try:
-            delivered = await send_telegram_message(chat_id, "напоминаю о сверке кассы сегодня 🔔")
-        except Exception:
-            delivered = False
-        if delivered:
+            delivered = await send_telegram_message(chat_id, message)
+            outcome = 'sent' if delivered else 'failed'
+        except Exception as exc:
+            # An explicit Telegram 4xx response rejected the send. A timeout or
+            # dropped response may follow delivery: never automatically resend.
+            code = getattr(getattr(exc, 'response', None), 'status_code', None)
+            if isinstance(code, int) and 400 <= code < 500 and code != 408:
+                outcome = 'failed'
+        delivery = db.get(CashReminderDelivery, (today, chat_id))
+        delivery.status = outcome
+        delivery.updated_at = datetime.utcnow()
+        db.commit()
+        if outcome == 'sent':
             sent += 1
-        else:
+        elif outcome == 'failed':
             failed += 1
-    return {"sent_chats": sent, "failed_chats": failed}
+        else:
+            unconfirmed += 1
+    return {"sent_chats": sent, "failed_chats": failed,
+        "already_sent_chats": already, "unconfirmed_chats": unconfirmed}
 
 
 @app.get("/api/cash/months")
