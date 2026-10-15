@@ -6906,9 +6906,15 @@ class CabinetOrderState(Base):
     tg_id = Column(BigInteger, nullable=False)
     payload = Column(String, nullable=False)
 
+class CabinetCashSummaryPeriod(BaseModel):
+    model_config = {'extra': 'forbid'}
+    month: str = Field(pattern=r'^[1-9]\d{3}-(0[1-9]|1[0-2])$')
+    half: StrictInt = Field(ge=1, le=2)
+
+
 class CabinetCommandInput(BaseModel):
     request_id: str = Field(min_length=32, max_length=64, pattern=r'^[a-zA-Z0-9-]+$')
-    action: Literal['number','delete','edit','schedule','close','cash','contact','photo','tea','profile','register','readiness']
+    action: Literal['number','delete','edit','schedule','close','cash','cash_summary','contact','photo','tea','profile','register','readiness']
     card_id: int | None = None
     values: dict = Field(default_factory=dict)
 
@@ -6939,7 +6945,7 @@ def cabinet_order_deletion_info(db, card):
 def cabinet_command_create(data: CabinetCommandInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     if not _can_use_owner_cabinet(db, user.id):
         raise HTTPException(403, 'Кабинет недоступен')
-    if data.action == 'cash' and not cabinet_can_cash(db, user.id):
+    if data.action in {'cash', 'cash_summary'} and not cabinet_can_cash(db, user.id):
         raise HTTPException(403, 'В вашем кабинете ведение кассы отключено')
     # Hash the submitted intent before resolving a live card/date. A retry of
     # a successful deletion remains valid after that card has disappeared.
@@ -6954,6 +6960,25 @@ def cabinet_command_create(data: CabinetCommandInput, db: Session = Depends(get_
             raise HTTPException(409, 'Этот запрос уже использован. Откройте форму заново')
         return {'id': existing.id, 'status': existing.status, **json.loads(existing.result)}
     payload = {'action': data.action, 'values': dict(data.values), 'tg_id': user.id}
+    if data.action == 'cash_summary':
+        cabinet_finance_access(db, user.id)
+        try:
+            period = CabinetCashSummaryPeriod(**data.values)
+        except ValueError:
+            raise HTTPException(422, 'Выберите месяц и период подсчёта кассы')
+        if data.card_id is not None:
+            raise HTTPException(422, 'Подсчёт относится к периоду, а не к заказу')
+        payload['values'] = period.model_dump()
+        # Serialize submissions per account; double taps/reopened forms reuse a job.
+        db.scalar(select(Employee).where(Employee.tg_id == user.id).with_for_update().limit(1))
+        recent = db.scalars(select(CabinetCommand).where(CabinetCommand.tg_id == user.id,
+            CabinetCommand.created_at >= datetime.utcnow()-timedelta(minutes=10)))
+        for command in recent:
+            previous = json.loads(command.payload)
+            if previous.get('action') == 'cash_summary' and previous.get('values') == payload['values'] and (
+                    command.status in {'queued','running'} or (command.status == 'done' and
+                    command.created_at >= datetime.utcnow()-timedelta(seconds=60))):
+                return {'id': command.id, 'status': command.status, **json.loads(command.result)}
     clock_fields = {'schedule': ('photo_time',), 'close': ('contact_time',),
                     'edit': ('photo_time', 'contact_time')}.get(data.action, ())
     for field in clock_fields:
@@ -7098,7 +7123,8 @@ def cabinet_command_finish(data: CabinetCommandResult, db: Session = Depends(get
                     state_row.payload = json.dumps(dict(meta, prepared=True, tea_received=True,
                         tea_amount=int(intent['values']['amount'])))
                     result['completed'] = True
-        row.status=data.status;row.result=json.dumps(result,ensure_ascii=False);row.payload='{}'
+        row.status=data.status;row.result=json.dumps(result,ensure_ascii=False)
+        row.payload=json.dumps(intent,ensure_ascii=False) if intent.get('action') == 'cash_summary' else '{}'
         db.commit()
     return {'ok':True}
 
@@ -7403,6 +7429,40 @@ def cabinet_finance(on_date: date, db: Session = Depends(get_db), user: Telegram
             'kickback': sum(r['kickback'] for r in entries), 'orders': len(entries)}},
         headers={'Cache-Control':'private, no-store'})
 
+
+
+@app.get('/api/bot/cabinet/cash-summary/{request_id}', dependencies=[Depends(_bot_key)])
+def cabinet_cash_summary_data(request_id: str, db: Session = Depends(get_db)):
+    command = db.get(CabinetCommand, request_id)
+    if not command or command.status != 'running':
+        raise HTTPException(409, 'Подсчёт не ожидает выполнения')
+    payload = json.loads(command.payload)
+    if payload.get('action') != 'cash_summary':
+        raise HTTPException(409, 'Неверное действие')
+    uid = command.tg_id
+    if not cabinet_can_cash(db, uid):
+        raise HTTPException(403, 'Ведение кассы отключено')
+    if not _is_cabinet_owner(db, uid):
+        grant = db.get(BrigadierCabinetAccess, uid)
+        if not grant or payload.get('access_version') != grant.version:
+            raise HTTPException(403, 'Доступ изменён')
+    period = CabinetCashSummaryPeriod(**payload['values'])
+    # Reuse the cabinet calculation, including source-qualified historical rows.
+    finance = json.loads(cabinet_finance(date.fromisoformat(period.month+'-01'), db,
+        TelegramUser(id=uid, first_name='')).body)
+    total = finance['period_totals'][period.half-1]
+    employee = db.scalar(select(Employee).where(Employee.tg_id == uid,
+        Employee.active.is_(True), _visible_employee()).limit(1))
+    label = ' '.join(str(x) for x in (employee.full_name, employee.metro, employee.height_cm) if x)
+    money = lambda value: f'{int(value or 0):,}'.replace(',', ' ') + ' ₽'
+    first, last = (date.fromisoformat(total[k]).strftime('%d.%m.%Y') for k in ('start','end'))
+    text = (f'📊 <b>Подсчёт кассы {first} — {last}</b>\n'
+        f'{escape(label)}\n\nЗаказов: {total["orders"]}\n'
+        f'Касса (комиссия): <b>{money(total["cash"])}</b>\n'
+        f'Откат отдельно: <b>{money(total["kickback"])}</b>')
+    return JSONResponse({'tg_id': uid, 'start': total['start'], 'end': total['end'],
+        'cash': total['cash'], 'kickback': total['kickback'], 'orders': total['orders'], 'text': text},
+        headers={'Cache-Control': 'private, no-store'})
 
 
 def _brigadier_access_html(html):
@@ -9156,3 +9216,64 @@ window.addEventListener('resize',fitVladAllowanceMonth);
 window.visualViewport?.addEventListener('resize',fitVladAllowanceMonth);
 </script></body>''', 1)
 
+
+
+
+def _cabinet_cash_summary_html(html):
+    anchor = "qsa('[data-finance-tab]',panel).forEach(b=>"
+    if html.count(anchor) != 1:
+        raise ValueError('Cash summary toolbar anchor missing')
+    html = html.replace(anchor, "bindCabinetCashSummary(panel,data,active,tab);\n      "+anchor, 1)
+    return html.replace('</head>', r'''<style id="cabinet-cash-summary-style">
+#cabinetFinance .cabinet-finance-summary-heading{display:flex;align-items:center;gap:6px;min-width:0;position:relative}
+#cabinetFinance .cabinet-finance-summary-heading h2{flex-shrink:0}
+#cabinetFinance .cabinet-summary-trigger{border:0;border-radius:9px;background:var(--gold);color:#171208;min-height:36px;padding:5px 8px;font-size:11px;font-weight:750;cursor:pointer;line-height:1.2}
+#cabinetFinance .cabinet-summary-trigger[hidden],#cabinetFinance .cabinet-summary-picker[hidden]{display:none}
+#cabinetFinance .cabinet-summary-picker{position:absolute;top:100%;left:0;width:min(300px,calc(100vw - 38px));padding:12px;background:var(--panel);border:1px solid var(--gold2);border-radius:12px;box-shadow:0 10px 35px #000b;z-index:45}
+#cabinetFinance .cabinet-summary-picker strong{display:block;font-size:14px}
+#cabinetFinance .cabinet-summary-picker p{font-size:12px;color:var(--muted);margin:6px 0}
+#cabinetFinance .cabinet-summary-picker button{display:block;width:100%;min-height:44px;padding:8px;margin-top:7px;border:1px solid var(--gold2);border-radius:9px;background:var(--panel2);color:var(--gold);font-weight:650;font-size:14px;cursor:pointer}
+#cabinetFinance .cabinet-summary-picker button:disabled{opacity:.55}
+#cabinetFinance .cabinet-summary-picker [role=status]{white-space:normal;line-height:1.4}
+#cabinetFinance:has(.cabinet-finance-summary-heading) .cabinet-finance-month input{width:115px}
+</style></head>''',1).replace('</body>', r'''<script>
+function bindCabinetCashSummary(panel,data,active,tab){
+ let heading=qs('.cabinet-finance-summary-heading',panel);
+ if(!heading){
+  const title=qs('h2',panel);heading=document.createElement('div');heading.className='cabinet-finance-summary-heading';title.before(heading);heading.append(title);
+  heading.insertAdjacentHTML('beforeend','<button type="button" class="cabinet-summary-trigger" aria-expanded="false" aria-controls="cabinetCashSummaryPicker">📊 Подсчёт кассы</button><div id="cabinetCashSummaryPicker" class="cabinet-summary-picker" hidden><strong>Отправить итог в чат кассы</strong><p class="cabinet-summary-month"></p><button type="button" data-summary-half="1">1–15 число</button><button type="button" data-summary-half="2">16–конец месяца</button><p role="status" aria-live="polite">Выберите период для отправки</p><button type="button" data-summary-close>Закрыть</button></div>');
+ }
+ const trigger=qs('.cabinet-summary-trigger',heading),picker=qs('.cabinet-summary-picker',heading),status=qs('[role=status]',picker);
+ trigger.hidden=tab!=='cash';if(trigger.hidden){picker.hidden=true;trigger.setAttribute('aria-expanded','false')}
+ qs('.cabinet-summary-month',picker).textContent=new Date(data.start+'T12:00:00').toLocaleDateString('ru-RU',{month:'long',year:'numeric'});
+ const toggle=open=>{picker.hidden=!open;trigger.setAttribute('aria-expanded',String(open))};
+ trigger.onclick=()=>toggle(picker.hidden);qs('[data-summary-close]',picker).onclick=()=>{toggle(false);trigger.focus()};
+ picker.onkeydown=e=>{if(e.key==='Escape'){toggle(false);trigger.focus()}};
+ let busy=false;
+ qsa('[data-summary-half]',picker).forEach(button=>button.onclick=async()=>{
+  if(busy||!active())return;busy=true;
+  qsa('[data-summary-half]',picker).forEach(b=>b.disabled=true);
+  const half=Number(button.dataset.summaryHalf),month=data.start.slice(0,7),key='cash-summary:'+data.user_id+':'+month+':'+half;
+  let id=sessionStorage.getItem(key);
+  if(!id){id=crypto.randomUUID();sessionStorage.setItem(key,id)}
+  status.textContent='Отправляем итог '+(half===1?'1–15':'16–'+data.end.slice(8))+'…';
+  try{
+   let result=await api('/api/owner/brigadier-cabinet/actions',{method:'POST',body:JSON.stringify({request_id:id,action:'cash_summary',values:{month,half}})});
+   if(!active())return;
+   id=result.id;sessionStorage.setItem(key,id);
+   for(let i=0;i<30;i++){
+    if(!active())return;
+    if(result.status==='done'){sessionStorage.removeItem(key);status.textContent=result.message||'Итог отправлен в чат кассы';toast(status.textContent);return}
+    if(result.status==='error'){sessionStorage.removeItem(key);throw Error(result.error||'Итог не отправлен')}
+    await new Promise(resolve=>setTimeout(resolve,1500));if(!active())return;
+    result=await api('/api/owner/brigadier-cabinet/actions/'+encodeURIComponent(id),{cache:'no-store'});
+   }
+   status.textContent='Запрос сохранён. Нажмите тот же период, чтобы проверить результат.';
+  }catch(error){if(active())status.textContent=error.message+' Нажмите период, чтобы повторить проверку.'}
+  finally{busy=false;if(active())qsa('[data-summary-half]',picker).forEach(b=>b.disabled=false)}
+ });
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML = _cabinet_cash_summary_html(INLINE_INDEX_HTML)
