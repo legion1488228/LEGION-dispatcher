@@ -9727,7 +9727,7 @@ def _one_screen_orders_html(html):
     return html.replace('</head>', r'''<style id="one-screen-orders-style">
 body.dashboard-compact{height:100dvh;min-height:0;overflow:hidden;padding-bottom:0}
 body.dashboard-compact .topbar{position:relative}
-body.dashboard-compact main{transform-origin:top center}
+body.dashboard-compact main{width:100%;max-width:none;margin:0;padding-left:8px;padding-right:8px;transform-origin:top left}
 body.dashboard-compact #readinessGroups .group-block{min-height:calc(80px + var(--orders-group-extra,0px))}
 </style></head>''', 1).replace('</body>', r'''<script>
 let ordersScreenFitFrame=0;
@@ -9750,7 +9750,7 @@ function fitOrdersScreen(){
  }
  const height=Math.max(main.scrollHeight,main.offsetHeight);
  const scale=Math.min(1,Math.max(.1,available/height));
- main.style.transform=scale<1?`scale(${scale})`:'';
+ main.style.transform=scale<1?`scaleY(${scale})`:'';
 }
 function scheduleOrdersScreenFit(){
  if(ordersScreenFitFrame)return;
