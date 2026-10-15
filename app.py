@@ -9247,12 +9247,12 @@ async function openGbuAgents(){
     return html.replace('</head>', r'''
 <style id="compact-gbu-agent-directory-style">
 #modal:has(#gbuAgentDirectory){padding:10px;left:6px;right:6px;width:auto;max-width:1100px;margin:0 auto}
-#gbuAgentDirectory .gbu-agent-help{margin:0 0 7px;font-size:12px}
-#gbuAgentDirectory .search{margin:0 0 8px;min-height:40px;padding:8px 10px;font-size:14px}
-#gbuAgentsList.gbu-agent-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
-#gbuAgentsList .gbu-agent-card{display:flex;flex-direction:column;align-items:stretch;justify-content:space-between;min-width:0;gap:8px;padding:9px 7px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
-#gbuAgentsList .gbu-agent-card b{font-size:12px;line-height:1.3;overflow-wrap:anywhere}
-#gbuAgentsList .gbu-agent-card .contact-btn{display:block;width:100%;min-width:0;min-height:40px;margin:0;padding:7px 3px;font-size:clamp(10px,3.1vw,13px);line-height:1.2;white-space:nowrap;text-align:center;border-radius:8px}
+#gbuAgentDirectory .gbu-agent-help{margin:0 0 4px;font-size:11px}
+#gbuAgentDirectory .search{margin:0 0 5px;min-height:36px;padding:6px 8px;font-size:13px}
+#gbuAgentsList.gbu-agent-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}
+#gbuAgentsList .gbu-agent-card{display:flex;flex-direction:column;align-items:stretch;justify-content:space-between;min-width:0;gap:4px;padding:5px 4px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+#gbuAgentsList .gbu-agent-card b{font-size:11px;line-height:1.2;overflow-wrap:anywhere}
+#gbuAgentsList .gbu-agent-card .contact-btn{display:block;width:100%;min-width:0;min-height:34px;margin:0;padding:4px 1px;font-size:clamp(8px,2.5vw,11px);line-height:1.2;white-space:nowrap;text-align:center;border-radius:6px}
 #gbuAgentsList .gbu-agent-card small{font-size:11px;color:var(--muted)}
 #gbuAgentsList>.empty{grid-column:1/-1}
 </style></head>''', 1)
