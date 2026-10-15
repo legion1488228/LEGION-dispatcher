@@ -114,8 +114,8 @@ async def require_admin(db: Session = Depends(get_db), user: TelegramUser = Depe
 
 
 def _require_cash_manager(db, user):
-    if not _dispatcher_access(db, user.id):
-        raise HTTPException(403, 'Касса доступна владельцу и помощникам')
+    if not _is_cabinet_owner(db, user.id):
+        raise HTTPException(403, 'Общая касса доступна только владельцу')
 
 
 def _seed_gbu_agents():
@@ -7691,7 +7691,7 @@ def _four_cabinets_html(html):
         html = html.replace(old, new, 1)
     replace('function applyCabinetMode(){', 'function applyCabinetMode(){\n  updateRoleNavigation();')
     replace("if(!state.bootstrap?.is_owner){toast('Касса доступна только владельцу');return}",
-        "if(!state.bootstrap?.can_manage_cash){toast('Касса доступна владельцу и помощникам');return}")
+        "if(!state.bootstrap?.can_manage_cabinets){toast('Общая касса доступна только владельцу');return}")
     replace("prepared=(c.prepared??c.composition_closed),privateOrder=c.source==='private';",
         "prepared=(c.prepared??c.composition_closed),privateOrder=c.source==='private',cashRequired=privateOrder&&data.can_record_cash!==false;")
     replace("${privateOrder?stage('cash'", "${cashRequired?stage('cash'")
@@ -7756,7 +7756,6 @@ async function roleNavigate(target){
   }
   if(target==='ready'){if(dispatcher)await roleActivateView('readinessView');else await roleOpenOwn();return}
   if(target==='tables'){closeModal();await openPersonalTables();return}
-  if(target==='cash'&&kind==='assistant'){closeModal();await openCashTable();return}
   await roleOpenOwn();
   await openCabinetFinance(state.selectedDate,target==='cash'?'cash':'earnings');
 }
