@@ -3330,7 +3330,8 @@ def free_staff_snapshot(db, day):
             if int(p.get("id") or 0) <= 0:
                 continue
             people.append({"id": p["id"], "name": str(p.get("full_name") or "—").split()[0],
-                           "metro": p.get("metro") or "—", "height": p.get("height_cm") or "—"})
+                           "metro": p.get("metro") or "—", "height": p.get("height_cm") or "—",
+                           "phone": p.get("phone") or "", "has_car": bool(p.get("has_car"))})
         people.sort(key=lambda p: (p["name"].casefold(), p["metro"].casefold(), p["id"]))
         groups.append({"code": code, "label": label, "people": people})
     signature = hashlib.sha256(json.dumps(groups, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
@@ -3358,7 +3359,89 @@ def free_staff_messages(snapshot, ids, settings, day):
         for chat in sorted(chats):
             messages.append({"chat_id": chat, "label": group["label"],
                              "chunks": readiness_chat_chunks(lines), "done": 0})
+    # The brigadier chat gets one combined list, not a second brigadier-only list.
+    brigadier_chats = [chat for chat, codes in targets.items() if 'brigadier' in codes]
+    if not brigadier_chats or any(targets[chat] != {'brigadier'} for chat in brigadier_chats):
+        raise HTTPException(409, 'Не настроен отдельный чат бригадиров')
+    people = sorted((p for g in snapshot['groups'] for p in g['people'] if p['id'] in selected),
+                    key=lambda p: (p['name'].casefold(), p['metro'].casefold(), p['id']))
+    lines = [f"<b>📋 Свободные на {day.strftime('%d.%m')}</b>",
+             'Для замены утром — можно связаться напрямую.', '']
+    for i, person in enumerate(people, 1):
+        car = ' 🚗' if person.get('has_car') else ''
+        lines.append(f"{i}. {escape(person['name'])} {escape(person['metro'])} {escape(str(person['height']))}{car}")
+        phone = re.sub(r'[^+0-9]', '', person.get('phone') or '')
+        lines.append(f"📞 {escape(phone)}" if phone else 'Телефон не указан')
+    lines.extend(['', f'<b>Всего: {len(people)}</b>'])
+    messages = [m for m in messages if m['chat_id'] not in brigadier_chats]
+    for chat in sorted(brigadier_chats):
+        messages.append({'chat_id': chat, 'label': 'Бригадиры — общий список',
+                         'chunks': readiness_chat_chunks(lines), 'done': 0, 'combined_free_staff': True})
     return messages
+
+
+class FreeStaffGroupList(Base):
+    __tablename__ = 'free_staff_group_lists'
+    work_date = Column(Date, primary_key=True)
+    chat_id = Column(BigInteger, primary_key=True)
+    payload = Column(String, nullable=False, default='[]')
+
+
+async def free_staff_telegram_call(method, payload):
+    import httpx
+    token = os.getenv('BOT_TOKEN', '').strip()
+    if not token:
+        raise ValueError('Бот не настроен')
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(f'https://api.telegram.org/bot{token}/{method}', json=payload)
+        data = response.json()
+    if not data.get('ok'):
+        if method == 'editMessageText' and 'message is not modified' in str(data.get('description', '')):
+            return True
+        raise ValueError('Telegram не подтвердил обновление списка')
+    return data.get('result')
+
+
+async def publish_free_staff_group_list(db, day, message):
+    row = db.get(FreeStaffGroupList, (day, message['chat_id']))
+    if row is None:
+        row = FreeStaffGroupList(work_date=day, chat_id=message['chat_id'], payload='[]')
+        db.add(row)
+        db.flush()
+    parts = json.loads(row.payload)
+    for index, chunk in enumerate(message['chunks']):
+        if index < len(parts) and parts[index].get('status') == 'unknown':
+            raise ValueError('Отправка списка не подтверждена. Проверьте бригадирскую группу')
+        part = parts[index] if index < len(parts) else None
+        if part and part.get('text') == chunk:
+            continue
+        payload = {'chat_id': message['chat_id'], 'text': chunk, 'parse_mode': 'HTML', 'disable_web_page_preview': True}
+        if part and part.get('id'):
+            payload['message_id'] = part['id']
+            await free_staff_telegram_call('editMessageText', payload)
+            part['text'] = chunk
+        else:
+            # Persist uncertainty before sending; a lost response must not cause a duplicate.
+            part = {'status': 'unknown'}
+            parts.append(part)
+            row.payload = json.dumps(parts, ensure_ascii=False)
+            db.commit()
+            db.execute(select(ReadinessChatConfig).where(ReadinessChatConfig.id == 1).with_for_update()).scalar_one_or_none()
+            result = await free_staff_telegram_call('sendMessage', payload)
+            if not isinstance(result, dict) or not result.get('message_id'):
+                raise ValueError('Отправка списка не подтверждена')
+            part.update(id=result['message_id'], text=chunk, status='sent')
+        row.payload = json.dumps(parts, ensure_ascii=False)
+        db.commit()
+        db.execute(select(ReadinessChatConfig).where(ReadinessChatConfig.id == 1).with_for_update()).scalar_one_or_none()
+    while len(parts) > len(message['chunks']):
+        part = parts[-1]
+        if not part.get('id'):
+            raise ValueError('Проверьте отправку списка в группе')
+        await free_staff_telegram_call('deleteMessage', {'chat_id': message['chat_id'], 'message_id': part['id']})
+        parts.pop()
+        row.payload = json.dumps(parts, ensure_ascii=False)
+        db.commit()
 
 
 @app.get("/api/readiness/free-tomorrow")
@@ -3392,6 +3475,15 @@ async def send_free_staff(data: FreeStaffSelection, db: Session = Depends(get_db
         db.add(job)
         db.flush()
     for message in saved["messages"]:
+        if message.get('combined_free_staff'):
+            if message['done'] >= len(message['chunks']):
+                continue
+            try:
+                await publish_free_staff_group_list(db, day, message)
+                message['done'] = len(message['chunks'])
+            except Exception:
+                message['done'] = 0
+            continue
         while message["done"] < len(message["chunks"]):
             try:
                 ok = await send_telegram_message(message["chat_id"], message["chunks"][message["done"]])
@@ -5702,7 +5794,7 @@ async function openFreeStaff(){
    #freeStaffBody .free-staff-footer button{flex:1}
   </style><p style="font-size:13px;color:var(--muted)">${esc(data.work_date)} · Отметьте свободных сотрудников</p>
   <div class="free-staff-grid"><div>${group('brigadier')}${group('cashless')}</div><div>${group('main')}${group('reserve')}</div></div>
-  <p style="font-size:12px;color:var(--muted)">Каждая группа получит только своих отмеченных сотрудников. Группам без отметок сообщение не отправляется.</p>
+  <p style="font-size:12px;color:var(--muted)">Каждая группа получит своих отмеченных сотрудников. В бригадирскую группу отправится общий список всех отмеченных с телефонами для замены утром. Повторная отправка обновит общий список.</p>
   <div id="freeStaffStatus" role="status" style="font-size:13px"></div>
   <div class="free-staff-footer"><span style="font-size:13px">Без заказа: <b id="freeStaffCount">0</b></span><button class="primary" id="freeStaffSend" disabled>Отправить</button></div>`;
   const button=qs('#freeStaffSend'),status=qs('#freeStaffStatus'),checks=qsa('input[type="checkbox"]',body);
