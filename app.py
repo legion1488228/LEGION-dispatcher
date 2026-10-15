@@ -9101,7 +9101,7 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', r'''
 #cabinetDirectory .cabinet-directory-person:nth-child(odd){border-right:1px solid var(--line)}
 #cabinetDirectory .cabinet-directory-person summary{min-height:36px;padding:3px 4px;gap:4px}
 #cabinetDirectory .cabinet-directory-person summary>span{flex:1;min-width:0;overflow-wrap:anywhere}
-#cabinetDirectory .cabinet-directory-person b{font-size:11px;font-weight:400;line-height:1.25;white-space:normal}
+#cabinetDirectory .cabinet-directory-person b{font-size:11px;font-weight:650;line-height:1.25;white-space:normal}
 #cabinetDirectory .cabinet-directory-person summary>.cabinet-icon{width:12px;height:12px;flex-shrink:0;color:var(--muted)}
 #cabinetDirectory .cabinet-directory-contacts{display:flex;flex-direction:column;gap:4px;padding:0 4px 5px;min-width:0}
 #cabinetDirectory .cabinet-directory-contacts a{font-size:11px;min-height:36px;padding:5px 4px;gap:4px;border-radius:7px;overflow-wrap:anywhere}
@@ -9175,7 +9175,7 @@ def _all_cabinet_employee_directory_html(html):
 #employeesList .staff-directory-person.is-editable{grid-template-columns:minmax(0,1fr) 32px}
 #employeesList .staff-directory-person:nth-child(odd){border-right:1px solid var(--line)}
 #employeesList .staff-directory-person details{min-width:0}
-#employeesList .staff-directory-person summary{display:flex;align-items:center;justify-content:space-between;min-height:32px;gap:3px;font-size:11px;font-weight:400;line-height:1.25;cursor:pointer;list-style:none}
+#employeesList .staff-directory-person summary{display:flex;align-items:center;justify-content:space-between;min-height:32px;gap:3px;font-size:11px;font-weight:650;line-height:1.25;cursor:pointer;list-style:none}
 #employeesList .staff-directory-person summary::-webkit-details-marker{display:none}
 #employeesList .staff-directory-person summary>span:first-child{min-width:0;overflow-wrap:anywhere}
 #employeesList .staff-contact-chevron{color:var(--muted);flex-shrink:0}
@@ -9716,7 +9716,7 @@ def _employees_focus_html(html):
             raise RuntimeError('Employees focus anchor missing: ' + anchor[:70])
     html = html.replace(panel, '<div id="dispatcherOrderOverview">' + panel + '</div>', 1)
     html = html.replace(button, '', 1).replace(handler, '', 1)
-    html = html.replace(view, view + "\n  qs('#dispatcherOrderOverview').hidden=v==='employeesView';", 1)
+    html = html.replace(view, view + "\n  qs('#dispatcherOrderOverview').hidden=['employeesView','ownerBrigadeControlView'].includes(v);", 1)
     return html.replace('</head>', '<style>#dispatcherOrderOverview[hidden]{display:none!important}</style></head>', 1)
 
 
@@ -9841,3 +9841,6 @@ try{window.Telegram?.WebApp?.onEvent?.('themeChanged',applyLegionLightTelegramCh
 
 
 INLINE_INDEX_HTML = _warm_light_interface_html(INLINE_INDEX_HTML)
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', '<style id="control-spacing-fix">.owner-brigade-control-open #dispatcherOrderOverview{display:none!important}.owner-brigade-control-open #ownerBrigadeControlContent{padding:0 0 16px!important}</style></head>', 1)
