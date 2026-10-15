@@ -6277,13 +6277,15 @@ async function cabinetResumePending(){
     const r=await api('/api/owner/brigadier-cabinet/actions/'+id,{cache:'no-store'});
     if(state.bootstrap?.user?.id!==uid)return;
     if(r.status==='done'||r.status==='error'){
-      sessionStorage.removeItem('cabinet-pending:'+uid);ownerCabinetSignature='';
+      cabinetForgetPending(uid,id);ownerCabinetSignature='';
       if(r.status==='done'&&r.completed)ownerCabinetSelectedCard=null;
-      if(r.status==='done'&&!r.deleted&&r.work_date&&r.work_date!==state.selectedDate)await loadBootstrap(r.work_date);
-      await loadOwnerCabinet();
-      toast(r.error||r.message||'Сохранено',6000);
-    }else toast('Действие ожидает обработки. Повторно отправлять не нужно.',5000);
-  }catch(e){toast(e.message)}
+      try{
+        if(r.status==='done'&&!r.deleted&&r.work_date&&r.work_date!==state.selectedDate)await loadBootstrap(r.work_date);
+        await loadOwnerCabinet();
+      }catch(e){}
+      cabinetActionNotice(r.status==='done'?(r.message||'✅ Действие выполнено'):'⚠️ '+(r.error||'Не удалось подтвердить результат'),r.status==='done'?'success':'error');
+    }else toast('⏳ Запрос принят. Бот обрабатывает действие — повторно отправлять не нужно.',7000);
+  }catch(e){toast(e.status===404?'⏳ Запрос пока не найден. Если форма ещё открыта, нажмите «Проверить отправку». Не создавайте новую отправку.':cabinetHumanApiError(e).message,8000)}
 }
 async function cabinetImage(file){
   if(!file)throw new Error('Выберите фото');
@@ -6431,7 +6433,8 @@ async function ownerCabinetAction(key,cardId=null){
     field.oninput=()=>field.setCustomValidity('');
     field.onblur=()=>{const clock=normalizeCabinetClock(field.value);if(clock)field.value=clock};
   });
-  let requestId=crypto.randomUUID(),body=null,posted=false,busy=false,previewUrl=null;
+  let requestId=crypto.randomUUID(),body=null,posted=false,attempted=false,busy=false,previewUrl=null,confirmedResult=null;
+  const notice=(message,kind='pending')=>{status.textContent=message;status.dataset.notice=kind};
   const fileInput=qs('input[type=file]',form);
   const photoCaption=key==='photo'?qs('[name=comment]',form):null;
   const photoReady=()=>!fileInput||(!!fileInput.files[0]&&(!photoCaption||!!photoCaption.value.trim()));
@@ -6445,6 +6448,7 @@ async function ownerCabinetAction(key,cardId=null){
   if(fileInput)fileInput.onchange=()=>{button.disabled=busy||!photoReady();if(previewUrl)URL.revokeObjectURL(previewUrl);const img=qs('#cabinetPhotoPreview',form);img.hidden=!fileInput.files[0];if(fileInput.files[0]){previewUrl=URL.createObjectURL(fileInput.files[0]);img.src=previewUrl;img.hidden=false;img.onload=()=>URL.revokeObjectURL(previewUrl)}};
   form.onsubmit=async e=>{
     e.preventDefault();if(busy||state.bootstrap?.user?.id!==uid||!state.bootstrap?.can_use_owner_cabinet)return;
+    if(!form.isConnected)return;
     busy=true;button.disabled=true;
     try{
       if(!body){
@@ -6458,6 +6462,7 @@ async function ownerCabinetAction(key,cardId=null){
         if(key==='edit'&&(card.first_received||card.cash))values.source=card.source;
         if(key==='cash'){for(const k of ['team_size','commission','kickback','reserve'])values[k]=Number(values[k]);values.version=card.cash?.version||0;if(values.reserve>values.team_size)throw Error('Резерва не может быть больше состава бригады')}
         if(key==='photo'){
+          notice('⏳ Подготавливаем фото…');
           if(photoCaption&&!photoCaption.value.trim())throw Error('Укажите название морга и во сколько быть в морге');
           if(photoCaption)values.comment=photoCaption.value.trim();
           values.image=await cabinetImage(fileInput.files[0]);delete values.photo;values.ordinal=card.source==='gbu'&&card.first_received?2:1;
@@ -6467,41 +6472,66 @@ async function ownerCabinetAction(key,cardId=null){
         body=JSON.stringify({request_id:requestId,action:key,card_id:cardId,values});
         qsa('input,select,textarea',form).forEach(el=>el.disabled=true);
       }
-      status.textContent='Сохраняем… Можно оставаться в кабинете.';
-      if(!posted){await api('/api/owner/brigadier-cabinet/actions',{method:'POST',body});posted=true;sessionStorage.setItem('cabinet-pending:'+uid,requestId)}
+      notice(key==='photo'?'⏳ Отправляем фото… Дождитесь подтверждения.':'⏳ Сохраняем… Дождитесь подтверждения.');
+      if(attempted&&!posted){
+        // A lost POST response does not mean rejection. Query its identity first.
+        try{await api('/api/owner/brigadier-cabinet/actions/'+requestId,{cache:'no-store'});posted=true}
+        catch(error){if(error.status!==404)throw error}
+      }
+      if(!posted){
+        cabinetRememberPending(uid,requestId,key,cardId);attempted=true;
+        await api('/api/owner/brigadier-cabinet/actions',{method:'POST',body});posted=true;
+      }
       for(let i=0;i<60;i++){
         const result=await api('/api/owner/brigadier-cabinet/actions/'+requestId,{cache:'no-store'});
         if(state.bootstrap?.user?.id!==uid||!state.bootstrap?.can_use_owner_cabinet)return;
         if(result.status==='error'){
-          sessionStorage.removeItem('cabinet-pending:'+uid);body=null;posted=false;requestId=crypto.randomUUID();
-          qsa('input,select,textarea',form).forEach(el=>el.disabled=false);
-          if(key==='edit'&&(card.first_received||card.cash))qs('[name=source]',form).disabled=true;
-          await loadOwnerCabinet();throw new Error(result.error||'Не удалось сохранить');
+          cabinetForgetPending(uid,requestId);
+          if(!result.delivery_unknown){
+            body=null;posted=false;attempted=false;requestId=crypto.randomUUID();
+            qsa('input,select,textarea',form).forEach(el=>el.disabled=false);
+            if(key==='edit'&&(card.first_received||card.cash))qs('[name=source]',form).disabled=true;
+          }
+          const failure=new Error(result.error||'Не удалось сохранить');failure.deliveryUnknown=!!result.delivery_unknown;throw failure;
         }
         if(result.status==='done'){
-          sessionStorage.removeItem('cabinet-pending:'+uid);
+          confirmedResult=result;
+          cabinetForgetPending(uid,requestId);
           const values=JSON.parse(body).values;
           const stillHere=form.isConnected&&currentViewId()==='ownerCabinetView';
           if(stillHere){if(inline)form.remove();else closeModal()}
           if(stillHere&&(key==='tea'||result.completed))ownerCabinetSelectedCard=null;
           const resultDate=result.work_date||values.work_date;
           if(resultDate&&key==='number'&&resultDate!==state.selectedDate)await loadBootstrap(resultDate);
-          await loadOwnerCabinet();
+          // Delivery has been confirmed; a later refresh failure cannot undo it.
+          try{await loadOwnerCabinet()}catch(error){}
           const found=ownerCabinetData?.number_cards?.find(c=>c.report_key===result.report_key);
           if(found&&stillHere&&!found.tea_received&&key!=='tea'&&!result.completed){
             ownerCabinetSelectedCard=found.id;renderOwnerCabinet(ownerCabinetData);
             const next=cabinetNextAction(found,ownerCabinetData);
             if(next&&!result.duplicate&&['number','schedule','close','cash','photo'].includes(key))await ownerCabinetAction(next.key,found.id);
           }
-          toast(result.message||'Сохранено',5000);return;
+          cabinetActionNotice(result.message||'✅ Действие выполнено','success');return;
         }
-        status.textContent='Обрабатываем действие… Повторно отправлять не нужно.';
+        notice('⏳ Запрос принят. Бот обрабатывает действие — повторно отправлять не нужно.');
         await new Promise(resolve=>setTimeout(resolve,1500));
       }
-      status.textContent='Действие сохранено и ожидает бота. Можно закрыть окно и вернуться позже.';button.textContent='Проверить результат';
-    }catch(error){status.textContent=error.message;button.textContent=posted?'Проверить результат':body?'Повторить тот же запрос':submit}
+      notice('⏳ Запрос сохранён и ожидает бота. Можно закрыть окно и позже нажать «Проверить последнее действие».');button.textContent=key==='photo'?'Проверить отправку':'Проверить результат';
+    }catch(raw){
+      if(confirmedResult){cabinetActionNotice(confirmedResult.message||'✅ Действие выполнено','success');return}
+      const error=cabinetHumanApiError(raw);
+      if(attempted&&!posted&&error.status>=400&&error.status<500&&![408,409,429].includes(error.status)){
+        cabinetForgetPending(uid,requestId);body=null;attempted=false;requestId=crypto.randomUUID();
+        qsa('input,select,textarea',form).forEach(el=>el.disabled=false);
+        if(key==='edit'&&(card.first_received||card.cash))qs('[name=source]',form).disabled=true;
+      }
+      const uncertain=attempted&&(error.isConnectionError||error.temporary);
+      notice(uncertain?(key==='photo'?'⚠️ Связь прервалась. Не удалось проверить отправку фото. Оно могло уже отправиться — не загружайте его повторно. Нажмите «Проверить отправку».':'⚠️ Не удалось проверить результат. Запрос мог быть принят. Нажмите «Проверить результат», не создавая новое действие.'):'⚠️ '+error.message,'error');
+      button.textContent=attempted?(key==='photo'?'Проверить отправку':'Проверить результат'):submit;
+    }
     finally{busy=false;button.disabled=key==='photo'&&!body&&!photoReady()}
   };
+  window.addEventListener('online',()=>{if(form.isConnected&&attempted&&body&&!busy)form.requestSubmit()},{once:true});
 }
 function cabinetButton(key,label,icon,card=null,primary=false,disabled=false){
   return `<button type="button" class="${primary?'cabinet-primary':'cabinet-secondary'}" data-cabinet-action="${key}"${card?` data-cabinet-card="${Number(card.id)}"`:''}${disabled?' disabled':''}>${cabinetIcon(icon)}<span>${esc(label)}</span></button>`;
@@ -7453,15 +7483,17 @@ def cabinet_cash_summary_data(request_id: str, db: Session = Depends(get_db)):
     total = finance['period_totals'][period.half-1]
     employee = db.scalar(select(Employee).where(Employee.tg_id == uid,
         Employee.active.is_(True), _visible_employee()).limit(1))
-    label = ' '.join(str(x) for x in (employee.full_name, employee.metro, employee.height_cm) if x)
+    parts = str(employee.full_name or '').split()
+    label = ' '.join(str(x) for x in (parts[0] if parts else 'Бригадир', employee.metro, employee.height_cm) if x)
     money = lambda value: f'{int(value or 0):,}'.replace(',', ' ') + ' ₽'
-    first, last = (date.fromisoformat(total[k]).strftime('%d.%m.%Y') for k in ('start','end'))
-    text = (f'📊 <b>Подсчёт кассы {first} — {last}</b>\n'
+    first, last = (date.fromisoformat(total[k]).strftime('%d.%m') for k in ('start','end'))
+    text = (f'📊 <b>Подсчёт кассы</b>\n<b>{first} — {last}</b>\n'
         f'{escape(label)}\n\nЗаказов: {total["orders"]}\n'
         f'Касса (комиссия): <b>{money(total["cash"])}</b>\n'
-        f'Откат отдельно: <b>{money(total["kickback"])}</b>')
+        f'Откат отдельно: <b>{money(total["kickback"])}</b>\n\n'
+        f'<b>Итого: {money(total["cash"]+total["kickback"])}</b>')
     return JSONResponse({'tg_id': uid, 'start': total['start'], 'end': total['end'],
-        'cash': total['cash'], 'kickback': total['kickback'], 'orders': total['orders'], 'text': text},
+        'cash': total['cash'], 'kickback': total['kickback'], 'total': total['cash']+total['kickback'], 'orders': total['orders'], 'text': text},
         headers={'Cache-Control': 'private, no-store'})
 
 
@@ -9277,3 +9309,48 @@ function bindCabinetCashSummary(panel,data,active,tab){
 
 
 INLINE_INDEX_HTML = _cabinet_cash_summary_html(INLINE_INDEX_HTML)
+
+
+def _cabinet_action_notices_html(html):
+    start = html.index('async function api(path, opts={}) {')
+    end = html.index('function toast(', start)
+    original = html[start:end]
+    opening = 'async function api(path, opts={}) {'
+    wrapped = original.replace(opening, opening+'\n  try{', 1)
+    last = wrapped.rfind('}')
+    wrapped = wrapped[:last]+'  }catch(error){throw cabinetHumanApiError(error)}\n'+wrapped[last:]
+    html = html[:start]+wrapped+html[end:]
+    return html.replace('</head>', r'''<style id="cabinet-action-notices-style">
+#cabinetActionStatus:not(:empty),.cabinet-action-notice{padding:11px 12px;border-radius:11px;border:1px solid var(--gold2);background:#211d15;color:#ead39d;font-size:13px;line-height:1.5;white-space:pre-line;overflow-wrap:anywhere}
+#cabinetActionStatus[data-notice=error],.cabinet-action-notice[data-notice=error]{border-color:#764447;background:#291b1d;color:#ffb7b7}
+.cabinet-action-notice[data-notice=success]{border-color:#326c4b;background:#14281d;color:#83dfaa}
+.cabinet-action-notice{grid-column:1/-1;margin:8px 0}
+</style></head>''',1).replace('</body>', r'''<script>
+function cabinetHumanApiError(raw){
+ const error=raw instanceof Error?raw:new Error(String(raw||'Не удалось выполнить действие'));
+ if(error.humanNotice)return error;
+ const network=!error.status&&(/load failed|failed to fetch|networkerror|network request failed|network connection|fetch failed|aborted/i.test(error.message)||error.name==='AbortError');
+ if(network){error.message='🌐 Соединение с сервером прервалось. Проверьте интернет или переключитесь между Wi-Fi и мобильной сетью.';error.isConnectionError=true}
+ else if(error.status>=500||error.status===408||error.status===429){error.message=error.status===429?'⏳ Слишком много запросов. Подождите немного и проверьте результат.':'⚠️ Сервер временно не отвечает. Попробуйте проверить результат чуть позже.';error.temporary=true}
+ else if(error.name==='SyntaxError'){error.message='⚠️ Получен неполный ответ сервера. Проверьте результат ещё раз.';error.temporary=true}
+ error.humanNotice=true;return error;
+}
+function cabinetRememberPending(uid,id,action,cardId){
+ try{sessionStorage.setItem('cabinet-pending:'+uid,id);sessionStorage.setItem('cabinet-pending-meta:'+uid,JSON.stringify({id,action,cardId}))}catch(e){}
+}
+function cabinetForgetPending(uid,id){
+ try{if(sessionStorage.getItem('cabinet-pending:'+uid)===id){sessionStorage.removeItem('cabinet-pending:'+uid);sessionStorage.removeItem('cabinet-pending-meta:'+uid)}}catch(e){}
+}
+function cabinetActionNotice(message,kind='success'){
+ const root=qs('#ownerCabinetContent');
+ if(root&&currentViewId()==='ownerCabinetView'){
+  let banner=qs('#cabinetActionNotice',root);
+  if(!banner){banner=document.createElement('p');banner.id='cabinetActionNotice';banner.className='cabinet-action-notice';banner.setAttribute('role','status');banner.setAttribute('aria-live','polite');root.prepend(banner)}
+  banner.dataset.notice=kind;banner.textContent=message;
+ }
+ toast(message,8000);
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML = _cabinet_action_notices_html(INLINE_INDEX_HTML)
