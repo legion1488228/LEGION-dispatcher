@@ -8733,7 +8733,7 @@ def _compact_owner_expanded_cash_html(html):
 #modal.owner-cash-modal .modal-head h3{font-size:18px;margin:0}
 #modal.owner-cash-modal .close-btn{width:30px;height:30px;min-height:30px;padding:0;border-radius:8px;font-size:20px}
 #modal.owner-cash-modal .owner-cash-controls{display:flex;align-items:center;gap:4px;margin-bottom:4px}
-#modal.owner-cash-modal .owner-cash-controls button,#modal.owner-cash-modal [data-cash-range],#modal.owner-cash-modal #cashMonthTabs button{padding:4px 6px;min-height:28px;font-size:11px;border-radius:7px;white-space:nowrap}
+#modal.owner-cash-modal .owner-cash-controls button,#modal.owner-cash-modal button[data-cash-range],#modal.owner-cash-modal #cashMonthTabs button{padding:4px 6px;min-height:28px;font-size:11px;border-radius:7px;white-space:nowrap}
 #modal.owner-cash-modal .owner-cash-controls label{flex:1;min-width:0}
 #modal.owner-cash-modal #cashMonth{width:100%;min-width:0;box-sizing:border-box;padding:3px 5px;font-size:14px;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:7px;min-height:28px}
 #modal.owner-cash-modal .owner-cash-ranges{display:flex;gap:4px}
@@ -9575,15 +9575,16 @@ def _cash_reconciliation_cards_html(html):
         "function showModal(title, body) {qs('#modal').classList.remove('cash-reconciliation-open');",1)
     return html.replace('</head>', r'''<style id="cash-reconciliation-style">
 #modal.owner-cash-modal.cash-reconciliation-open{overflow:hidden;display:flex;flex-direction:column}
-#modal.cash-reconciliation-open #cashTableBody{min-height:0;flex:1;display:flex;flex-direction:column}
+#modal.cash-reconciliation-open #cashTableBody{min-height:0;min-width:0;flex:1;display:flex;flex-direction:column;white-space:normal}
 .cash-reconciliation-toolbar{display:flex;align-items:center;justify-content:space-between;gap:5px;font-size:11px;color:var(--muted);margin:5px 0}
 .cash-reconciliation-toolbar strong{color:var(--text);font-size:12px}
 .cash-reconciliation-grid{display:grid;grid-template-columns:repeat(var(--reconcile-cols,4),minmax(0,1fr));gap:5px;min-height:0}
-.cash-reconciliation-card{min-width:0;min-height:0;padding:4px;border:1px solid var(--line);border-radius:10px;background:var(--panel);font-size:var(--reconcile-font,10px);line-height:1.15;display:flex;flex-direction:column;font-variant-numeric:tabular-nums}
+.cash-reconciliation-card{min-width:0;min-height:0;padding:4px;border:1px solid var(--line);border-radius:10px;background:var(--panel);font-size:var(--reconcile-font,10px);line-height:1.15;display:flex;flex-direction:column;font-variant-numeric:tabular-nums;white-space:normal;overflow:hidden}
 .cash-reconciliation-card.is-checked{border-color:#377b50}
-.cash-reconciliation-name{position:relative;padding-right:20px;min-height:2.3em;overflow-wrap:anywhere;margin-bottom:2px}
-.cash-reconciliation-name strong{font-size:inherit;font-weight:600}
-.cash-reconciliation-mark{position:absolute;right:-2px;top:-2px;border:0!important;background:transparent!important;padding:0!important;width:23px;min-height:23px!important;height:23px;font-size:17px!important;line-height:23px;display:grid;place-items:center;cursor:pointer}
+.cash-reconciliation-name{display:grid;grid-template-columns:minmax(0,1fr) 23px;align-items:start;column-gap:2px;row-gap:1px;min-width:0;white-space:normal;overflow-wrap:anywhere;margin-bottom:3px}
+.cash-reconciliation-name strong{grid-column:1;grid-row:1;min-width:0;display:block;white-space:normal;overflow-wrap:anywhere;font-size:inherit;font-weight:600}
+.cash-reconciliation-place{grid-column:1/-1;grid-row:2;min-width:0;display:block;white-space:normal;overflow-wrap:anywhere}
+.cash-reconciliation-mark{position:static;grid-column:2;grid-row:1;justify-self:end;border:0!important;background:transparent!important;padding:0!important;width:23px;min-width:23px;min-height:23px!important;height:23px;font-size:17px!important;line-height:23px;display:grid;place-items:center;cursor:pointer;overflow:hidden}
 .cash-reconciliation-mark:disabled{opacity:.6}.cash-reconciliation-mark[aria-readonly=true]{cursor:default}
 .cash-reconciliation-line{display:flex;align-items:baseline;justify-content:space-between;gap:2px;margin:0;white-space:nowrap}
 .cash-reconciliation-line span{color:var(--muted)}.cash-reconciliation-line b{font-weight:500}
@@ -9593,7 +9594,7 @@ def _cash_reconciliation_cards_html(html):
 </style></head>''',1).replace('</body>',r'''<script>
 function ownerCashReconciliationHtml(report){
  const number=value=>Number(value||0).toLocaleString('ru-RU');
- const cards=(report.items||[]).map((item,index)=>`<article class="cash-reconciliation-card${item.checked?' is-checked':''}"><div class="cash-reconciliation-name"><strong>${index+1}. ${esc(item.name)}</strong>${report.can_mark?`<button type="button" class="cash-reconciliation-mark" data-reconcile-mark="${item.tg_id}" aria-pressed="${item.checked}" aria-label="${item.checked?'Снять отметку':'Отметить вручную'}: ${esc(item.name)}" title="${item.source==='manual'?'Отмечено вручную':item.checked?'Подсчёт отправлен из личного кабинета':'Подсчёт не отправлен'}">${item.checked?'✅':'⬜️'}</button>`:`<span class="cash-reconciliation-mark" aria-readonly="true">${item.checked?'✅':'⬜️'}</span>`}</div><div class="cash-reconciliation-line"><span>Заказов:</span><b>${number(item.orders)}</b></div><div class="cash-reconciliation-line"><span>Касса:</span><b>${number(item.cash)}</b></div><div class="cash-reconciliation-line"><span>Откат:</span><b>${number(item.kickback)}</b></div><div class="cash-reconciliation-line cash-reconciliation-total"><span>Итого:</span><b>${number(item.total)}</b></div></article>`).join('');
+ const cards=(report.items||[]).map((item,index)=>{const parts=String(item.name||'').trim().split(/\s+/),first=parts.shift()||'Бригадир',place=parts.join(' ');return `<article class="cash-reconciliation-card${item.checked?' is-checked':''}"><div class="cash-reconciliation-name"><strong>${index+1}. ${esc(first)}</strong><span class="cash-reconciliation-place">${esc(place)}</span>${report.can_mark?`<button type="button" class="cash-reconciliation-mark" data-reconcile-mark="${item.tg_id}" aria-pressed="${item.checked}" aria-label="${item.checked?'Снять отметку':'Отметить вручную'}: ${esc(item.name)}" title="${item.source==='manual'?'Отмечено вручную':item.checked?'Подсчёт отправлен из личного кабинета':'Подсчёт не отправлен'}">${item.checked?'✅':'⬜️'}</button>`:`<span class="cash-reconciliation-mark" aria-readonly="true">${item.checked?'✅':'⬜️'}</span>`}</div><div class="cash-reconciliation-line"><span>Заказов:</span><b>${number(item.orders)}</b></div><div class="cash-reconciliation-line"><span>Касса:</span><b>${number(item.cash)}</b></div><div class="cash-reconciliation-line"><span>Откат:</span><b>${number(item.kickback)}</b></div><div class="cash-reconciliation-line cash-reconciliation-total"><span>Итого:</span><b>${number(item.total)}</b></div></article>`}).join('');
  return `<div class="cash-reconciliation-toolbar"><span>Суммы в ₽</span><strong>Сверились: ${report.checked_count} из ${report.items.length}</strong><button type="button" class="secondary" id="cashReminder" ${cashReminderSending?'disabled':''}>🔔 Сверка</button></div>${cards?`<div class="cash-reconciliation-grid">${cards}</div>`:'<div class="empty">Кассовых бригадиров пока нет</div>'}<p class="cash-reconciliation-legend">⬜️ Не сверился · ✅ Подсчёт отправлен${report.can_mark?' или отмечено вами вручную':''}</p>`;
 }
 function fitCashReconciliation(){
