@@ -9704,3 +9704,20 @@ window.visualViewport?.addEventListener('resize',fitCashReconciliation);
 
 
 INLINE_INDEX_HTML = _cash_reconciliation_cards_html(INLINE_INDEX_HTML)
+
+
+def _employees_focus_html(html):
+    panel = '<div id="selectedDayHeader" class="section-head"></div><h3>Заказы</h3><section id="summary" class="summary-grid"></section>'
+    button = '<button class="primary small" id="employeeImportBtn">Импорт</button>'
+    handler = "qs('#employeeImportBtn').onclick=openEmployeeImport;"
+    view = "  const v = currentViewId();"
+    for anchor in (panel, button, handler, view):
+        if html.count(anchor) != 1:
+            raise RuntimeError('Employees focus anchor missing: ' + anchor[:70])
+    html = html.replace(panel, '<div id="dispatcherOrderOverview">' + panel + '</div>', 1)
+    html = html.replace(button, '', 1).replace(handler, '', 1)
+    html = html.replace(view, view + "\n  qs('#dispatcherOrderOverview').hidden=v==='employeesView';", 1)
+    return html.replace('</head>', '<style>#dispatcherOrderOverview[hidden]{display:none!important}</style></head>', 1)
+
+
+INLINE_INDEX_HTML = _employees_focus_html(INLINE_INDEX_HTML)
