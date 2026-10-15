@@ -9721,3 +9721,77 @@ def _employees_focus_html(html):
 
 
 INLINE_INDEX_HTML = _employees_focus_html(INLINE_INDEX_HTML)
+
+
+def _one_screen_orders_html(html):
+    return html.replace('</head>', r'''<style id="one-screen-orders-style">
+body.dashboard-compact{height:100dvh;min-height:0;overflow:hidden;padding-bottom:0}
+body.dashboard-compact .topbar{position:relative;padding:5px 10px 3px}
+body.dashboard-compact .topbar h1{font-size:19px}
+body.dashboard-compact .topbar .icon-btn{width:36px;height:36px;border-radius:10px}
+body.dashboard-compact #dateStrip{padding:3px 10px 5px;gap:4px}
+body.dashboard-compact #dateStrip .date-pill{min-width:60px;padding:4px 5px;border-radius:9px}
+body.dashboard-compact #dateStrip .date-pill small{margin-top:1px!important;font-size:9px}
+body.dashboard-compact main{padding:0 10px;transform-origin:top center}
+body.dashboard-compact #selectedDayHeader{margin:0 0 4px}
+body.dashboard-compact #selectedDayHeader h2{font-size:15px}
+body.dashboard-compact .dashboard-date-picker{min-height:27px;padding:3px 6px}
+body.dashboard-compact #dashboardDate{min-height:27px}
+body.dashboard-compact #summary{gap:4px;margin-bottom:4px}
+body.dashboard-compact #summary .metric{min-height:58px;padding:4px 3px;border-radius:9px}
+body.dashboard-compact #summary .metric b{font-size:16px!important}
+body.dashboard-compact #summary .metric b:nth-of-type(2){margin-top:2px!important}
+body.dashboard-compact #summary .metric span{font-size:9px;margin-top:1px}
+body.dashboard-compact #dayCommentBtn{min-height:24px;margin-top:2px;padding:2px;font-size:9px}
+body.dashboard-compact #brigadeWork{margin:4px 0!important;padding-top:3px}
+body.dashboard-compact #brigadeWork .dashboard-section-heading{margin-bottom:3px}
+body.dashboard-compact #brigadeWork .dashboard-section-heading h2{font-size:12px}
+body.dashboard-compact .dashboard-section-date{font-size:9px!important}
+body.dashboard-compact #brigadeWork .metric{min-height:43px;padding:4px 3px;border-radius:9px}
+body.dashboard-compact #brigadeWork .metric b{font-size:16px}
+body.dashboard-compact #brigadeWork .metric span{font-size:8px;margin-top:2px}
+body.dashboard-compact #employeeReadiness>.section-head{margin:4px 0}
+body.dashboard-compact #employeeReadiness .readiness-section-heading h2{font-size:12px}
+body.dashboard-compact #employeeReadiness .readiness-actions{gap:4px}
+body.dashboard-compact #employeeReadiness .readiness-actions>button{min-height:34px;border-radius:8px;padding:3px}
+body.dashboard-compact #employeeReadiness #readinessHistoryBtn b{font-size:10px}
+body.dashboard-compact #employeeReadiness #readinessHistoryBtn small{font-size:8px!important}
+body.dashboard-compact #readinessSummary{margin:4px 0;gap:4px}
+body.dashboard-compact #readinessSummary .metric{min-height:38px;padding:3px 7px;border-radius:9px}
+body.dashboard-compact #readinessSummary .metric b{font-size:16px}
+body.dashboard-compact #readinessSummary .metric span{font-size:9px;margin-top:1px}
+body.dashboard-compact #readinessGroups{display:grid;gap:4px}
+body.dashboard-compact #readinessGroups .group-block{display:grid;grid-template-columns:minmax(0,.95fr) minmax(0,2.6fr);align-items:center;gap:3px;margin:0;border-radius:9px;min-height:46px}
+body.dashboard-compact #readinessGroups .group-title{display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:5px 6px;font-size:11px;line-height:1.15}
+body.dashboard-compact #readinessGroups .group-stats{gap:3px;padding:4px 4px 4px 0}
+body.dashboard-compact #readinessGroups .group-stats button{min-height:36px;padding:3px 1px;border-radius:6px;font-size:8px;line-height:1.15}
+body.dashboard-compact #readinessGroups .group-stats b{font-size:14px}
+</style></head>''', 1).replace('</body>', r'''<script>
+let ordersScreenFitFrame=0;
+function fitOrdersScreen(){
+ const main=qs('main');if(!main)return;
+ if(!document.body.classList.contains('dashboard-compact')){main.style.removeProperty('transform');return}
+ const viewport=window.visualViewport,viewportBottom=viewport?viewport.offsetTop+viewport.height:window.innerHeight;
+ const nav=qs('#roleNavigation')||qs('.bottom-nav');
+ const navTop=nav?.getBoundingClientRect().top;
+ const bottom=navTop>0?Math.min(navTop,viewportBottom):viewportBottom-72;
+ const top=main.getBoundingClientRect().top;
+ const height=Math.max(main.scrollHeight,main.offsetHeight);
+ if(!height)return;
+ const scale=Math.min(1,Math.max(.1,(bottom-top-5)/height));
+ main.style.transform=scale<1?`scale(${scale})`:'';
+}
+function scheduleOrdersScreenFit(){
+ if(ordersScreenFitFrame)return;
+ ordersScreenFitFrame=requestAnimationFrame(()=>{ordersScreenFitFrame=0;fitOrdersScreen()});
+}
+new MutationObserver(scheduleOrdersScreenFit).observe(document.body,{attributes:true,attributeFilter:['class'],childList:true,subtree:true});
+if(window.ResizeObserver){const observer=new ResizeObserver(scheduleOrdersScreenFit);for(const el of [qs('main'),qs('.topbar'),qs('#dateStrip')])if(el)observer.observe(el)}
+window.addEventListener('resize',scheduleOrdersScreenFit);
+window.visualViewport?.addEventListener('resize',scheduleOrdersScreenFit);
+document.fonts?.ready.then(scheduleOrdersScreenFit);
+scheduleOrdersScreenFit();
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML = _one_screen_orders_html(INLINE_INDEX_HTML)
