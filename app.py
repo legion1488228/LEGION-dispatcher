@@ -8455,7 +8455,7 @@ function renderOwnerBrigadeControl(){
   const stages={contact:'Связь бригад',photo:'Фото по заказам',done:'Отчёты по чаю'};
   const items=data.items.filter(item=>source==='all'||item.source===source);
   const waiting='<svg class="cabinet-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12M6 21h12M7 3v4l10 10v4M17 3v4L7 17v4"/></svg>';
-  const block=(key,icon,value,label,ready,count=null)=>`<div class="bc-stage bc-stage-${key} ${ready?'is-done':''} ${stage===key?'is-focused':''}" aria-label="${esc(label)}: ${esc(value)}" title="${esc(label)}: ${esc(value)}"><span class="bc-stage-icon">${cabinetIcon(icon)}</span><b>${esc(value)}</b><span class="bc-stage-state" aria-hidden="true">${count!==null?esc(count):ready?cabinetIcon('check'):waiting}</span></div>`;
+  const block=(key,icon,value,label,ready,count=null)=>`<div class="bc-stage bc-stage-${key} ${ready?'is-done':''} ${stage===key?'is-focused':''}" aria-label="${esc(label)}: ${esc(value)}" title="${esc(label)}: ${esc(value)}">${key==='done'?'':`<span class="bc-stage-icon">${cabinetIcon(icon)}</span>`}<b>${esc(value)}</b><span class="bc-stage-state" aria-hidden="true">${count!==null?esc(count):ready?cabinetIcon('check'):waiting}</span></div>`;
   root.innerHTML=`<div class="bc-heading"><div><h2>Контроль заказов</h2><p>${esc(fmtDate(data.work_date))}</p></div><label class="bc-date">Дата<input type="date" id="brigadeControlDate" value="${esc(data.work_date)}" aria-label="Дата контроля заказов"></label></div>
     <div class="bc-counters" role="group" aria-label="Этап контроля">${[['contact','На связи','on_contact'],['photo','Фото получены','photos_complete'],['done','Завершено','completed']].map(([key,label,field])=>`<button type="button" data-brigade-stage="${key}" aria-pressed="${stage===key}"><b>${totals[field]}/${totals.orders}</b><span>${label}</span></button>`).join('')}</div>
     <div class="bc-sources" role="group" aria-label="Тип заказа">${[['all','Все'],['private','Частные'],['gbu','ГБУ ⬛️']].map(([key,label])=>`<button type="button" data-brigade-source="${key}" aria-pressed="${source===key}">${label} · ${data.totals[key].orders}</button>`).join('')}</div>
@@ -8517,6 +8517,7 @@ body[data-cabinet-kind="assistant"] .role-navigation small{font-size:9px;line-he
 #ownerBrigadeControlContent .bc-stage .cabinet-icon{display:block;width:10px;height:10px}
 #ownerBrigadeControlContent .bc-stage-state{justify-self:end;white-space:nowrap}
 #ownerBrigadeControlContent .bc-stage.is-done .bc-stage-icon,#ownerBrigadeControlContent .bc-stage.is-done .bc-stage-state,#ownerBrigadeControlContent .bc-stage.is-done .cabinet-icon{color:var(--green)}
+#ownerBrigadeControlContent .bc-stage-done{grid-template-columns:minmax(0,1fr) auto}
 #ownerBrigadeControlContent .bc-stage-done b{font-size:10px}
 #ownerBrigadeControlContent .bc-order[open],#ownerBrigadeControlContent .bc-list>.cabinet-empty{grid-column:1/-1}
 #ownerBrigadeControlContent .bc-order[open]{padding:9px}
@@ -9666,10 +9667,10 @@ def _cash_reconciliation_cards_html(html):
         "function showModal(title, body) {qs('#modal').classList.remove('cash-reconciliation-open');",1)
     return html.replace('</head>', r'''<style id="cash-reconciliation-style">
 #modal.owner-cash-modal.cash-reconciliation-open{overflow:hidden;display:flex;flex-direction:column}
-#modal.cash-reconciliation-open #cashTableBody{min-height:0;min-width:0;flex:1;display:flex;flex-direction:column;white-space:normal}
+#modal.cash-reconciliation-open #cashTableBody{min-height:0;min-width:0;flex:0 1 auto;overflow:auto;display:flex;flex-direction:column;white-space:normal}
 .cash-reconciliation-toolbar{display:flex;align-items:center;justify-content:space-between;gap:5px;font-size:11px;color:var(--muted);margin:5px 0}
 .cash-reconciliation-toolbar strong{color:var(--text);font-size:12px}
-.cash-reconciliation-grid{display:grid;grid-template-columns:repeat(var(--reconcile-cols,4),minmax(0,1fr));gap:5px;min-height:0}
+.cash-reconciliation-grid{display:grid;grid-template-columns:repeat(var(--reconcile-cols,4),minmax(0,1fr));grid-auto-rows:auto;align-items:start;align-content:start;gap:5px;min-height:0;flex-shrink:0}
 .cash-reconciliation-card{min-width:0;min-height:0;padding:4px;border:1px solid var(--line);border-radius:10px;background:var(--panel);font-size:var(--reconcile-font,10px);line-height:1.15;display:flex;flex-direction:column;font-variant-numeric:tabular-nums;white-space:normal;overflow:hidden}
 .cash-reconciliation-card.is-checked{border-color:#377b50}
 .cash-reconciliation-name{display:grid;grid-template-columns:minmax(0,1fr) 23px;align-items:start;column-gap:2px;row-gap:1px;min-width:0;white-space:normal;overflow-wrap:anywhere;margin-bottom:3px}
@@ -9679,7 +9680,7 @@ def _cash_reconciliation_cards_html(html):
 .cash-reconciliation-mark:disabled{opacity:.6}.cash-reconciliation-mark[aria-readonly=true]{cursor:default}
 .cash-reconciliation-line{display:flex;align-items:baseline;justify-content:space-between;gap:2px;margin:0;white-space:nowrap}
 .cash-reconciliation-line span{color:var(--muted)}.cash-reconciliation-line b{font-weight:500}
-.cash-reconciliation-total{margin-top:auto;padding-top:2px;border-top:1px solid var(--line);color:var(--gold);font-weight:700}
+.cash-reconciliation-total{margin-top:4px;padding-top:2px;border-top:1px solid var(--line);color:var(--gold);font-weight:700}
 .cash-reconciliation-total span{color:var(--gold)}.cash-reconciliation-total b{font-weight:750}
 .cash-reconciliation-legend{margin:5px 0 0;font-size:10px;color:var(--muted);line-height:1.3}
 </style></head>''',1).replace('</body>',r'''<script>
@@ -9692,15 +9693,10 @@ function fitCashReconciliation(){
  const modal=qs('#modal'),grid=qs('.cash-reconciliation-grid',modal);
  if(!modal?.classList.contains('cash-reconciliation-open')||!grid)return;
  const count=grid.children.length;if(!count)return;
- const width=grid.clientWidth||Math.max(240,window.innerWidth-26),bottom=modal.getBoundingClientRect().bottom||(window.visualViewport?.height||window.innerHeight)-76;
- const top=grid.getBoundingClientRect().top||180,available=Math.max(120,bottom-top-35);
- let best={score:0,cols:1,rows:count};
- for(let cols=1;cols<=Math.min(4,count);cols++){
-  const rows=Math.ceil(count/cols),score=Math.min((width-5*(cols-1))/cols,(available-5*(rows-1))/rows);
-  if(score>best.score)best={score,cols,rows};
- }
- grid.style.setProperty('--reconcile-cols',best.cols);grid.style.setProperty('--reconcile-font',Math.min(12,Math.max(8,best.score/10))+'px');
- grid.style.gridTemplateRows=`repeat(${best.rows},minmax(0,1fr))`;grid.style.height=available+'px';
+ // Cards follow their content instead of stretching to the modal height.
+ grid.style.setProperty('--reconcile-cols',Math.min(4,count));
+ grid.style.setProperty('--reconcile-font','12px');
+ grid.style.gridTemplateRows='none';grid.style.height='auto';
 }
 window.addEventListener('resize',fitCashReconciliation);
 window.visualViewport?.addEventListener('resize',fitCashReconciliation);
