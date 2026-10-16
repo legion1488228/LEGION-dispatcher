@@ -10418,18 +10418,24 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', '''<style id="order-cou
 </style></head>''', 1)
 
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', '''<style id="gbu-earning-cards-style">
-#gbuEarnBody .gbu-earning-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:12px;align-items:stretch}
-#gbuEarnBody .gbu-earning-card{min-width:0;display:flex;flex-direction:column;gap:8px;padding:9px 8px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
-#gbuEarnBody .gbu-earning-card>b{display:block;min-height:2.5em;font-size:12px;line-height:1.25;overflow-wrap:anywhere}
-#gbuEarnBody .gbu-card-controls{display:grid;grid-template-columns:minmax(0,1fr) 46px;gap:7px;align-items:end}
-#gbuEarnBody .gbu-card-controls label{display:flex;flex-direction:column;min-width:0;gap:4px;font-size:10px;color:var(--muted);line-height:1.2}
+#modal:has(#gbuEarnBody){padding:10px}
+#modal:has(#gbuEarnBody)>.modal-head{min-height:36px;margin-bottom:6px;gap:6px}
+#modal:has(#gbuEarnBody)>.modal-head h3{font-size:18px;line-height:1.2}
+#modal:has(#gbuEarnBody)>.modal-head .close-btn{width:32px;height:32px;min-height:32px}
+#modal>#gbuEarnBack{min-height:36px;padding:6px 10px;margin-bottom:2px}
+#gbuEarnBody .gbu-earning-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;margin-top:6px;align-items:stretch}
+#gbuEarnBody .gbu-earning-card{min-width:0;display:flex;flex-direction:column;gap:4px;padding:6px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+#gbuEarnBody .gbu-earning-card>b{display:block;min-height:2.4em;font-size:12px;line-height:1.2;overflow-wrap:anywhere}
+#gbuEarnBody .gbu-card-controls{display:grid;grid-template-columns:minmax(0,1fr) 42px;gap:4px;align-items:end}
+#gbuEarnBody .gbu-card-controls label{display:flex;flex-direction:column;min-width:0;gap:2px;font-size:10px;color:var(--muted);line-height:1.15}
 #gbuEarnBody .gbu-card-type-label{grid-column:1/-1}
-#gbuEarnBody [data-gbu-type],#gbuEarnBody [data-gbu-money]{display:block;box-sizing:border-box;width:100%;max-width:100%;min-width:0;min-height:44px;margin:0;padding:7px 4px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--text);font-size:16px}
-#gbuEarnBody [data-gbu-auto]{min-width:0;min-height:44px;padding:5px 2px;font-size:11px;border-radius:8px;box-sizing:border-box}
-#gbuEarnBody [data-gbu-hint]{display:block;font-size:10px;line-height:1.3;overflow-wrap:anywhere}
+#gbuEarnBody [data-gbu-type],#gbuEarnBody [data-gbu-money]{display:block;box-sizing:border-box;width:100%;max-width:100%;min-width:0;min-height:36px;margin:0;padding:5px 4px;border:1px solid var(--line);border-radius:6px;background:var(--panel2);color:var(--text);font-size:16px}
+#gbuEarnBody [data-gbu-auto]{min-width:0;min-height:36px;padding:4px 2px;font-size:11px;border-radius:6px;box-sizing:border-box}
+#gbuEarnBody [data-gbu-hint]{display:block;font-size:10px;line-height:1.2;overflow-wrap:anywhere}
 #gbuEarnBody .gbu-earning-empty{grid-column:1/-1}
-#gbuEarnForm>h3{font-size:16px;line-height:1.3;overflow-wrap:anywhere;margin:10px 0}
-#gbuEarnForm>p.muted{font-size:12px;line-height:1.35}
+#gbuEarnForm>h3{font-size:14px;line-height:1.2;overflow-wrap:anywhere;margin:6px 0}
+#gbuEarnForm>p.muted{font-size:11px;line-height:1.25;margin:4px 0}
+#gbuEarnForm>button[type="submit"]{min-height:38px;padding:8px 12px;font-size:13px}
 </style></head>''', 1)
 
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', '''<style id="daily-cash-cards-style">
