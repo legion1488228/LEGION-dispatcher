@@ -9691,11 +9691,12 @@ def _cash_reconciliation_cards_html(html):
     anchor = '      const ledger=await api(`/api/cash/ledger?'
     at = section.index(anchor)
     branch = r'''
+      if(qs('[data-cash-note-editor]')&&(body.dataset.noteMonth!==cashMonth||body.dataset.noteRange!==cashRange)&&typeof cashNoteDismiss==='function')cashNoteDismiss();
       qs('#modal').classList.toggle('cash-reconciliation-open',compactCash&&cashRange!=='month');
       if(cashRange==='month')qs('.cash-reconciliation-toolbar',qs('#modal .modal-head'))?.remove();
       if(compactCash&&cashRange!=='month'){
         const half=cashRange==='first'?1:2;
-        if(qs('[data-cash-note-editor]',body)&&body.dataset.noteMonth===cashMonth&&body.dataset.noteRange===cashRange)return;
+        if(qs('[data-cash-note-editor]')&&body.dataset.noteMonth===cashMonth&&body.dataset.noteRange===cashRange)return;
         const report=await api(`/api/cash/reconciliation?month=${encodeURIComponent(cashMonth)}&half=${half}`,{cache:'no-store'});
         if(!cashActive()||request!==cashRequest||requestedMonth!==cashMonth||requestedRange!==cashRange)return;
         body.innerHTML=ownerCashReconciliationHtml(report);
@@ -9717,18 +9718,39 @@ def _cash_reconciliation_cards_html(html):
         qsa('[data-cash-note]',body).forEach(button=>button.onclick=()=>{
           if(cashMarkSaving||!cashActive()||!report.can_mark)return;
           const item=report.items.find(x=>String(x.tg_id)===button.dataset.cashNote);if(!item)return;
-          if(qs('[data-cash-note-editor]',body)){toast('Сначала сохраните или закройте открытый комментарий');return}
+          if(qs('[data-cash-note-editor]'))return;
           cashRequest++;body.dataset.noteMonth=report.month;body.dataset.noteRange=cashRange;
-          const editor=document.createElement('form');editor.className='cash-note-editor';editor.setAttribute('data-cash-note-editor','');
-          editor.innerHTML=`<label>Комментарий<textarea maxlength="240" rows="3" aria-label="Комментарий к кассе">${esc(item.comment||'')}</textarea></label><div><button type="submit" class="primary">Сохранить</button><button type="button" class="secondary" data-note-cancel>Отмена</button></div><p role="status"></p>`;
-          button.closest('.cash-reconciliation-card').append(editor);const input=qs('textarea',editor);input.focus();
-          qs('[data-note-cancel]',editor).onclick=()=>{editor.remove();if(cashActive())drawCash()};
+          const overlay=document.createElement('div');overlay.className='cash-note-overlay';
+          const editor=document.createElement('form');editor.className='cash-note-dialog';editor.setAttribute('data-cash-note-editor','');editor.setAttribute('role','dialog');editor.setAttribute('aria-modal','true');editor.setAttribute('aria-labelledby','cashNoteTitle');
+          editor.innerHTML=`<h3 id="cashNoteTitle">Комментарий к кассе</h3><p class="cash-note-context">${esc(item.name)} · ${report.half===1?'1–15':'16–конец'} · ${esc(report.month)}</p><label for="cashNoteText">Ваш комментарий</label><textarea id="cashNoteText" maxlength="240" rows="4" placeholder="Например: сдал часть, остаток 5 000 ₽">${esc(item.comment||'')}</textarea><small data-note-count></small><div class="cash-note-buttons"><button type="submit" class="primary">Сохранить</button><button type="button" class="secondary" data-note-cancel>Отмена</button></div><p role="status" aria-live="polite"></p>`;
+          overlay.append(editor);document.body.append(overlay);
+          const input=qs('textarea',editor),pageX=window.scrollX,pageY=window.scrollY,tableTop=body.scrollTop,modalTop=qs('#modal').scrollTop;
+          const viewport=window.visualViewport;
+          const placeEditor=()=>{
+            overlay.style.top=(viewport?.offsetTop||0)+'px';overlay.style.left=(viewport?.offsetLeft||0)+'px';
+            overlay.style.width=(viewport?.width||window.innerWidth)+'px';overlay.style.height=(viewport?.height||window.innerHeight)+'px';
+          };
+          placeEditor();viewport?.addEventListener('resize',placeEditor);viewport?.addEventListener('scroll',placeEditor);window.addEventListener('resize',placeEditor);
+          const dismiss=()=>{
+            viewport?.removeEventListener('resize',placeEditor);viewport?.removeEventListener('scroll',placeEditor);window.removeEventListener('resize',placeEditor);document.removeEventListener('keydown',keyHandler);
+            input.blur();overlay.remove();if(cashNoteDismiss===dismiss)cashNoteDismiss=null;
+            if(cashActive()){body.scrollTop=tableTop;qs('#modal').scrollTop=modalTop;button.focus({preventScroll:true});window.scrollTo(pageX,pageY)}
+          };
+          const cancel=()=>{if(cashMarkSaving)return;dismiss();if(cashActive())drawCash()};
+          const keyHandler=event=>{
+            if(event.key==='Escape'){event.preventDefault();cancel()}
+            if(event.key==='Tab'){const fields=qsa('textarea,button:not(:disabled)',editor),first=fields[0],last=fields.at(-1);if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus()}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus()}}
+          };
+          cashNoteDismiss=dismiss;document.addEventListener('keydown',keyHandler);
+          input.oninput=()=>qs('[data-note-count]',editor).textContent=input.value.length+' / 240';input.oninput();
+          input.focus({preventScroll:true});
+          qs('[data-note-cancel]',editor).onclick=cancel;
           editor.onsubmit=async event=>{
             event.preventDefault();if(cashMarkSaving||!cashActive())return;
             cashMarkSaving=true;qsa('button,textarea',editor).forEach(x=>x.disabled=true);
             try{
               await api(`/api/cash/receipt/${item.tg_id}?month=${encodeURIComponent(report.month)}&half=${report.half}`,{method:'PUT',body:JSON.stringify({field:'comment',comment:input.value,version:item.receipt_version||0})});
-              editor.remove();toast('Комментарий сохранён');
+              dismiss();if(cashActive())toast('Комментарий сохранён');
             }catch(error){qs('[role=status]',editor).textContent=error.message}
             finally{cashMarkSaving=false;qsa('button,textarea',editor).forEach(x=>x.disabled=false);if(cashActive()&&!editor.isConnected)await drawCash()}
           };
@@ -9791,6 +9813,15 @@ def _cash_reconciliation_cards_html(html):
 .cash-note-editor>div{display:flex;flex-wrap:wrap;gap:3px;margin-top:3px}
 .cash-note-editor button{font-size:10px;padding:5px 3px;border-radius:5px}
 .cash-note-editor p{color:var(--red);white-space:normal;overflow-wrap:anywhere}
+.cash-note-overlay{position:fixed;z-index:1000;box-sizing:border-box;display:flex;align-items:center;justify-content:center;padding:8px;background:rgba(0,0,0,.35);overscroll-behavior:contain}
+.cash-note-dialog{box-sizing:border-box;width:100%;max-width:440px;max-height:100%;overflow:auto;overscroll-behavior:contain;padding:16px;border:1px solid var(--line);border-radius:14px;background:var(--panel);color:var(--text);box-shadow:0 8px 40px rgba(0,0,0,.2)}
+.cash-note-dialog h3{font-size:18px;margin:0 0 6px}
+.cash-note-dialog .cash-note-context{font-size:14px;font-weight:650;margin:0 0 12px;overflow-wrap:anywhere}
+.cash-note-dialog label{display:block;font-size:14px;margin-bottom:5px}
+.cash-note-dialog textarea{box-sizing:border-box;display:block;width:100%;min-height:96px;max-height:140px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--text);font-size:16px!important;line-height:1.4;resize:none}
+.cash-note-dialog small{display:block;color:var(--muted);font-size:12px;text-align:right;margin:4px 0 8px}
+.cash-note-buttons{display:flex;gap:8px}.cash-note-buttons button{flex:1;min-height:40px;padding:8px;font-size:14px}
+.cash-note-dialog [role=status]{margin:8px 0 0;color:var(--red);font-size:13px;overflow-wrap:anywhere}
 </style></head>''',1).replace('</body>',r'''<script>
 function ownerCashReconciliationHtml(report){
  const number=value=>Number(value||0).toLocaleString('ru-RU');
@@ -10080,3 +10111,10 @@ function legionTableOpeningTop(month,scroller){
 
 
 INLINE_INDEX_HTML = _current_half_tables_html(INLINE_INDEX_HTML)
+
+# A nested cash note must not survive navigation to another modal/account.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('function showModal(title, body) {',
+    "function showModal(title, body) {if(typeof cashNoteDismiss==='function')cashNoteDismiss();", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('function closeModal(){',
+    "function closeModal(){if(typeof cashNoteDismiss==='function')cashNoteDismiss();", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '<script>var cashNoteDismiss=null;</script></body>', 1)
