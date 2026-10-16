@@ -9692,12 +9692,18 @@ def _cash_reconciliation_cards_html(html):
     at = section.index(anchor)
     branch = r'''
       qs('#modal').classList.toggle('cash-reconciliation-open',compactCash&&cashRange!=='month');
+      if(cashRange==='month')qs('.cash-reconciliation-toolbar',qs('#modal .modal-head'))?.remove();
       if(compactCash&&cashRange!=='month'){
         const half=cashRange==='first'?1:2;
         if(qs('[data-cash-note-editor]',body)&&body.dataset.noteMonth===cashMonth&&body.dataset.noteRange===cashRange)return;
         const report=await api(`/api/cash/reconciliation?month=${encodeURIComponent(cashMonth)}&half=${half}`,{cache:'no-store'});
         if(!cashActive()||request!==cashRequest||requestedMonth!==cashMonth||requestedRange!==cashRange)return;
         body.innerHTML=ownerCashReconciliationHtml(report);
+        // Put the existing controls in the title row; keep their original IDs
+        // so the reminder handler and refresh behavior remain unchanged.
+        const cashHead=qs('#modal .modal-head');
+        qs('.cash-reconciliation-toolbar',cashHead)?.remove();
+        cashHead.insertBefore(qs('.cash-reconciliation-toolbar',body),qs('#closeModal',cashHead));
         qsa('[data-cash-received]',body).forEach(button=>button.onclick=async()=>{
           if(cashMarkSaving||!cashActive()||!report.can_mark)return;
           const item=report.items.find(x=>String(x.tg_id)===button.dataset.cashReceived);if(!item)return;
@@ -9749,6 +9755,16 @@ def _cash_reconciliation_cards_html(html):
         "function showModal(title, body) {qs('#modal').classList.remove('cash-reconciliation-open');",1)
     return html.replace('</head>', r'''<style id="cash-reconciliation-style">
 #modal.owner-cash-modal.cash-reconciliation-open{overflow:hidden;display:flex;flex-direction:column}
+#modal.owner-cash-modal.cash-reconciliation-open{padding:6px!important}
+#modal.cash-reconciliation-open .modal-head{display:grid;grid-template-columns:auto auto minmax(0,1fr) auto 30px;align-items:center;gap:3px;margin:0 0 3px!important;min-height:30px;flex-shrink:0}
+#modal.cash-reconciliation-open .modal-head h3{font-size:17px;line-height:1.1;white-space:nowrap}
+#modal.cash-reconciliation-open .modal-head .cash-reconciliation-toolbar{display:contents}
+#modal.cash-reconciliation-open .modal-head .cash-reconciliation-toolbar>span{font-size:9px;white-space:nowrap;color:var(--muted)}
+#modal.cash-reconciliation-open .modal-head .cash-reconciliation-toolbar>strong{font-size:10px;white-space:nowrap;text-align:center;color:var(--text)}
+#modal.cash-reconciliation-open .modal-head #cashReminder{font-size:10px;padding:4px;min-height:28px;border-radius:7px;white-space:nowrap}
+#modal.cash-reconciliation-open .owner-cash-controls{margin:0 0 3px!important;flex-shrink:0}
+#modal.cash-reconciliation-open .owner-cash-ranges{margin:0 0 3px!important;gap:4px;flex-shrink:0}
+#modal.cash-reconciliation-open #cashMonthTabs{margin:0 0 4px!important;gap:4px;flex-shrink:0}
 #modal.cash-reconciliation-open #cashTableBody{min-height:0;min-width:0;flex:0 1 auto;overflow:auto;display:flex;flex-direction:column;white-space:normal}
 .cash-reconciliation-toolbar{display:flex;align-items:center;justify-content:space-between;gap:5px;font-size:11px;color:var(--muted);margin:5px 0}
 .cash-reconciliation-toolbar strong{color:var(--text);font-size:12px}
@@ -10023,3 +10039,44 @@ applyLegionAccountTheme();
 
 
 INLINE_INDEX_HTML = _cabinet_theme_picker_html(INLINE_INDEX_HTML)
+
+
+def _current_half_tables_html(html):
+    def replace_once(source, before, after):
+        if source.count(before) != 1:
+            raise RuntimeError('Current half navigation anchor missing: ' + before[:80])
+        return source.replace(before, after, 1)
+
+    start = html.index('async function openPersonalTables(resume=null){')
+    end = html.index('</script>', start)
+    section = html[start:end]
+    section = replace_once(section, " const grid=qs('#personalGrid'),status=qs('#personalStatus'),session=cashModalGeneration;",
+        " let openCurrentHalf=!resume;\n const grid=qs('#personalGrid'),status=qs('#personalStatus'),session=cashModalGeneration;")
+    section = replace_once(section,
+        "grid.scrollLeft=left;grid.scrollTop=top;qs('#modal').scrollTop=modalTop;",
+        "grid.scrollLeft=left;grid.scrollTop=openCurrentHalf?legionTableOpeningTop(month,grid):top;openCurrentHalf=false;qs('#modal').scrollTop=modalTop;")
+    section = replace_once(section, "month=e.target.value;load()", "month=e.target.value;openCurrentHalf=true;load()")
+    section = replace_once(section, "kind=btn.dataset.personalKind;", "kind=btn.dataset.personalKind;openCurrentHalf=true;")
+    html = html[:start]+section+html[end:]
+
+    start = html.index('async function openCashTable(){')
+    end = html.index('let ownerCabinetRequest=', start)
+    section = html[start:end]
+    section = replace_once(section, 'let pendingRestore=resume;', 'let pendingRestore=resume,openCurrentCashHalf=!resume;')
+    section = replace_once(section, 'pendingRestore=null;cashMonth=value;', 'pendingRestore=null;openCurrentCashHalf=true;cashMonth=value;')
+    section = replace_once(section, 'pendingRestore=null;cashRange=btn.dataset.cashRange;', 'pendingRestore=null;openCurrentCashHalf=true;cashRange=btn.dataset.cashRange;')
+    section = replace_once(section, 'currentScroller.scrollTop=savedTableTop',
+        "currentScroller.scrollTop=openCurrentCashHalf&&cashRange==='month'?legionTableOpeningTop(cashMonth,currentScroller):savedTableTop;openCurrentCashHalf=false")
+    html = html[:start]+section+html[end:]
+    return html.replace('</body>', r'''<script>
+function legionTableOpeningTop(month,scroller){
+ const today=new Date().toLocaleDateString('sv-SE',{timeZone:'Europe/Moscow'});
+ // Archives start at day one. Current-month tables open at the Moscow half.
+ if(month!==today.slice(0,7)||Number(today.slice(8,10))<=15)return 0;
+ if(!scroller.querySelector('.period-table-page[data-period-page="2"]'))return 0;
+ return Number(scroller.dataset.periodPageHeight)||0;
+}
+</script></body>''', 1)
+
+
+INLINE_INDEX_HTML = _current_half_tables_html(INLINE_INDEX_HTML)
