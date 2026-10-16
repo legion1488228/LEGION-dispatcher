@@ -10378,7 +10378,14 @@ function openOrderCountBreakdown(values,options){
 }
 </script></body>''', 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', '''<style id="order-count-breakdown-style">
-#orderCountBreakdown #orderBreakdownBack{min-height:38px;font-size:12px}
+#modal:has(#orderCountBreakdown)>.modal-head,
+#modal:has(#categoryCountBody)>.modal-head{position:relative;top:auto;margin:0 0 12px;min-height:44px;gap:10px}
+#modal:has(#orderCountBreakdown)>.modal-head::before,
+#modal:has(#categoryCountBody)>.modal-head::before{display:none}
+#modal:has(#orderCountBreakdown)>.modal-head h3,
+#modal:has(#categoryCountBody)>.modal-head h3{margin:0;min-width:0;overflow-wrap:anywhere}
+#orderCountBreakdown #orderBreakdownBack,
+#categoryCountBody>button.secondary:first-child{display:inline-flex;align-items:center;justify-content:center;position:relative;min-height:44px;max-width:100%;height:auto;margin:0 0 4px;padding:10px 14px;box-sizing:border-box;line-height:1.25;white-space:normal;font-size:12px}
 #orderCountBreakdown .order-breakdown-range{font-size:14px;font-weight:650;margin:12px 0}
 #orderCountBreakdown .order-breakdown-summary{display:flex;flex-wrap:wrap;gap:8px 16px;color:var(--gold);font-size:14px;padding:10px;background:var(--panel2);border-radius:10px}
 #orderCountBreakdown .order-breakdown-source{margin-top:16px;border:1px solid var(--line);border-radius:12px;padding:10px}
