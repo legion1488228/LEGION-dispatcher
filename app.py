@@ -10203,3 +10203,195 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('function showModal(title, body) {
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('function closeModal(){',
     "function closeModal(){if(typeof cashNoteDismiss==='function')cashNoteDismiss();", 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '<script>var cashNoteDismiss=null;</script></body>', 1)
+
+
+# The order ledger projects the existing counters, including legacy overrides.
+# No historical rows are copied, reset or counted a second time.
+@app.get('/api/order-count-table/{month}')
+def order_count_table(month: str, db: Session = Depends(get_db),
+                      user: TelegramUser = Depends(require_admin)):
+    days = _personal_month_days(month)
+    first_day = date.fromisoformat(month + '-01')
+    daily = []
+    for number in range(1, days + 1):
+        work_date = first_day.replace(day=number)
+        sources = {source: _category_counts(db, work_date, source) for source in ORDER_COUNT_TYPES}
+        staff = sum(int(key.rsplit(':', 1)[1]) * count
+                    for values in sources.values() for key, count in values['counts'].items())
+        daily.append({'date': work_date.isoformat(), 'day': number,
+                      'private': sources['private']['total'], 'gbu': sources['gbu']['total'],
+                      'total': sum(values['total'] for values in sources.values()),
+                      'staff_count': staff,
+                      'unallocated': sum(values['unallocated'] for values in sources.values()),
+                      'sources': sources})
+
+    def totals(rows):
+        result = {key: sum(row[key] for row in rows)
+                  for key in ('private', 'gbu', 'total', 'staff_count', 'unallocated')}
+        result['sources'] = {}
+        for source in ORDER_COUNT_TYPES:
+            counts = dict.fromkeys(ORDER_COUNT_TYPES[source], 0)
+            for row in rows:
+                for key, count in row['sources'][source]['counts'].items():
+                    counts[key] = counts.get(key, 0) + count
+            result['sources'][source] = {
+                'counts': counts,
+                'unallocated': sum(row['sources'][source]['unallocated'] for row in rows),
+                'total': sum(row['sources'][source]['total'] for row in rows),
+            }
+        return result
+
+    return {'month': month, 'days': days, 'daily': daily,
+            'first': totals(daily[:15]), 'second': totals(daily[15:]), 'total': totals(daily)}
+
+
+def _orders_personal_table_html(html):
+    def replace_once(source, old, new):
+        if source.count(old) != 1:
+            raise RuntimeError('Orders table anchor missing: ' + old[:90])
+        return source.replace(old, new, 1)
+
+    start = html.index('async function openPersonalTables(resume=null){')
+    end = html.index('\nconst orderCountTypes=', start)
+    section = html[start:end]
+    section = replace_once(section,
+        '<button type="button" class="secondary" id="earningsVladAllowance" aria-label="Надбавка Владу">💵 Владу</button>',
+        '<button type="button" class="secondary" data-personal-kind="orders">Заказы</button>')
+    section = replace_once(section, " showModal('💰 Заработок',", " showModal(kind==='orders'?'📋 Заказы':'💰 Заработок',")
+    section = replace_once(section, ' function render(){', ''' function render(){
+  qs('#modal .modal-head h3').textContent=kind==='orders'?'📋 Заказы':'💰 Заработок';
+  if(kind==='orders'){renderOrders();return}''')
+    section = section.replace('/api/personal-tables/${kind}/${month}', '${personalTableEndpoint(kind,month)}')
+    section = section.replace('/api/personal-tables/${loadedKind}/${loadedMonth}', '${personalTableEndpoint(loadedKind,loadedMonth)}')
+    # Orders use their existing versioned category editor rather than financial PATCHes.
+    section = replace_once(section, '  if(busy||!data||!active())return;++request;',
+        "  if(busy||!data||!active()||kind==='orders')return;++request;")
+    old = ''' qs('#earningsVladAllowance').onclick=()=>{
+  if(busy)return;
+  openVladAllowance({month,kind,left:grid.scrollLeft,top:grid.scrollTop,modalTop:qs('#modal').scrollTop});
+ };
+'''
+    section = replace_once(section, old, '')
+    section = replace_once(section, ' async function load(){', r'''
+ function personalTableEndpoint(tableKind,tableMonth){
+  return tableKind==='orders'?`/api/order-count-table/${tableMonth}`:`/api/personal-tables/${tableKind}/${tableMonth}`;
+ }
+ function renderOrders(){
+  const left=resume?.left??grid.scrollLeft,top=resume?.top??grid.scrollTop,modalTop=resume?.modalTop??qs('#modal').scrollTop;resume=null;
+  const columns=['private','gbu','total','staff_count'];
+  const countButton=(value,key,day='',period='')=>`<button type="button" class="contact-btn personal-cell${period?' order-period-count':''}" data-order-breakdown-key="${key}" data-order-breakdown-day="${day}" data-order-breakdown-period="${period}" aria-label="${esc(day||period)} · ${{private:'Частные',gbu:'ГБУ',total:'Всего заказов',staff_count:'Сотрудников'}[key]}: ${value}. Открыть расшифровку">${value||(!period&&['private','gbu'].includes(key)?'—':0)}</button>`;
+  const totalRow=(label,values,period)=>`<tr class="personal-total"><th>${esc(label)}</th>${columns.map(key=>`<td>${countButton(values[key],key,'',period)}</td>`).join('')}</tr>`;
+  let rows='';
+  for(const row of data.daily){
+   rows+=`<tr><th>${row.day}</th>${columns.map(key=>`<td>${countButton(row[key],key,row.date)}</td>`).join('')}</tr>`;
+   if(row.day===15)rows+=totalRow('1–15',data.first,'first');
+  }
+  rows+=totalRow('16–'+data.days,data.second,'second')+totalRow('Месяц',data.total,'total');
+  grid.innerHTML=`<table class="personal-table orders-month-table"><thead><tr><th>День</th><th>Частные<br><small>✍️</small></th><th>ГБУ<br><small>✍️</small></th><th>Всего<br>заказов</th><th>Сотрудников<br><small>по составам</small></th></tr></thead><tbody>${rows}</tbody></table>`;
+  status.textContent=data.total.unallocated?`Без категории: ${data.total.unallocated}. Нажмите число за день или в итогах, чтобы открыть расшифровку.`:'Нажмите любое число за день или в итогах — откроется разбор по категориям и составам.';
+  fitPersonalFirstHalf(grid);
+  grid.scrollLeft=left;grid.scrollTop=openCurrentHalf?legionTableOpeningTop(month,grid):top;openCurrentHalf=false;qs('#modal').scrollTop=modalTop;
+  qsa('[data-order-breakdown-key]',grid).forEach(button=>button.onclick=()=>{
+   if(busy||!active())return;
+   const saved={month,kind:'orders',left:grid.scrollLeft,top:grid.scrollTop,modalTop:qs('#modal').scrollTop};
+   const day=button.dataset.orderBreakdownDay,period=button.dataset.orderBreakdownPeriod,key=button.dataset.orderBreakdownKey;
+   const values=day?data.daily.find(row=>row.date===day):data[period];
+   if(values)openOrderCountBreakdown(values,{month,day,period,source:['private','gbu'].includes(key)?key:'all',days:data.days,returnState:saved});
+  });
+ }
+ async function load(){''')
+    html = html[:start] + section + html[end:]
+
+    start = html.index('async function openOrderCategoryCounts(source){')
+    end = html.index('\nasync function openOrderCountPeriod()', start)
+    section = html[start:end]
+    section = replace_once(section,
+        'async function openOrderCategoryCounts(source){\n const day=state.selectedDate;',
+        'async function openOrderCategoryCounts(source,workDate=state.selectedDate,onReturn=null){\n const day=workDate;')
+    section = replace_once(section, "  const form=qs('#categoryCountForm');", r'''
+  const form=qs('#categoryCountForm');
+  if(onReturn){
+   const back=document.createElement('button');back.type='button';back.className='secondary';back.textContent='‹ К таблице заказов';back.style.marginBottom='10px';
+   back.onclick=()=>{if(!form.querySelector('button[type="submit"]').disabled)onReturn()};body.prepend(back);
+  }''')
+    section = replace_once(section,
+        "    if(qs('#categoryCountBody')===body)closeModal();\n    await loadBootstrap(state.selectedDate);toast('Количество заказов сохранено');",
+        """    if(qs('#categoryCountBody')!==body)return;
+    if(onReturn){
+     await loadBootstrap(state.selectedDate);
+     if(qs('#categoryCountBody')===body){toast('Количество заказов сохранено');await onReturn()}
+    }else{closeModal();await loadBootstrap(state.selectedDate);toast('Количество заказов сохранено')}""")
+    html = html[:start] + section + html[end:]
+    return html.replace('</head>', '''<style id="orders-month-table-style">
+#personalGrid .orders-month-table{width:100%;table-layout:fixed}
+#personalGrid .orders-month-table thead th{font-size:11px;overflow-wrap:normal}
+#personalGrid .orders-month-table thead small{font-size:9px;font-weight:400;color:var(--muted)}
+#personalGrid .orders-month-table .personal-total{color:var(--gold);background:var(--legion-color-211d14,var(--panel2))}
+#personalGrid .orders-month-table .personal-total th:first-child{background:var(--legion-color-211d14,var(--panel2))}
+#personalGrid .orders-month-table tbody td{font-variant-numeric:tabular-nums}
+#personalGrid .orders-month-table td:nth-last-child(2){color:var(--gold)}
+#personalGrid .orders-month-table td:nth-last-child(2) .personal-cell{color:var(--gold);font-weight:750}
+#personalGrid .orders-month-table .order-period-count{background:transparent;color:var(--gold);border-color:transparent;font-weight:750}
+#personalStatus{font-size:10px;line-height:1.25}
+@media(max-width:350px){#personalGrid .orders-month-table thead th{font-size:9px}}
+</style></head>''', 1)
+
+
+INLINE_INDEX_HTML = _orders_personal_table_html(INLINE_INDEX_HTML)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
+<script>
+function orderBreakdownStaff(values){
+ return Object.entries(values.counts||{}).reduce((sum,[key,count])=>sum+Number(key.split(':')[1])*Number(count),0);
+}
+function orderBreakdownRows(values){
+ const labels={standard:'Стандарт',vip:'ВИП',elite:'Элит',carryout:'Вынос'},rank={standard:0,vip:1,elite:2,carryout:3};
+ const entries=Object.entries(values.counts||{}).filter(([,count])=>Number(count)>0).sort(([a],[b])=>{
+  const [ac,as]=a.split(':'),[bc,bs]=b.split(':');return (rank[ac]??9)-(rank[bc]??9)||Number(as)-Number(bs);
+ });
+ return entries.map(([key,count])=>{
+  const [category,size]=key.split(':');
+  return `<tr><th scope="row">${esc(labels[category]||category)}<small>${Number(size)} чел. в бригаде</small></th><td>${Number(count)}</td><td>${Number(size)*Number(count)}</td></tr>`;
+ }).join('')+(values.unallocated?`<tr><th scope="row">Без категории<small>Состав не указан</small></th><td>${Number(values.unallocated)}</td><td>—</td></tr>`:'');
+}
+function openOrderCountBreakdown(values,options){
+ const {month,day,period,source,days,returnState}=options;
+ const selected=source==='all'?['private','gbu']:[source];
+ const title=source==='private'?'Частные заказы':source==='gbu'?'Заказы ГБУ':'Все заказы';
+ const monthLabel=new Date(month+'-01T12:00:00Z').toLocaleDateString('ru-RU',{month:'long',year:'numeric',timeZone:'Europe/Moscow'});
+ const range=day?new Date(day+'T12:00:00Z').toLocaleDateString('ru-RU',{day:'numeric',month:'long',year:'numeric',timeZone:'Europe/Moscow'}):`${period==='first'?'1–15':period==='second'?'16–'+days:'Весь месяц'} · ${monthLabel}`;
+ const orders=selected.reduce((sum,key)=>sum+Number(values.sources[key].total),0);
+ const staff=selected.reduce((sum,key)=>sum+orderBreakdownStaff(values.sources[key]),0);
+ const unknown=selected.reduce((sum,key)=>sum+Number(values.sources[key].unallocated||0),0);
+ showModal('📋 '+title,`<div id="orderCountBreakdown"><button type="button" class="secondary" id="orderBreakdownBack">‹ К таблице заказов</button><p class="order-breakdown-range">${esc(range)}</p><div class="order-breakdown-summary"><b>Заказов: ${orders}</b><b>Мест в бригадах: ${staff}</b></div>${selected.map(key=>{
+  const details=values.sources[key],rows=orderBreakdownRows(details);
+  return `<section class="order-breakdown-source"><div class="order-breakdown-heading"><h4>${key==='private'?'Частные':'ГБУ'}</h4>${day?`<button type="button" class="secondary" data-edit-order-breakdown="${key}">✍️ Изменить</button>`:''}</div>${rows?`<table><thead><tr><th>Категория и состав</th><th>Заказов</th><th>Мест</th></tr></thead><tbody>${rows}</tbody><tfoot><tr><th>Итого</th><td>${Number(details.total)}</td><td>${orderBreakdownStaff(details)}</td></tr></tfoot></table>`:'<p class="muted">Заказов нет</p>'}</section>`;
+ }).join('')}<p class="order-breakdown-help">Места в бригадах = число заказов × состав. Один сотрудник может участвовать в нескольких заказах.${unknown?' Заказы без категории включены в количество заказов; состав для них пока неизвестен.':''}</p></div>`);
+ const root=qs('#orderCountBreakdown'),session=cashModalGeneration;
+ const active=()=>session===cashModalGeneration&&qs('#orderCountBreakdown')===root&&!qs('#modal').classList.contains('hidden');
+ qs('#modal').scrollTop=0;
+ const back=()=>{if(active())return openPersonalTables(returnState)};
+ qs('#orderBreakdownBack').onclick=back;
+ qsa('[data-edit-order-breakdown]',root).forEach(button=>button.onclick=()=>{
+  if(!active())return;
+  openOrderCategoryCounts(button.dataset.editOrderBreakdown,day,()=>openPersonalTables(returnState));
+ });
+}
+</script></body>''', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', '''<style id="order-count-breakdown-style">
+#orderCountBreakdown #orderBreakdownBack{min-height:38px;font-size:12px}
+#orderCountBreakdown .order-breakdown-range{font-size:14px;font-weight:650;margin:12px 0}
+#orderCountBreakdown .order-breakdown-summary{display:flex;flex-wrap:wrap;gap:8px 16px;color:var(--gold);font-size:14px;padding:10px;background:var(--panel2);border-radius:10px}
+#orderCountBreakdown .order-breakdown-source{margin-top:16px;border:1px solid var(--line);border-radius:12px;padding:10px}
+#orderCountBreakdown .order-breakdown-heading{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:8px}
+#orderCountBreakdown h4{margin:0;font-size:15px}
+#orderCountBreakdown [data-edit-order-breakdown]{min-height:36px;padding:6px 10px;font-size:12px}
+#orderCountBreakdown table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}
+#orderCountBreakdown th,#orderCountBreakdown td{padding:9px 4px;border-bottom:1px solid var(--line);text-align:center}
+#orderCountBreakdown th:first-child{text-align:left;width:56%}
+#orderCountBreakdown tbody th{font-weight:650}
+#orderCountBreakdown th small{display:block;color:var(--muted);font-size:11px;font-weight:400;margin-top:3px}
+#orderCountBreakdown thead th{font-size:11px;color:var(--muted)}
+#orderCountBreakdown tfoot{color:var(--gold);font-weight:750}
+#orderCountBreakdown tfoot th,#orderCountBreakdown tfoot td{border-bottom:0}
+#orderCountBreakdown .order-breakdown-help{font-size:11px;line-height:1.4;color:var(--muted);margin:12px 0 0}
+</style></head>''', 1)
