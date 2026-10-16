@@ -9201,8 +9201,8 @@ def _all_cabinet_employee_directory_html(html):
   qs('#employeesList').innerHTML=filtered.length?directoryGroups.map(([code,label])=>{
     const members=entries.filter(entry=>entry.person.group_code===code);
     if(!members.length)return '';
-    return `<section class="staff-directory-group"><h4>${esc(label)} · ${members.length}</h4><div class="staff-directory-grid">${members.map(({person:x,index})=>
-      `<article class="staff-directory-person${canEdit?' is-editable':''}"><details><summary><span>${esc(readinessEmployeeName(x).replace(/\s+см$/,''))}${x.has_car?' 🚗':''}</span><span class="staff-contact-chevron" aria-hidden="true">›</span></summary><div class="staff-directory-contacts">${contactButtons(x)||'<small>Контакты не указаны</small>'}${cabinetAccessButton(x)}</div></details>${canEdit?`<button type="button" class="secondary" data-profile-edit="${index}" aria-label="Изменить данные сотрудника">✍🏻</button>`:''}</article>`
+    return `<section class="staff-directory-group"><h4>${esc(label)} · ${members.length}</h4><div class="staff-directory-grid">${members.map(({person:x,index},groupIndex)=>
+      `<article class="staff-directory-person${canEdit?' is-editable':''}"><details><summary><span><span class="staff-directory-number">${Math.floor(groupIndex/2)+1+(groupIndex%2?Math.ceil(members.length/2):0)}.</span> ${esc(readinessEmployeeName(x).replace(/\s+см$/,''))}${x.has_car?' 🚗':''}</span><span class="staff-contact-chevron" aria-hidden="true">›</span></summary><div class="staff-directory-contacts">${contactButtons(x)||'<small>Контакты не указаны</small>'}${cabinetAccessButton(x)}</div></details>${canEdit?`<button type="button" class="secondary" data-profile-edit="${index}" aria-label="Изменить данные сотрудника">✍🏻</button>`:''}</article>`
     ).join('')}</div></section>`;
   }).join(''):'<div class="empty">Ничего не найдено</div>';
 
@@ -9226,6 +9226,7 @@ def _all_cabinet_employee_directory_html(html):
 #employeesList .staff-directory-person summary{display:flex;align-items:center;justify-content:space-between;min-height:32px;gap:3px;font-size:11px;font-weight:650;line-height:1.25;cursor:pointer;list-style:none}
 #employeesList .staff-directory-person summary::-webkit-details-marker{display:none}
 #employeesList .staff-directory-person summary>span:first-child{min-width:0;overflow-wrap:anywhere}
+#employeesList .staff-directory-number{color:var(--muted);font-weight:600;white-space:nowrap;font-variant-numeric:tabular-nums}
 #employeesList .staff-contact-chevron{color:var(--muted);flex-shrink:0}
 #employeesList .staff-directory-person details[open] .staff-contact-chevron{transform:rotate(90deg)}
 #employeesList .staff-directory-person>button{width:32px;min-width:32px;min-height:32px;padding:2px;font-size:15px;border-radius:7px}
