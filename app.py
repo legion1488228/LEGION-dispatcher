@@ -8901,7 +8901,7 @@ def _compact_owner_expanded_cash_html(html):
 </style>
 <script>
 function ownerCashControls(month){
- return `<div class="owner-cash-controls"><button type="button" class="secondary" onclick="rememberCashTablePosition();openPersonalTables(earningsReturnState)" aria-label="Назад к заработку">←</button><button type="button" class="secondary" id="cashPrevMonth" aria-label="Предыдущий месяц">‹</button><label><span class="hidden">Месяц кассы</span><input id="cashMonth" type="month" value="${esc(month)}" aria-label="Месяц кассы"></label><button type="button" class="secondary" id="cashNextMonth" aria-label="Следующий месяц">›</button></div><div class="owner-cash-ranges"><button type="button" class="primary" data-cash-range="month">Месяц</button></div><div id="cashMonthTabs"></div><div id="cashTableBody">Загрузка…</div>`;
+ return `<div class="owner-cash-controls"><button type="button" class="secondary" onclick="rememberCashTablePosition();openPersonalTables(earningsReturnState)" aria-label="Назад к заработку">←</button><button type="button" class="secondary" id="cashPrevMonth" aria-label="Предыдущий месяц">‹</button><label><span class="hidden">Месяц кассы</span><input id="cashMonth" type="month" value="${esc(month)}" aria-label="Месяц кассы"></label><button type="button" class="secondary" id="cashNextMonth" aria-label="Следующий месяц">›</button></div><div class="owner-cash-ranges"><button type="button" class="primary" data-cash-range="month">Месяц</button></div><div id="cashMonthTools"><div id="cashMonthTabs"></div></div><div id="cashTableBody">Загрузка…</div>`;
 }
 function ownerCashShortName(label){
  const parts=String(label||'').trim().split(/\s+/),first=parts.shift()||'—';
@@ -9902,7 +9902,10 @@ def _cash_reconciliation_cards_html(html):
     branch = r'''
       if(qs('[data-cash-note-editor]')&&(body.dataset.noteMonth!==cashMonth||body.dataset.noteRange!==cashRange)&&typeof cashNoteDismiss==='function')cashNoteDismiss();
       qs('#modal').classList.toggle('cash-reconciliation-open',compactCash&&cashRange!=='month');
-      if(cashRange==='month')qs('.cash-reconciliation-toolbar',qs('#modal .modal-head'))?.remove();
+      if(cashRange==='month'){
+        qs('.cash-reconciliation-toolbar',qs('#modal .modal-head'))?.remove();
+        qs('.cash-notes-send-row',qs('#modal'))?.remove();
+      }
       if(compactCash&&cashRange!=='month'){
         const half=cashRange==='first'?1:2;
         if(qs('[data-cash-note-editor]')&&body.dataset.noteMonth===cashMonth&&body.dataset.noteRange===cashRange)return;
@@ -9915,7 +9918,12 @@ def _cash_reconciliation_cards_html(html):
         const cashHead=qs('#modal .modal-head');
         qs('.cash-reconciliation-toolbar',cashHead)?.remove();
         cashHead.insertBefore(qs('.cash-reconciliation-toolbar',body),qs('#closeModal',cashHead));
-        const notesButton=qs('#cashNotesSend',body);
+        const monthTools=qs('#cashMonthTools');
+        if(monthTools){
+          qs('.cash-notes-send-row',monthTools)?.remove();
+          monthTools.append(qs('.cash-notes-send-row',body));
+        }
+        const notesButton=qs('#cashNotesSend',qs('#modal'));
         if(notesButton)notesButton.onclick=async()=>{
           if(!cashActive()||cashMarkSaving||cashNotesSending||!report.can_mark)return;
           cashNotesSending=true;cashMarkSaving=true;notesButton.disabled=true;notesButton.textContent='Отправка…';
@@ -10062,10 +10070,15 @@ function fitCashReconciliation(){
  const modal=qs('#modal'),grid=qs('.cash-reconciliation-grid',modal);
  if(!modal?.classList.contains('cash-reconciliation-open')||!grid)return;
  const count=grid.children.length;if(!count)return;
- // Cards follow their content instead of stretching to the modal height.
+ // Keep the normal type size whenever the cards fit. On shorter screens,
+ // reduce it only as far as 10px; leave scrolling available for larger lists.
  grid.style.setProperty('--reconcile-cols',Math.min(4,count));
- grid.style.setProperty('--reconcile-font','12px');
  grid.style.gridTemplateRows='none';grid.style.height='auto';
+ const body=qs('#cashTableBody',modal);
+ for(let font=12;font>=10;font--){
+   grid.style.setProperty('--reconcile-font',font+'px');
+   if(!body||body.scrollHeight<=body.clientHeight+1)break;
+ }
 }
 window.addEventListener('resize',fitCashReconciliation);
 window.visualViewport?.addEventListener('resize',fitCashReconciliation);
@@ -10616,3 +10629,29 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', '''<style id="cash-note
 #modal #cashNotesSendStatus{flex-shrink:0;margin:0 0 6px;font-size:10px;line-height:1.3;white-space:pre-line;overflow-wrap:anywhere}
 #modal #cashNotesSendStatus[hidden]{display:none}
 </style></head>''', 1)
+
+
+# Keep these scoped overrides after the base owner-cash styles in the document.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style id="cash-compact-controls-style">
+#modal.owner-cash-modal.cash-reconciliation-open>.modal-head{margin:0 0 3px!important;min-height:30px}
+#modal.owner-cash-modal.cash-reconciliation-open .owner-cash-controls{display:grid;grid-template-columns:28px 28px minmax(0,1fr) 28px;gap:4px;min-height:28px;margin:0 0 3px!important}
+#modal.owner-cash-modal.cash-reconciliation-open .owner-cash-controls>button{width:28px;min-width:28px;height:28px;min-height:28px;padding:2px}
+#modal.owner-cash-modal.cash-reconciliation-open .owner-cash-controls>label{width:100%;min-width:0;margin:0}
+#modal.owner-cash-modal.cash-reconciliation-open #cashMonth{height:28px;min-height:28px;padding:2px 5px;font-size:13px}
+#modal.owner-cash-modal.cash-reconciliation-open .owner-cash-ranges{gap:4px;margin:0 0 3px!important}
+#modal.owner-cash-modal.cash-reconciliation-open button[data-cash-range]{min-height:26px;padding:3px 6px}
+#modal.owner-cash-modal #cashMonthTools{min-width:0}
+#modal.owner-cash-modal.cash-reconciliation-open #cashMonthTools{display:flex;align-items:center;gap:5px;margin:0 0 4px;min-width:0;flex-shrink:0}
+#modal.owner-cash-modal.cash-reconciliation-open #cashMonthTabs{flex:1;min-width:0;margin:0!important;gap:4px}
+#modal.owner-cash-modal.cash-reconciliation-open #cashMonthTabs button{min-height:26px;padding:3px 5px;font-size:10px}
+#modal.owner-cash-modal.cash-reconciliation-open .cash-notes-send-row{margin:0;gap:3px;flex-shrink:0}
+#modal.owner-cash-modal.cash-reconciliation-open .cash-notes-send-row>span{font-size:9px;white-space:nowrap}
+#modal.owner-cash-modal.cash-reconciliation-open #cashNotesSend{min-height:28px;padding:4px 6px;font-size:10px}
+#modal.owner-cash-modal.cash-reconciliation-open .cash-reconciliation-grid{gap:4px}
+#modal.owner-cash-modal.cash-reconciliation-open .cash-reconciliation-card{padding:3px}
+#modal.owner-cash-modal.cash-reconciliation-open .cash-reconciliation-total{margin-top:2px}
+#modal.owner-cash-modal.cash-reconciliation-open .cash-reconciliation-legend{margin:3px 0 0;font-size:9px}
+@media(max-width:359px){
+ #modal.owner-cash-modal.cash-reconciliation-open .cash-notes-send-row>span{display:none}
+}
+</style></body>''', 1)
