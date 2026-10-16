@@ -9579,7 +9579,7 @@ def cash_reconciliation(month: str, half: int, db: Session = Depends(get_db),
     items = []
     for uid, employee in people.items():
         parts = str(employee.full_name or '').split()
-        name = ' '.join(str(x) for x in (parts[0] if parts else 'Бригадир', employee.metro, employee.height_cm) if x)
+        name = ' '.join(str(x) for x in (parts[0] if parts else 'Бригадир', employee.metro) if x)
         values = sums[uid]
         mark = marks.get(uid)
         items.append({'tg_id':uid,'name':name,**values,'total':values['cash']+values['kickback'],
