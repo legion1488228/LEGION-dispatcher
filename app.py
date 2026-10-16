@@ -3243,6 +3243,54 @@ def create_gbu_drafts(items: list[GbuDraft], db: Session = Depends(get_db), user
 
 # ---------- GBU agent contacts ----------
 
+class GbuAgentContactCreate(BaseModel):
+    full_name: StrictStr = Field(min_length=1, max_length=200)
+    phone: StrictStr = Field(min_length=1, max_length=40)
+
+
+def _gbu_contact_phone(value: str) -> str:
+    raw = value.strip()
+    if not re.fullmatch(r"[+0-9\s()\-]+", raw):
+        raise HTTPException(422, "Введите корректный телефон агента")
+    digits = re.sub(r"[^0-9]", "", raw)
+    if len(digits) == 10 and not raw.startswith("+"):
+        digits = "7" + digits
+    elif len(digits) == 11 and digits.startswith("8") and not raw.startswith("+"):
+        digits = "7" + digits[1:]
+    if not re.fullmatch(r"[1-9][0-9]{7,14}", digits):
+        raise HTTPException(422, "Введите корректный телефон агента с кодом страны")
+    if "+" in raw and (not raw.startswith("+") or raw.count("+") != 1):
+        raise HTTPException(422, "Введите корректный телефон агента")
+    return "+" + digits
+
+
+@app.post("/api/gbu/agents", status_code=201)
+def create_gbu_agent(data: GbuAgentContactCreate, db: Session = Depends(get_db),
+                     user: TelegramUser = Depends(require_admin)):
+    if cabinet_kind(db, user.id) not in {"owner", "assistant"}:
+        raise HTTPException(403, "Добавлять агентов могут только владелец и диспетчеры")
+    full_name = " ".join(data.full_name.split())
+    if not full_name or any(ord(ch) < 32 for ch in full_name):
+        raise HTTPException(422, "Введите ФИО агента")
+    phone = _gbu_contact_phone(data.phone)
+    # Serialize duplicate checks across dispatcher sessions on the production DB.
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtext('legion:gbu-agent-create'))"))
+    for row in db.scalars(select(GbuAgentContact)):
+        same_name = " ".join(str(row.full_name or "").split()).casefold() == full_name.casefold()
+        try:
+            same_phone = _gbu_contact_phone(str(row.phone or "")) == phone
+        except HTTPException:
+            same_phone = False
+        if same_name or same_phone:
+            raise HTTPException(409, "Агент с таким ФИО или телефоном уже есть в справочнике")
+    row = GbuAgentContact(full_name=full_name, phone=phone, active=True)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"id": row.id, "full_name": row.full_name, "phone": row.phone, "source_page": row.source_page}
+
+
 @app.get("/api/gbu/agents")
 def gbu_agents(
     search: str = "",
@@ -9222,9 +9270,38 @@ async function copyGbuAgentPhone(value){
  return copied;
 }
 async function openGbuAgents(){
- showModal('⬛ Агенты ГБУ',`<div id="gbuAgentDirectory"><p class="muted gbu-agent-help">Нажмите номер, чтобы скопировать.</p><input class="search" id="gbuAgentSearch" placeholder="ФИО или номер" aria-label="Поиск агента по ФИО или номеру"><div id="gbuAgentsList" class="gbu-agent-grid"><div class="empty">Загрузка…</div></div></div>`);
+ showModal('⬛ Агенты ГБУ',`<div id="gbuAgentDirectory"><form id="gbuAgentAddForm" class="hidden"><div class="field"><label for="gbuAgentName">ФИО агента</label><input class="search" id="gbuAgentName" name="full_name" placeholder="Фамилия Имя Отчество" autocomplete="name" maxlength="200" required></div><div class="field"><label for="gbuAgentPhone">Телефон агента</label><input class="search" id="gbuAgentPhone" name="phone" type="tel" inputmode="tel" placeholder="+7 999 123-45-67" autocomplete="tel" maxlength="40" required></div><p id="gbuAgentAddError" role="alert" class="hidden"></p><div class="action-row"><button type="button" class="secondary" id="gbuAgentAddCancel">Отмена</button><button type="submit" class="primary" id="gbuAgentSave">Сохранить</button></div></form><p class="muted gbu-agent-help">Нажмите номер, чтобы скопировать.</p><input class="search" id="gbuAgentSearch" placeholder="ФИО или номер" aria-label="Поиск агента по ФИО или номеру"><div id="gbuAgentsList" class="gbu-agent-grid"><div class="empty">Загрузка…</div></div></div>`);
  const session=cashModalGeneration,search=qs('#gbuAgentSearch'),root=qs('#gbuAgentsList');
  const active=()=>session===cashModalGeneration&&qs('#gbuAgentsList')===root&&!qs('#modal').classList.contains('hidden');
+ const form=qs('#gbuAgentAddForm'),name=qs('#gbuAgentName'),phone=qs('#gbuAgentPhone'),error=qs('#gbuAgentAddError'),save=qs('#gbuAgentSave');
+ let saving=false;
+ const canAdd=state.bootstrap?.cabinet_only===false&&['owner','assistant'].includes(state.bootstrap?.cabinet_kind);
+ if(canAdd){
+  const add=document.createElement('button');
+  add.id='gbuAgentAddBtn';add.type='button';add.className='primary small';add.textContent='＋ Добавить';add.setAttribute('aria-expanded','false');add.setAttribute('aria-controls','gbuAgentAddForm');
+  qs('#modal .modal-head').insertBefore(add,qs('#closeModal'));
+  function toggleForm(open){
+   if(saving||!active())return;
+   form.classList.toggle('hidden',!open);add.setAttribute('aria-expanded',String(open));
+   error.classList.add('hidden');
+   if(open){qs('#modal').scrollTop=0;name.focus()}else add.focus({preventScroll:true});
+  }
+  add.onclick=()=>toggleForm(form.classList.contains('hidden'));
+  qs('#gbuAgentAddCancel').onclick=()=>toggleForm(false);
+  form.onsubmit=async event=>{
+   event.preventDefault();if(saving||!active())return;
+   const full_name=name.value.trim(),number=phone.value.trim();
+   if(!full_name||!number){error.textContent='Заполните ФИО и телефон агента';error.classList.remove('hidden');return}
+   saving=true;save.disabled=true;add.disabled=true;qs('#gbuAgentAddCancel').disabled=true;name.disabled=true;phone.disabled=true;save.textContent='Сохранение…';error.classList.add('hidden');
+   try{
+    await api('/api/gbu/agents',{method:'POST',body:JSON.stringify({full_name,phone:number})});
+    if(!active())return;
+    form.reset();form.classList.add('hidden');add.setAttribute('aria-expanded','false');search.value='';
+    toast('Агент добавлен');await draw();
+   }catch(e){if(active()){error.textContent=e.message||'Не удалось сохранить агента';error.classList.remove('hidden')}}
+   finally{saving=false;if(active()){save.disabled=false;add.disabled=false;qs('#gbuAgentAddCancel').disabled=false;name.disabled=false;phone.disabled=false;save.textContent='Сохранить'}}
+  };
+ }
  let request=0;
  async function draw(){
   const id=++request,q=encodeURIComponent(search.value.trim());
@@ -9247,6 +9324,14 @@ async function openGbuAgents(){
     return html.replace('</head>', r'''
 <style id="compact-gbu-agent-directory-style">
 #modal:has(#gbuAgentDirectory){padding:10px;left:6px;right:6px;width:auto;max-width:1100px;margin:0 auto}
+#modal:has(#gbuAgentDirectory) .modal-head{gap:6px;margin-bottom:8px}
+#modal:has(#gbuAgentDirectory) .modal-head h3{flex:1;min-width:0;margin:0;font-size:18px;overflow-wrap:anywhere}
+#gbuAgentAddBtn{flex:none;white-space:nowrap;min-height:36px;padding:8px 10px}
+#modal:has(#gbuAgentDirectory) .close-btn{flex:none}
+#gbuAgentAddForm{margin-bottom:10px;padding:10px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+#gbuAgentAddForm input.search{font-size:16px;min-height:42px}
+#gbuAgentAddError{color:var(--red);font-size:13px;margin:6px 0 10px}
+#gbuAgentAddForm .action-row button{min-height:42px}
 #gbuAgentDirectory .gbu-agent-help{margin:0 0 4px;font-size:11px}
 #gbuAgentDirectory .search{margin:0 0 5px;min-height:36px;padding:6px 8px;font-size:13px}
 #gbuAgentsList.gbu-agent-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}
