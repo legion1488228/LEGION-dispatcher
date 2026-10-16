@@ -9671,12 +9671,12 @@ def _cash_reconciliation_cards_html(html):
 .cash-reconciliation-toolbar{display:flex;align-items:center;justify-content:space-between;gap:5px;font-size:11px;color:var(--muted);margin:5px 0}
 .cash-reconciliation-toolbar strong{color:var(--text);font-size:12px}
 .cash-reconciliation-grid{display:grid;grid-template-columns:repeat(var(--reconcile-cols,4),minmax(0,1fr));grid-auto-rows:auto;align-items:start;align-content:start;gap:5px;min-height:0;flex-shrink:0}
-.cash-reconciliation-card{min-width:0;min-height:0;padding:4px;border:1px solid var(--line);border-radius:10px;background:var(--panel);font-size:var(--reconcile-font,10px);line-height:1.15;display:flex;flex-direction:column;font-variant-numeric:tabular-nums;white-space:normal;overflow:hidden}
+.cash-reconciliation-card{container-type:inline-size;min-width:0;min-height:0;padding:4px;border:1px solid var(--line);border-radius:10px;background:var(--panel);font-size:var(--reconcile-font,10px);line-height:1.15;display:flex;flex-direction:column;font-variant-numeric:tabular-nums;white-space:normal;overflow:hidden}
 .cash-reconciliation-card.is-checked{border-color:#377b50}
-.cash-reconciliation-name{display:grid;grid-template-columns:minmax(0,1fr) 23px;align-items:start;column-gap:2px;row-gap:1px;min-width:0;white-space:normal;overflow-wrap:anywhere;margin-bottom:3px}
-.cash-reconciliation-name strong{grid-column:1;grid-row:1;min-width:0;display:block;white-space:normal;overflow-wrap:anywhere;font-size:inherit;font-weight:600}
+.cash-reconciliation-name{display:grid;grid-template-columns:minmax(0,1fr) 20px;align-items:center;column-gap:2px;row-gap:1px;min-width:0;white-space:normal;overflow-wrap:anywhere;margin-bottom:3px}
+.cash-reconciliation-name strong{grid-column:1;grid-row:1;min-width:0;display:block;white-space:nowrap;overflow-wrap:normal;font-size:9px;font-size:clamp(8px,10cqi,12px);letter-spacing:-.2px;font-weight:650}
 .cash-reconciliation-place{grid-column:1/-1;grid-row:2;min-width:0;display:block;white-space:normal;overflow-wrap:anywhere}
-.cash-reconciliation-mark{position:static;grid-column:2;grid-row:1;justify-self:end;border:0!important;background:transparent!important;padding:0!important;width:23px;min-width:23px;min-height:23px!important;height:23px;font-size:17px!important;line-height:23px;display:grid;place-items:center;cursor:pointer;overflow:hidden}
+.cash-reconciliation-mark{position:static;grid-column:2;grid-row:1;justify-self:end;border:0!important;background:transparent!important;padding:0!important;width:20px;min-width:20px;min-height:23px!important;height:23px;font-size:16px!important;line-height:23px;display:grid;place-items:center;cursor:pointer;overflow:hidden}
 .cash-reconciliation-mark:disabled{opacity:.6}.cash-reconciliation-mark[aria-readonly=true]{cursor:default}
 .cash-reconciliation-line{display:flex;align-items:baseline;justify-content:space-between;gap:2px;margin:0;white-space:nowrap}
 .cash-reconciliation-line span{color:var(--muted)}.cash-reconciliation-line b{font-weight:500}
