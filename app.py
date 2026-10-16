@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel, Field, StrictInt, StrictBool
+from pydantic import BaseModel, Field, StrictInt, StrictBool, StrictStr
 from sqlalchemy import and_, func, or_, select, update, inspect as sa_inspect, text
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import Column, Integer, BigInteger, String, Date, DateTime, Boolean, UniqueConstraint
@@ -9516,6 +9516,24 @@ class CashReconciliationMark(BaseModel):
     version: StrictInt = Field(ge=0)
 
 
+class CashPeriodReceipt(Base):
+    __tablename__ = 'cash_period_receipt'
+    period_start = Column(Date, primary_key=True)
+    tg_id = Column(BigInteger, primary_key=True)
+    received = Column(Boolean, nullable=False, default=False)
+    comment = Column(String(240), nullable=False, default='')
+    version = Column(Integer, nullable=False, default=1)
+    updated_by = Column(BigInteger, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class CashReceiptChange(BaseModel):
+    field: Literal['received', 'comment']
+    received: StrictBool = False
+    comment: StrictStr = Field(default='', max_length=240)
+    version: StrictInt = Field(ge=0)
+
+
 def cash_reconciliation_period(month, half):
     import calendar
     try:
@@ -9577,12 +9595,18 @@ def cash_reconciliation(month: str, half: int, db: Session = Depends(get_db),
     marks = {m.tg_id:m for m in db.scalars(select(CashPeriodReconciliation).where(
         CashPeriodReconciliation.period_start == start))}
     items = []
+    receipts = {r.tg_id:r for r in db.scalars(select(CashPeriodReceipt).where(
+        CashPeriodReceipt.period_start == start))}
     for uid, employee in people.items():
         parts = str(employee.full_name or '').split()
         name = ' '.join(str(x) for x in (parts[0] if parts else 'Бригадир', employee.metro) if x)
         values = sums[uid]
         mark = marks.get(uid)
+        receipt = receipts.get(uid)
         items.append({'tg_id':uid,'name':name,**values,'total':values['cash']+values['kickback'],
+            'received':bool(receipt.received) if receipt else False,
+            'comment':receipt.comment if receipt else '',
+            'receipt_version':receipt.version if receipt else 0,
             'checked':bool(mark.checked if mark else uid in automatic),
             'source':mark.source if mark else 'auto' if uid in automatic else None,
             'version':mark.version if mark else 0})
@@ -9616,6 +9640,34 @@ def cash_reconciliation_mark(tg_id: int, month: str, half: int, change: CashReco
     return {'checked':mark.checked,'source':mark.source,'version':mark.version}
 
 
+@app.put('/api/cash/receipt/{tg_id}')
+def cash_receipt_update(tg_id: int, month: str, half: int, change: CashReceiptChange,
+        db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    if not _is_cabinet_owner(db, user.id):
+        raise HTTPException(403, 'Отметка сдачи и комментарий доступны только владельцу')
+    start, _ = cash_reconciliation_period(month, half)
+    # Serialize first creation as well as edits across workers on PostgreSQL.
+    db.scalar(select(Employee).where(Employee.tg_id == tg_id).with_for_update().limit(1))
+    if tg_id not in {int(e.tg_id) for e in cash_reconciliation_cashiers(db)}:
+        raise HTTPException(404, 'Кассовый бригадир не найден')
+    receipt = db.get(CashPeriodReceipt, (start, tg_id))
+    if (receipt.version if receipt else 0) != change.version:
+        raise HTTPException(409, 'Данные уже изменились. Закройте редактор и обновите карточки')
+    if receipt is None:
+        receipt = CashPeriodReceipt(period_start=start, tg_id=tg_id, received=False,
+            comment='', version=0)
+        db.add(receipt)
+    if change.field == 'received':
+        receipt.received = change.received
+    else:
+        receipt.comment = change.comment.strip()
+    receipt.version += 1
+    receipt.updated_by = user.id
+    receipt.updated_at = datetime.utcnow()
+    db.commit()
+    return {'received':receipt.received, 'comment':receipt.comment, 'receipt_version':receipt.version}
+
+
 def _cash_reconciliation_cards_html(html):
     html = html.replace("if(!body||!table||!modal||modal.classList.contains('hidden'))return;",
         "if(!body||(!table&&!qs('.cash-reconciliation-grid',body))||!modal||modal.classList.contains('hidden'))return;",1)
@@ -9642,9 +9694,39 @@ def _cash_reconciliation_cards_html(html):
       qs('#modal').classList.toggle('cash-reconciliation-open',compactCash&&cashRange!=='month');
       if(compactCash&&cashRange!=='month'){
         const half=cashRange==='first'?1:2;
+        if(qs('[data-cash-note-editor]',body)&&body.dataset.noteMonth===cashMonth&&body.dataset.noteRange===cashRange)return;
         const report=await api(`/api/cash/reconciliation?month=${encodeURIComponent(cashMonth)}&half=${half}`,{cache:'no-store'});
         if(!cashActive()||request!==cashRequest||requestedMonth!==cashMonth||requestedRange!==cashRange)return;
         body.innerHTML=ownerCashReconciliationHtml(report);
+        qsa('[data-cash-received]',body).forEach(button=>button.onclick=async()=>{
+          if(cashMarkSaving||!cashActive()||!report.can_mark)return;
+          const item=report.items.find(x=>String(x.tg_id)===button.dataset.cashReceived);if(!item)return;
+          cashMarkSaving=true;button.disabled=true;
+          try{
+            await api(`/api/cash/receipt/${item.tg_id}?month=${encodeURIComponent(report.month)}&half=${report.half}`,{method:'PUT',body:JSON.stringify({field:'received',received:!item.received,version:item.receipt_version||0})});
+            toast(item.received?'Отметка сдачи снята':'Касса отмечена как сданная ✅');
+          }catch(error){toast(error.message)}
+          finally{cashMarkSaving=false;if(cashActive())await drawCash()}
+        });
+        qsa('[data-cash-note]',body).forEach(button=>button.onclick=()=>{
+          if(cashMarkSaving||!cashActive()||!report.can_mark)return;
+          const item=report.items.find(x=>String(x.tg_id)===button.dataset.cashNote);if(!item)return;
+          if(qs('[data-cash-note-editor]',body)){toast('Сначала сохраните или закройте открытый комментарий');return}
+          cashRequest++;body.dataset.noteMonth=report.month;body.dataset.noteRange=cashRange;
+          const editor=document.createElement('form');editor.className='cash-note-editor';editor.setAttribute('data-cash-note-editor','');
+          editor.innerHTML=`<label>Комментарий<textarea maxlength="240" rows="3" aria-label="Комментарий к кассе">${esc(item.comment||'')}</textarea></label><div><button type="submit" class="primary">Сохранить</button><button type="button" class="secondary" data-note-cancel>Отмена</button></div><p role="status"></p>`;
+          button.closest('.cash-reconciliation-card').append(editor);const input=qs('textarea',editor);input.focus();
+          qs('[data-note-cancel]',editor).onclick=()=>{editor.remove();if(cashActive())drawCash()};
+          editor.onsubmit=async event=>{
+            event.preventDefault();if(cashMarkSaving||!cashActive())return;
+            cashMarkSaving=true;qsa('button,textarea',editor).forEach(x=>x.disabled=true);
+            try{
+              await api(`/api/cash/receipt/${item.tg_id}?month=${encodeURIComponent(report.month)}&half=${report.half}`,{method:'PUT',body:JSON.stringify({field:'comment',comment:input.value,version:item.receipt_version||0})});
+              editor.remove();toast('Комментарий сохранён');
+            }catch(error){qs('[role=status]',editor).textContent=error.message}
+            finally{cashMarkSaving=false;qsa('button,textarea',editor).forEach(x=>x.disabled=false);if(cashActive()&&!editor.isConnected)await drawCash()}
+          };
+        });
         qsa('[data-reconcile-mark]',body).forEach(button=>button.onclick=async()=>{
           if(cashMarkSaving||!cashActive())return;
           const item=report.items.find(item=>String(item.tg_id)===button.dataset.reconcileMark);
@@ -9683,11 +9765,21 @@ def _cash_reconciliation_cards_html(html):
 .cash-reconciliation-total{margin-top:4px;padding-top:2px;border-top:1px solid var(--line);color:var(--gold);font-weight:700}
 .cash-reconciliation-total span{color:var(--gold)}.cash-reconciliation-total b{font-weight:750}
 .cash-reconciliation-legend{margin:5px 0 0;font-size:10px;color:var(--muted);line-height:1.3}
+.cash-receipt-actions{display:flex;align-items:center;justify-content:space-between;gap:2px;margin-top:3px;border-top:1px solid var(--line);padding-top:3px}
+.cash-receipt-actions button{border:1px solid var(--line);border-radius:5px;background:var(--panel2);color:var(--text);padding:2px;min-height:26px;cursor:pointer;font-size:10px;white-space:nowrap}
+.cash-receipt-actions .cash-received{flex:1;border-color:transparent;background:transparent;text-align:left}
+.cash-receipt-actions .cash-note{width:25px;flex-shrink:0;font-size:14px}
+.cash-receipt-actions .cash-note.has-note{background:var(--gold);color:var(--panel)}
+.cash-note-editor{margin-top:5px;font-size:11px;min-width:0}
+.cash-note-editor textarea{display:block;box-sizing:border-box;width:100%;min-width:0;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:4px;padding:3px;font-size:12px;resize:vertical}
+.cash-note-editor>div{display:flex;flex-wrap:wrap;gap:3px;margin-top:3px}
+.cash-note-editor button{font-size:10px;padding:5px 3px;border-radius:5px}
+.cash-note-editor p{color:var(--red);white-space:normal;overflow-wrap:anywhere}
 </style></head>''',1).replace('</body>',r'''<script>
 function ownerCashReconciliationHtml(report){
  const number=value=>Number(value||0).toLocaleString('ru-RU');
- const cards=(report.items||[]).map((item,index)=>{const parts=String(item.name||'').trim().split(/\s+/),first=parts.shift()||'Бригадир',place=parts.join(' ');return `<article class="cash-reconciliation-card${item.checked?' is-checked':''}"><div class="cash-reconciliation-name"><strong>${index+1}. ${esc(first)}</strong><span class="cash-reconciliation-place">${esc(place)}</span>${report.can_mark?`<button type="button" class="cash-reconciliation-mark" data-reconcile-mark="${item.tg_id}" aria-pressed="${item.checked}" aria-label="${item.checked?'Снять отметку':'Отметить вручную'}: ${esc(item.name)}" title="${item.source==='manual'?'Отмечено вручную':item.checked?'Подсчёт отправлен из личного кабинета':'Подсчёт не отправлен'}">${item.checked?'✅':'⬜️'}</button>`:`<span class="cash-reconciliation-mark" aria-readonly="true">${item.checked?'✅':'⬜️'}</span>`}</div><div class="cash-reconciliation-line"><span>Заказов:</span><b>${number(item.orders)}</b></div><div class="cash-reconciliation-line"><span>Касса:</span><b>${number(item.cash)}</b></div><div class="cash-reconciliation-line"><span>Откат:</span><b>${number(item.kickback)}</b></div><div class="cash-reconciliation-line cash-reconciliation-total"><span>Итого:</span><b>${number(item.total)}</b></div></article>`}).join('');
- return `<div class="cash-reconciliation-toolbar"><span>Суммы в ₽</span><strong>Сверились: ${report.checked_count} из ${report.items.length}</strong><button type="button" class="secondary" id="cashReminder" ${cashReminderSending?'disabled':''}>🔔 Сверка</button></div>${cards?`<div class="cash-reconciliation-grid">${cards}</div>`:'<div class="empty">Кассовых бригадиров пока нет</div>'}<p class="cash-reconciliation-legend">⬜️ Не сверился · ✅ Подсчёт отправлен${report.can_mark?' или отмечено вами вручную':''}</p>`;
+ const cards=(report.items||[]).map((item,index)=>{const parts=String(item.name||'').trim().split(/\s+/),first=parts.shift()||'Бригадир',place=parts.join(' ');return `<article class="cash-reconciliation-card${item.checked?' is-checked':''}"><div class="cash-reconciliation-name"><strong>${index+1}. ${esc(first)}</strong><span class="cash-reconciliation-place">${esc(place)}</span>${report.can_mark?`<button type="button" class="cash-reconciliation-mark" data-reconcile-mark="${item.tg_id}" aria-pressed="${item.checked}" aria-label="${item.checked?'Снять отметку':'Отметить вручную'}: ${esc(item.name)}" title="${item.source==='manual'?'Отмечено вручную':item.checked?'Подсчёт отправлен из личного кабинета':'Подсчёт не отправлен'}">${item.checked?'✅':'⬜️'}</button>`:`<span class="cash-reconciliation-mark" aria-readonly="true">${item.checked?'✅':'⬜️'}</span>`}</div><div class="cash-reconciliation-line"><span>Заказов:</span><b>${number(item.orders)}</b></div><div class="cash-reconciliation-line"><span>Касса:</span><b>${number(item.cash)}</b></div><div class="cash-reconciliation-line"><span>Откат:</span><b>${number(item.kickback)}</b></div><div class="cash-reconciliation-line cash-reconciliation-total"><span>Итого:</span><b>${number(item.total)}</b></div><div class="cash-receipt-actions">${report.can_mark?`<button type="button" class="cash-received" data-cash-received="${item.tg_id}" aria-pressed="${!!item.received}" aria-label="${item.received?'Снять отметку сдачи':'Касса сдана'}: ${esc(item.name)}">Сдана ${item.received?'✅':'⬜️'}</button><button type="button" class="cash-note${item.comment?' has-note':''}" data-cash-note="${item.tg_id}" aria-label="Комментарий: ${esc(item.name)}" title="${esc(item.comment||'Добавить комментарий')}">📝</button>`:`<span>Сдана ${item.received?'✅':'⬜️'}</span>`}</div></article>`}).join('');
+ return `<div class="cash-reconciliation-toolbar"><span>Суммы в ₽</span><strong>Сверились: ${report.checked_count} из ${report.items.length}</strong><button type="button" class="secondary" id="cashReminder" ${cashReminderSending?'disabled':''}>🔔 Сверка</button></div>${cards?`<div class="cash-reconciliation-grid">${cards}</div>`:'<div class="empty">Кассовых бригадиров пока нет</div>'}<p class="cash-reconciliation-legend">✅ сверху — сверился · Сдана — деньги получены · 📝 — комментарий</p>`;
 }
 function fitCashReconciliation(){
  const modal=qs('#modal'),grid=qs('.cash-reconciliation-grid',modal);
