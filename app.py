@@ -9797,7 +9797,11 @@ def _warm_light_interface_html(html):
     colors('#000b', '#302c2433')
     colors('#000', '#302c2426')
     html = re.sub(r'(?<![\w-])#[0-9a-fA-F]{3,8}\b',
-                  lambda match: palette.get(match.group().lower(), match.group()), html)
+                  lambda match: ('var(--legion-color-' + match.group()[1:].lower() + ')' if match.group().lower() in palette else match.group()), html)
+    light_colors = ';'.join('--legion-color-' + key[1:] + ':' + value for key, value in palette.items())
+    dark_colors = ';'.join('--legion-color-' + key[1:] + ':' + key for key in palette)
+    html = html.replace('</head>', '<style id="legion-legacy-palette">:root{' + light_colors + '}:root[data-legion-theme="dark"]{' + dark_colors + '}</style></head>', 1)
+    html = re.sub(r'(<meta name="theme-color" content=")[^"]*(")', r'\g<1>#e8e7e3\2', html, count=1)
     html = html.replace('rgba(13,13,15,.95)', 'rgba(245,243,238,.97)')
     html = html.replace('rgba(0,0,0,.62)', 'rgba(48,51,48,.24)')
     html = html.replace('rgba(0,0,0,.6)', 'rgba(48,51,48,.12)')
@@ -9831,9 +9835,10 @@ input,select,textarea{color-scheme:light}
     return html.replace('</body>', r'''<script>
 function applyLegionLightTelegramChrome(){
  const webApp=window.Telegram?.WebApp;
- try{webApp?.setHeaderColor?.('#e8e7e3')}catch{}
- try{webApp?.setBackgroundColor?.('#e8e7e3')}catch{}
- try{webApp?.setBottomBarColor?.('#f5f3ee')}catch{}
+ const dark=document.documentElement.dataset.legionTheme==='dark',bg=dark?'#09090b':'#e8e7e3',panel=dark?'#121215':'#f5f3ee';
+ try{webApp?.setHeaderColor?.(bg)}catch{}
+ try{webApp?.setBackgroundColor?.(bg)}catch{}
+ try{webApp?.setBottomBarColor?.(panel)}catch{}
 }
 applyLegionLightTelegramChrome();
 try{window.Telegram?.WebApp?.onEvent?.('themeChanged',applyLegionLightTelegramChrome)}catch{}
@@ -9844,3 +9849,85 @@ INLINE_INDEX_HTML = _warm_light_interface_html(INLINE_INDEX_HTML)
 
 
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', '<style id="control-spacing-fix">.owner-brigade-control-open #dispatcherOrderOverview{display:none!important}.owner-brigade-control-open #ownerBrigadeControlContent{padding:0 0 16px!important}</style></head>', 1)
+
+
+def _cabinet_theme_picker_html(html):
+    old = '</div><button type="button" class="cabinet-edit-profile" data-cabinet-action="${p?\'profile\':\'register\'}" aria-label="${p?\'Изменить профиль\':\'Заполнить профиль\'}">${cabinetIcon(p?\'edit\':\'plus\')}</button></article>`;'
+    new = '<button type="button" class="cabinet-edit-profile" data-cabinet-action="${p?\'profile\':\'register\'}" aria-label="${p?\'Изменить профиль\':\'Заполнить профиль\'}">${cabinetIcon(p?\'edit\':\'plus\')}</button></div>${legionThemePickerHtml()}</article>`;'
+    if html.count(old) != 1:
+        raise RuntimeError('Profile theme picker anchor missing')
+    html = html.replace(old, new, 1)
+    html = html.replace('function updateRoleNavigation(){', 'function updateRoleNavigation(){\n  applyLegionAccountTheme();', 1)
+    return html.replace('</head>', r'''<style id="cabinet-theme-picker-style">
+:root[data-legion-theme="dark"]{color-scheme:dark;--bg:#09090b;--panel:#121215;--panel2:#18181c;--line:#2a2a30;--text:#f5f5f5;--muted:#9a9aa3;--gold:#d8b46a;--gold2:#8f7442;--green:#58c785;--red:#e06969;--amber:#e3b454;--blue:#6ca6e8}
+html[data-legion-theme="dark"] .topbar{background:linear-gradient(180deg,#09090b 85%,transparent)}
+html[data-legion-theme="dark"] .primary{background:var(--gold);color:#171208}
+html[data-legion-theme="dark"] input,html[data-legion-theme="dark"] select,html[data-legion-theme="dark"] textarea{color-scheme:dark}
+html[data-legion-theme="dark"] #cabinetDate{color-scheme:dark}
+html[data-legion-theme="dark"] .date-pill.active,html[data-legion-theme="dark"] .segmented button.active{background:#211d15;border-color:var(--gold);color:#f6dfac}
+html[data-legion-theme="dark"] .group-stats button{background:#1b1b1f;color:var(--muted)}
+html[data-legion-theme="dark"] .group-stats button.has-people{box-shadow:inset 0 0 0 1px #34343b}
+html[data-legion-theme="dark"] .group-stats button:active{background:#26262c}
+html[data-legion-theme="dark"] .danger,html[data-legion-theme="dark"] #readinessAvralBtn{background:#241616!important;border-color:#5a2d2d!important;color:#ffaaaa!important}
+html[data-legion-theme="dark"] #readinessSendBtn{background:var(--gold);color:#171208}
+html[data-legion-theme="dark"] .bottom-nav,html[data-legion-theme="dark"] .role-navigation{background:rgba(13,13,15,.97)}
+html[data-legion-theme="dark"] .bottom-nav button,html[data-legion-theme="dark"] .role-navigation button{color:var(--muted)}
+html[data-legion-theme="dark"] .bottom-nav button.active,html[data-legion-theme="dark"] .role-navigation button.active{color:var(--gold)}
+html[data-legion-theme="dark"] .modal,html[data-legion-theme="dark"] .drawer{background:#111114;box-shadow:0 12px 45px #0006}
+html[data-legion-theme="dark"] .backdrop{background:rgba(0,0,0,.62)}
+html[data-legion-theme="dark"] #toast{background:#24242a;color:var(--text)}
+html[data-legion-theme="dark"] #fatal{background:var(--panel);color:var(--red)}
+html[data-legion-theme="dark"] #dayCommentBtn{background:#211d15;color:var(--gold);border-color:var(--gold2)}
+.cabinet-profile{gap:10px;overflow:visible}
+.cabinet-profile-copy{display:grid;grid-template-columns:minmax(0,1fr) 40px;align-items:center;gap:5px}
+.cabinet-profile-copy h2{grid-column:1;grid-row:1;font-size:16px}
+.cabinet-profile-copy p{grid-column:1;grid-row:2}
+.cabinet-profile-copy .cabinet-edit-profile{grid-column:2;grid-row:1;min-width:40px;min-height:40px;width:40px;padding:8px;border:1px solid var(--line);border-radius:11px;background:var(--panel);color:var(--muted)}
+.legion-theme-menu{position:relative;flex:none;align-self:center;z-index:22}
+.legion-theme-menu>summary{display:grid;place-items:center;list-style:none;width:40px;height:40px;cursor:pointer;border:1px solid var(--line);border-radius:11px;background:var(--panel);color:var(--text)}
+.legion-theme-menu>summary::-webkit-details-marker{display:none}
+.legion-theme-menu svg{width:22px;height:22px}
+.legion-theme-popup{position:absolute;right:0;top:calc(100% + 7px);width:190px;border:1px solid var(--line);border-radius:13px;background:var(--panel);box-shadow:0 10px 30px #0002;overflow:hidden}
+.legion-theme-popup>p{font-size:12px;color:var(--muted);margin:0;padding:10px 12px;border-bottom:1px solid var(--line)}
+.legion-theme-popup button{display:flex;align-items:center;gap:10px;width:100%;min-height:44px;padding:10px 12px;background:transparent;border:0;text-align:left;color:var(--text);font-size:14px;cursor:pointer}
+.legion-theme-popup button+button{border-top:1px solid var(--line)}
+.legion-theme-popup button[aria-pressed="true"]{background:var(--panel2)}
+.legion-theme-popup .theme-choice-check{margin-left:auto;color:var(--gold)}
+</style></head>''', 1).replace('</body>', r'''<script>
+var legionThemeAccount=null;
+function legionThemePickerHtml(){
+ const selected=document.documentElement.dataset.legionTheme||'light';
+ const icon='<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 3a9 9 0 0 1 0 18Z" fill="currentColor"/></svg>';
+ return `<details class="legion-theme-menu"><summary aria-label="Выбрать цвет темы" title="Тема интерфейса">${icon}</summary><div class="legion-theme-popup"><p>Тема интерфейса</p>${[['light','☀','Белая'],['dark','☾','Чёрная']].map(([key,symbol,label])=>`<button type="button" data-legion-theme-choice="${key}" aria-pressed="${selected===key}"><span aria-hidden="true">${symbol}</span>${label}<span class="theme-choice-check" aria-hidden="true">${selected===key?'✓':''}</span></button>`).join('')}</div></details>`;
+}
+function setLegionTheme(theme){
+ theme=theme==='dark'?'dark':'light';
+ document.documentElement.dataset.legionTheme=theme;
+ const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=theme==='dark'?'#09090b':'#e8e7e3';
+ qsa('[data-legion-theme-choice]').forEach(button=>{const selected=button.dataset.legionThemeChoice===theme;button.setAttribute('aria-pressed',String(selected));qs('.theme-choice-check',button).textContent=selected?'✓':''});
+ applyLegionLightTelegramChrome();
+}
+function applyLegionAccountTheme(){
+ const uid=state.bootstrap?.user?.id;if(!uid)return;
+ if(String(uid)===legionThemeAccount)return;
+ legionThemeAccount=String(uid);
+ let theme='light';try{theme=localStorage.getItem('legion-theme:'+uid)||'light'}catch{}
+ setLegionTheme(theme);
+}
+document.addEventListener('click',event=>{
+ const choice=event.target.closest('[data-legion-theme-choice]');
+ if(choice){
+  const uid=state.bootstrap?.user?.id;if(!uid)return;
+  const theme=choice.dataset.legionThemeChoice;if(!['light','dark'].includes(theme))return;
+  setLegionTheme(theme);
+  try{localStorage.setItem('legion-theme:'+uid,theme)}catch{toast('Тема изменена. Не удалось сохранить выбор на устройстве')}
+  choice.closest('details').open=false;return;
+ }
+ if(!event.target.closest('.legion-theme-menu'))qsa('.legion-theme-menu[open]').forEach(menu=>menu.open=false);
+});
+document.addEventListener('keydown',event=>{if(event.key==='Escape')qsa('.legion-theme-menu[open]').forEach(menu=>menu.open=false)});
+applyLegionAccountTheme();
+</script></body>''', 1)
+
+
+INLINE_INDEX_HTML = _cabinet_theme_picker_html(INLINE_INDEX_HTML)
