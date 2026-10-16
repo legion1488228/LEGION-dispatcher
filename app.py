@@ -436,7 +436,7 @@ async function openCashDayCheck(day){
     cashDayReturnAction=()=>openCashTable();cashDayReturnLabel='← К таблице';
   }
   rememberCashTablePosition();
-  showModal('Касса · '+fmtDate(day), '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"><button class="secondary" onclick="openCashTable()">← К таблице</button><button class="secondary" id="cashDayEdit">✏️ Редактировать</button></div><div id="cashDayCheckBody" class="empty">Загрузка…</div>');
+  showModal('Касса · '+fmtDate(day), '<div class="cash-day-check-toolbar"><button class="secondary" onclick="openCashTable()">← К таблице</button><button class="secondary" id="cashDayEdit">✏️ Редактировать</button></div><div id="cashDayCheckBody" class="empty">Загрузка…</div>');
   const body=qs('#cashDayCheckBody');
   const back=qs('#modal button[onclick="openCashTable()"]');
   back.removeAttribute('onclick');back.textContent=cashDayReturnLabel;back.onclick=()=>cashDayReturnAction();
@@ -5724,7 +5724,7 @@ async function openGbuEarningsDay(day,resume){
   const rates={'standard:4':200000,'standard:6':280000,'elite:4':340000,'elite:6':480000};
   const vlad={'standard:4':150000,'standard:6':230000,'elite:4':300000,'elite:6':440000};
   const drafts=data.items.map(x=>({...x,type:rates[x.category+':'+x.team_size]!==undefined?x.category+':'+x.team_size:'',manual:x.manual===null?null:String(x.manual/100)}));
-  body.innerHTML=`<form id="gbuEarnForm"><h3 style="text-align:right">Итого: <span id="gbuEarnTotal"></span></h3>${data.previous!==null?`<p class="muted">Ранее в таблице: ${money(data.previous)} ₽. После сохранения эту сумму заменит итог по заказам.</p>`:''}<p class="muted">Каждый заказ — отдельная строка. Если данных нет, выберите категорию и состав.</p>${drafts.map((x,i)=>`<div style="padding:16px 0;border-bottom:1px solid #333"><b>${i+1}. ${esc(x.name)}</b><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"><select data-gbu-type="${i}" style="font-size:16px"><option value="">Выберите категорию и состав</option>${Object.keys(rates).map(key=>`<option value="${key}" ${x.type===key?'selected':''}>${key.startsWith('elite')?'Элит':'Стандарт'} · ${key.endsWith('6')?'6':'4'} чел.</option>`).join('')}</select><label>Сумма, ₽ <input data-gbu-money="${i}" inputmode="decimal" style="width:120px;font-size:16px" value="${x.manual===null?'':esc(x.manual)}" placeholder="Авто"></label><button type="button" class="secondary" data-gbu-auto="${i}">Авто</button></div><small class="muted" data-gbu-hint="${i}"></small></div>`).join('')||'<p>Заказы ГБУ за этот день не найдены.</p>'}<p id="gbuEarnStatus" role="status"></p><button class="primary" type="submit" ${drafts.length?'':'disabled'}>Сохранить</button></form>`;
+  body.innerHTML=`<form id="gbuEarnForm"><h3 style="text-align:right">Итого: <span id="gbuEarnTotal"></span></h3>${data.previous!==null?`<p class="muted">Ранее в таблице: ${money(data.previous)} ₽. После сохранения эту сумму заменит итог по заказам.</p>`:''}<p class="muted">Каждый заказ — отдельная карточка. Выберите категорию и состав.</p><div class="gbu-earning-grid">${drafts.map((x,i)=>`<article class="gbu-earning-card"><b>${i+1}. ${esc(x.name)}</b><div class="gbu-card-controls"><label class="gbu-card-type-label">Категория и состав<select data-gbu-type="${i}" style="font-size:16px"><option value="">Выбрать</option>${Object.keys(rates).map(key=>`<option value="${key}" ${x.type===key?'selected':''}>${key.startsWith('elite')?'Элит':'Стандарт'} · ${key.endsWith('6')?'6':'4'} чел.</option>`).join('')}</select></label><label class="gbu-card-money-label">Сумма, ₽ <input data-gbu-money="${i}" inputmode="decimal" style="width:100%;font-size:16px" value="${x.manual===null?'':esc(x.manual)}" placeholder="Авто"></label><button type="button" class="secondary" data-gbu-auto="${i}">Авто</button></div><small class="muted" data-gbu-hint="${i}"></small></article>`).join('')||'<p class="gbu-earning-empty">Заказы ГБУ за этот день не найдены.</p>'}</div><p id="gbuEarnStatus" role="status"></p><button class="primary" type="submit" ${drafts.length?'':'disabled'}>Сохранить</button></form>`;
   function amount(x){if(x.manual===null)return (x.special?vlad:rates)[x.type]??null;const raw=x.manual.trim().replace(/\s/g,'').replace(',','.');if(!/^\d+(\.\d{1,2})?$/.test(raw)||Number(raw)>1000000000)throw Error('Введите сумму с точностью до копеек');return Math.round(Number(raw)*100)}
   function renderTotal(){let sum=0,missing=0;drafts.forEach((x,i)=>{const n=amount(x);if(n===null)missing++;else sum+=n;const auto=(x.special?vlad:rates)[x.type];qs(`[data-gbu-hint="${i}"]`,body).textContent=auto===undefined?'Для расчёта выберите категорию и состав':`${x.type.startsWith('elite')?'Элит':'Стандарт'} ${x.type.slice(-1)} чел. — ${money(auto)} ₽${x.special?' · ставка Влада Рязанского':''}${x.manual!==null?' · сумма изменена вручную':''}`;const input=qs(`[data-gbu-money="${i}"]`,body);input.placeholder=auto===undefined?'Не рассчитано':money(auto)});qs('#gbuEarnTotal').textContent=money(sum)+' ₽'+(missing?' · не рассчитано: '+missing:'')}
   qsa('[data-gbu-type]',body).forEach(el=>el.onchange=()=>{dirty=true;drafts[Number(el.dataset.gbuType)].type=el.value;renderTotal()});
@@ -10379,12 +10379,26 @@ function openOrderCountBreakdown(values,options){
 </script></body>''', 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', '''<style id="order-count-breakdown-style">
 #modal:has(#orderCountBreakdown)>.modal-head,
+#modal:has(#cashDayCheckBody)>.modal-head,
+#modal:has(#cashDayEditBody)>.modal-head,
+#modal:has(#privateCashBack)>.modal-head,
+#modal:has(#gbuEarnBack)>.modal-head,
 #modal:has(#categoryCountBody)>.modal-head{position:relative;top:auto;margin:0 0 12px;min-height:44px;gap:10px}
 #modal:has(#orderCountBreakdown)>.modal-head::before,
+#modal:has(#cashDayCheckBody)>.modal-head::before,
+#modal:has(#cashDayEditBody)>.modal-head::before,
+#modal:has(#privateCashBack)>.modal-head::before,
+#modal:has(#gbuEarnBack)>.modal-head::before,
 #modal:has(#categoryCountBody)>.modal-head::before{display:none}
 #modal:has(#orderCountBreakdown)>.modal-head h3,
+#modal:has(#cashDayCheckBody)>.modal-head h3,
+#modal:has(#cashDayEditBody)>.modal-head h3,
+#modal:has(#privateCashBack)>.modal-head h3,
+#modal:has(#gbuEarnBack)>.modal-head h3,
 #modal:has(#categoryCountBody)>.modal-head h3{margin:0;min-width:0;overflow-wrap:anywhere}
 #orderCountBreakdown #orderBreakdownBack,
+#modal>#privateCashBack,
+#modal>#gbuEarnBack,
 #categoryCountBody>button.secondary:first-child{display:inline-flex;align-items:center;justify-content:center;position:relative;min-height:44px;max-width:100%;height:auto;margin:0 0 4px;padding:10px 14px;box-sizing:border-box;line-height:1.25;white-space:normal;font-size:12px}
 #orderCountBreakdown .order-breakdown-range{font-size:14px;font-weight:650;margin:12px 0}
 #orderCountBreakdown .order-breakdown-summary{display:flex;flex-wrap:wrap;gap:8px 16px;color:var(--gold);font-size:14px;padding:10px;background:var(--panel2);border-radius:10px}
@@ -10401,4 +10415,35 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', '''<style id="order-cou
 #orderCountBreakdown tfoot{color:var(--gold);font-weight:750}
 #orderCountBreakdown tfoot th,#orderCountBreakdown tfoot td{border-bottom:0}
 #orderCountBreakdown .order-breakdown-help{font-size:11px;line-height:1.4;color:var(--muted);margin:12px 0 0}
+</style></head>''', 1)
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', '''<style id="gbu-earning-cards-style">
+#gbuEarnBody .gbu-earning-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:12px;align-items:stretch}
+#gbuEarnBody .gbu-earning-card{min-width:0;display:flex;flex-direction:column;gap:8px;padding:9px 8px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+#gbuEarnBody .gbu-earning-card>b{display:block;min-height:2.5em;font-size:12px;line-height:1.25;overflow-wrap:anywhere}
+#gbuEarnBody .gbu-card-controls{display:grid;grid-template-columns:minmax(0,1fr) 46px;gap:7px;align-items:end}
+#gbuEarnBody .gbu-card-controls label{display:flex;flex-direction:column;min-width:0;gap:4px;font-size:10px;color:var(--muted);line-height:1.2}
+#gbuEarnBody .gbu-card-type-label{grid-column:1/-1}
+#gbuEarnBody [data-gbu-type],#gbuEarnBody [data-gbu-money]{display:block;box-sizing:border-box;width:100%;max-width:100%;min-width:0;min-height:44px;margin:0;padding:7px 4px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--text);font-size:16px}
+#gbuEarnBody [data-gbu-auto]{min-width:0;min-height:44px;padding:5px 2px;font-size:11px;border-radius:8px;box-sizing:border-box}
+#gbuEarnBody [data-gbu-hint]{display:block;font-size:10px;line-height:1.3;overflow-wrap:anywhere}
+#gbuEarnBody .gbu-earning-empty{grid-column:1/-1}
+#gbuEarnForm>h3{font-size:16px;line-height:1.3;overflow-wrap:anywhere;margin:10px 0}
+#gbuEarnForm>p.muted{font-size:12px;line-height:1.35}
+</style></head>''', 1)
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', '''<style id="daily-cash-cards-style">
+#modal .cash-day-check-toolbar{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0 0 12px}
+#modal .cash-day-check-toolbar>button{display:flex;align-items:center;justify-content:center;min-width:0;min-height:44px;padding:8px 5px;font-size:12px;line-height:1.25;white-space:normal}
+#modal>#cashDayEditBack{display:inline-flex;align-items:center;min-height:44px;max-width:100%;padding:10px 14px;line-height:1.25;white-space:normal}
+#cashDayCheckBody{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;align-items:stretch}
+#cashDayCheckBody.empty{display:block}
+#cashDayCheckBody>.attention,#cashDayCheckBody>.empty{grid-column:1/-1;margin-bottom:0}
+#cashDayCheckBody>.employee-row{display:grid;grid-template-columns:minmax(0,1fr) 24px;align-items:center;gap:6px;min-width:0;padding:10px 8px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+#cashDayCheckBody .employee-row .name{min-width:0}
+#cashDayCheckBody .employee-row .name b{font-size:12px;line-height:1.3;white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere}
+#cashDayCheckBody .employee-row .name small{display:block;font-size:10px;line-height:1.35;margin-top:5px;white-space:normal;overflow-wrap:anywhere}
+#cashDayCheckBody .employee-row>span{justify-self:end}
+#cashDayCheckBody>.attention h4{font-size:14px;line-height:1.3}
+#cashDayCheckBody>.attention p{font-size:11px;line-height:1.35}
 </style></head>''', 1)
