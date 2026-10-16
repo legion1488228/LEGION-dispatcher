@@ -6434,13 +6434,13 @@ async function openCabinetEmployees(){
     const personLabel=p=>[String(p.full_name||'').trim().split(/\s+/)[0]||'Без имени',String(p.metro||'').trim(),p.height_cm?String(p.height_cm):''].filter(Boolean).join(' ');
     const people=(data.items||[]).slice().sort((a,b)=>personLabel(a).localeCompare(personLabel(b),'ru')||Number(a.id)-Number(b.id));
     root.innerHTML=`<label class="cabinet-directory-search">Поиск по имени и метро<input id="cabinetStaffSearch" type="search" placeholder="Имя или метро" autocomplete="off"></label><label class="cabinet-directory-filter">Раздел<select id="cabinetStaffGroup"><option value="all">Все сотрудники</option>${groups.map(([code,label])=>`<option value="${code}">${label}</option>`).join('')}</select></label><p id="cabinetStaffCount" class="muted" role="status"></p><div id="cabinetStaffList"></div>`;
-    function personHtml(p){
+    function personHtml(p,number){
       let phone=String(p.phone||'').replace(/\D/g,'');
       if(phone.length===11&&phone.startsWith('8'))phone='7'+phone.slice(1);
       const phoneLink=/^\d{7,15}$/.test(phone)?`<a href="tel:+${phone}">${cabinetIcon('phone')}${esc(p.phone)}</a>`:'<span>Телефон не указан</span>';
       const username=String(p.telegram_username||'').replace(/^@/,'');
       const tgUrl=/^[A-Za-z0-9_]{5,32}$/.test(username)?`https://t.me/${username}`:(/^tg:\/\/user\?id=[1-9]\d*$/.test(p.telegram_url||'')?p.telegram_url:'');
-      return `<details class="cabinet-directory-person"><summary><span><b>${esc(personLabel(p))}${p.has_car?' 🚗':''}</b></span>${cabinetIcon('chevron')}</summary><div class="cabinet-directory-contacts">${phoneLink}${tgUrl?`<a href="${esc(tgUrl)}" data-staff-telegram>Telegram${username?' · @'+esc(username):''}</a>`:'<span>Telegram не указан — связь по телефону</span>'}</div></details>`;
+      return `<details class="cabinet-directory-person"><summary><span><b><span class="cabinet-directory-number">${number}.</span> ${esc(personLabel(p))}${p.has_car?' 🚗':''}</b></span>${cabinetIcon('chevron')}</summary><div class="cabinet-directory-contacts">${phoneLink}${tgUrl?`<a href="${esc(tgUrl)}" data-staff-telegram>Telegram${username?' · @'+esc(username):''}</a>`:'<span>Telegram не указан — связь по телефону</span>'}</div></details>`;
     }
     function render(){
       if(!active())return;
@@ -6449,7 +6449,7 @@ async function openCabinetEmployees(){
       qs('#cabinetStaffCount',root).textContent=`Найдено: ${rows.length} из ${people.length}`;
       qs('#cabinetStaffList',root).innerHTML=rows.length?groups.map(([code,label])=>{
         const members=rows.filter(p=>p.group_code===code);
-        return members.length?`<section class="cabinet-directory-group"><h4>${label} · ${members.length}</h4><div class="cabinet-directory-grid">${members.map(personHtml).join('')}</div></section>`:'';
+        return members.length?`<section class="cabinet-directory-group"><h4>${label} · ${members.length}</h4><div class="cabinet-directory-grid">${members.map((person,index)=>personHtml(person,Math.floor(index/2)+1+(index%2?Math.ceil(members.length/2):0))).join('')}</div></section>`:'';
       }).join(''):'<p class="cabinet-empty">Сотрудники не найдены. Попробуйте другое имя или метро.</p>';
       qsa('[data-staff-telegram]',root).forEach(link=>link.onclick=e=>{
         if(!active()){e.preventDefault();return}
@@ -9150,6 +9150,7 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', r'''
 #cabinetDirectory .cabinet-directory-person summary{min-height:36px;padding:3px 4px;gap:4px}
 #cabinetDirectory .cabinet-directory-person summary>span{flex:1;min-width:0;overflow-wrap:anywhere}
 #cabinetDirectory .cabinet-directory-person b{font-size:11px;font-weight:650;line-height:1.25;white-space:normal}
+#cabinetDirectory .cabinet-directory-number{color:var(--muted);font-weight:600;white-space:nowrap;font-variant-numeric:tabular-nums}
 #cabinetDirectory .cabinet-directory-person summary>.cabinet-icon{width:12px;height:12px;flex-shrink:0;color:var(--muted)}
 #cabinetDirectory .cabinet-directory-contacts{display:flex;flex-direction:column;gap:4px;padding:0 4px 5px;min-width:0}
 #cabinetDirectory .cabinet-directory-contacts a{font-size:11px;min-height:36px;padding:5px 4px;gap:4px;border-radius:7px;overflow-wrap:anywhere}
