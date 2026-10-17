@@ -10757,3 +10757,91 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style id="gbu-dash
 #gbuPhotoControl .gbu-dashboard-photo-stat>b{font-size:16px;line-height:1.15;color:var(--blue);font-variant-numeric:tabular-nums;white-space:nowrap}
 #gbuPhotoControl .gbu-dashboard-photo-stat>span{margin:0;font-size:9px;line-height:1.15;white-space:nowrap}
 </style></body>''', 1)
+
+
+def _balanced_single_screen_orders_html(html):
+    """Compact the existing dashboard and fit uniformly, preserving every action."""
+    start = html.index('function fitOrdersScreen(){')
+    end = html.index('function scheduleOrdersScreenFit(){', start)
+    html = html[:start] + r'''function fitOrdersScreen(){
+ const main=qs('main');if(!main)return;
+ main.style.removeProperty('transform');
+ main.style.removeProperty('width');
+ main.style.removeProperty('--orders-group-extra');
+ if(!document.body.classList.contains('dashboard-compact'))return;
+ const viewport=window.visualViewport;
+ const viewportBottom=viewport?viewport.offsetTop+viewport.height:window.innerHeight;
+ const nav=qs('#roleNavigation')||qs('.bottom-nav');
+ const navTop=nav?.getBoundingClientRect().top;
+ const bottom=navTop>0?Math.min(navTop,viewportBottom):viewportBottom-72;
+ const available=Math.max(1,bottom-main.getBoundingClientRect().top-6);
+ let scale=1;
+ // Compact CSS normally fits at full size. Small windows get uniform scaling:
+ // expand layout width by the inverse factor so its visible width still fills
+ // the screen. Re-measure wrapping after each step; never distort text in Y.
+ for(let attempt=0;attempt<8;attempt++){
+  const height=Math.max(main.scrollHeight,main.offsetHeight)*scale;
+  if(height<=available||!height)break;
+  scale*=available/height*.995;
+  main.style.width=`${100/scale}%`;
+  main.style.transform=`scale(${scale})`;
+ }
+}
+''' + html[end:]
+    return html.replace('</body>', r'''<style id="balanced-single-screen-orders-style">
+body.dashboard-compact main{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;letter-spacing:normal;line-height:1.25;transform-origin:top left}
+body.dashboard-compact button{font-family:inherit;letter-spacing:normal;font-stretch:normal}
+body.dashboard-compact .topbar{padding:6px 10px 5px}
+body.dashboard-compact .topbar h1{font-size:21px;font-weight:700;letter-spacing:normal}
+body.dashboard-compact .topbar .icon-btn{width:36px;height:36px;border-radius:11px;font-size:20px}
+body.dashboard-compact #dateStrip{padding:3px 10px 6px;gap:5px}
+body.dashboard-compact #dateStrip .date-pill{min-width:64px;min-height:54px;padding:6px 5px;border-radius:10px}
+body.dashboard-compact #dateStrip .date-pill strong{font-size:12px;line-height:1.25;font-weight:650}
+body.dashboard-compact #dateStrip .date-pill small{font-size:10px;line-height:1.2}
+body.dashboard-compact #selectedDayHeader{margin:0 0 5px;gap:6px}
+body.dashboard-compact #selectedDayHeader h2{font-size:17px}
+body.dashboard-compact .dashboard-orders-heading{letter-spacing:normal;font-weight:700}
+body.dashboard-compact .dashboard-date-picker{min-height:29px;padding:5px 7px;background:var(--panel);border-radius:9px}
+body.dashboard-compact .dashboard-date-value{font-size:10px}
+body.dashboard-compact #summary{gap:5px;margin:0 0 5px}
+body.dashboard-compact #summary .metric{min-height:66px;padding:6px 3px;border-radius:11px}
+body.dashboard-compact #summary .metric b{font-size:19px!important;line-height:1.15;font-weight:700}
+body.dashboard-compact #summary .metric b:nth-of-type(2){font-size:12px!important;margin-top:4px!important}
+body.dashboard-compact #summary .metric span{font-size:9px;line-height:1.2;margin-top:3px}
+body.dashboard-compact #dayCommentBtn{min-height:24px;padding:3px 4px;margin-top:4px;font-size:9px;border-radius:7px}
+body.dashboard-compact #brigadeWork{margin:5px 0!important;padding-top:5px}
+body.dashboard-compact #brigadeWork .dashboard-section-heading{margin-bottom:5px;gap:5px;flex-wrap:wrap}
+body.dashboard-compact #brigadeWork .dashboard-section-heading h2{font-size:14px;font-weight:700;flex:1 1 auto}
+body.dashboard-compact #brigadeWork .dashboard-section-date{font-size:9px;margin-left:auto}
+body.dashboard-compact #brigadeWork .summary-grid{gap:5px}
+body.dashboard-compact #brigadeWork .metric{min-height:53px;padding:5px 4px;border-radius:10px}
+body.dashboard-compact #brigadeWork .metric b{font-size:19px;line-height:1.15;font-weight:700}
+body.dashboard-compact #brigadeWork .metric span{font-size:9px;line-height:1.2}
+body.dashboard-compact #gbuPhotoControl{gap:2px;padding:4px 5px}
+body.dashboard-compact #gbuPhotoControl .gbu-dashboard-title{font-size:9px;margin:0}
+body.dashboard-compact #gbuPhotoControl .gbu-dashboard-photo-stat>b{font-size:16px}
+body.dashboard-compact #gbuPhotoControl .gbu-dashboard-photo-stat>span{font-size:9px;margin:1px 0 0}
+body.dashboard-compact #employeeReadiness>.section-head{margin:5px 0}
+body.dashboard-compact #employeeReadiness .readiness-section-heading{margin:0 0 4px;gap:4px}
+body.dashboard-compact #employeeReadiness .readiness-section-heading h2{font-size:14px;line-height:1.2;font-weight:700;white-space:normal;flex:1 1 auto}
+body.dashboard-compact #employeeReadiness .readiness-section-heading .dashboard-section-date{font-size:9px}
+body.dashboard-compact #employeeReadiness .readiness-actions{gap:5px;grid-template-columns:minmax(0,1.65fr) 38px minmax(0,1.15fr) 40px}
+body.dashboard-compact #employeeReadiness .readiness-actions>button{min-height:36px;padding:4px 3px;border-radius:10px}
+body.dashboard-compact #employeeReadiness #readinessHistoryBtn b{font-size:11px;line-height:1.15;font-weight:700}
+body.dashboard-compact #employeeReadiness #readinessHistoryBtn small{font-size:9px!important;line-height:1.15}
+body.dashboard-compact #employeeReadiness #readinessAvralBtn{font-size:11px}
+body.dashboard-compact #readinessSummary{gap:5px;margin:5px 0}
+body.dashboard-compact #readinessSummary .metric{min-height:41px;padding:5px 9px;border-radius:10px}
+body.dashboard-compact #readinessSummary .metric b{font-size:18px;line-height:1.15;font-weight:700}
+body.dashboard-compact #readinessSummary .metric span{font-size:10px;line-height:1.2;margin-top:2px}
+body.dashboard-compact #readinessGroups .group-block{min-height:0;margin-bottom:5px;border-radius:12px}
+body.dashboard-compact #readinessGroups .group-title{padding:6px 9px 4px;font-size:14px;line-height:1.2;font-weight:700}
+body.dashboard-compact #readinessGroups .group-stats{gap:4px;padding:0 6px 6px}
+body.dashboard-compact #readinessGroups .group-stats button{min-width:0;min-height:33px;padding:3px 2px;border-radius:7px;font-size:9px;line-height:1.2}
+body.dashboard-compact #readinessGroups .group-stats b{display:block;font-size:16px;line-height:1.15;font-weight:650;margin-bottom:1px}
+body.dashboard-compact button:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+@media(max-width:350px){body.dashboard-compact #dayCommentBtn{font-size:8px;padding:3px 2px}body.dashboard-compact #brigadeWork .metric b{font-size:18px}}
+</style></body>''', 1)
+
+
+INLINE_INDEX_HTML = _balanced_single_screen_orders_html(INLINE_INDEX_HTML)
