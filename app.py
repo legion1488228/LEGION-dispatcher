@@ -10845,3 +10845,88 @@ body.dashboard-compact button:focus-visible{outline:2px solid var(--gold);outlin
 
 
 INLINE_INDEX_HTML = _balanced_single_screen_orders_html(INLINE_INDEX_HTML)
+
+
+# Isolated UI preview: the same rendered interface, fictional fixtures, no API calls.
+_PREVIEW_FIXTURE_SCRIPT = r'''
+const previewStore={comments:{},agents:[]};
+const previewGroups={brigadier:'Бригадиры',main:'Основной состав',cashless:'Безнал состав',reserve:'Резерв'};
+const previewSizes={brigadier:22,main:34,cashless:24,reserve:13};
+const previewNames=['Алексей','Андрей','Арсений','Владислав','Даниил','Дмитрий','Евгений','Иван','Игорь','Кирилл','Лев','Максим','Никита','Роман'];
+const previewMetros=['Аннино','Балашиха','ВДНХ','Давыдково','Котельники','Лухмановская','Марьино','Некрасовка','Одинцово','Перово','Рязанский','Свиблово','Таганская','Щелковская'];
+const previewPeople=Object.entries(previewSizes).flatMap(([code,size],g)=>Array.from({length:size},(_,i)=>({id:g*100+i+1,tg_id:-(g*100+i+1),full_name:previewNames[i%14]+' Тестовый',display_name:previewNames[i%14],first_name:previewNames[i%14],metro:previewMetros[(i+g)%14],height_cm:180+i%12,group_code:code,group_label:previewGroups[code],active:true,has_car:i%7===0,phone:'',telegram_username:''})));
+let previewPrivateCount=11,previewGbuCount=8;
+const previewCards=Array.from({length:19},(_,i)=>({id:i+1,source:i<11?'private':'gbu',surname:'ТЕСТОВЫЙ '+(i+1),employee:previewPeople[i],contact_time:['06:00','07:10','07:30','08:00','08:30','09:00'][Math.min(5,Math.floor(i/3))],photo_time:['08:15','09:20','09:30','10:00','10:30','11:00'][Math.min(5,Math.floor(i/3))],on_contact:i<14,first_received:i<10||i>=11&&i<16,second_received:i===12,first_manual:false,second_manual:false,completed:i===12,tea_amount:i===12?5000:0}));
+const previewToday='2026-10-17';
+function previewPhotoCounts(){return {private:previewCards.filter(c=>c.source==='private'&&c.first_received).length,gbu:previewCards.filter(c=>c.source==='gbu'&&c.first_received).length,gbu_first:previewCards.filter(c=>c.source==='gbu'&&c.first_received).length,gbu_second:previewCards.filter(c=>c.source==='gbu'&&c.second_received).length}}
+function previewTotals(source){const rows=previewCards.filter(c=>source==='all'||c.source===source);return {orders:source==='private'?previewPrivateCount:source==='gbu'?previewGbuCount:previewPrivateCount+previewGbuCount,cards:rows.length,on_contact:rows.filter(c=>c.on_contact).length,first_photos:rows.filter(c=>c.first_received).length,second_photos:rows.filter(c=>c.second_received).length,photos_complete:rows.filter(c=>c.first_received&&(c.source!=='gbu'||c.second_received)).length,completed:rows.filter(c=>c.completed).length}}
+function previewProgress(){return {cards:19,expected:previewPrivateCount+previewGbuCount,sources:{private:{cards:11,expected:previewPrivateCount,closed:11},gbu:{cards:8,expected:previewGbuCount,closed:8}}}}
+function previewReadiness(day){
+ const specs={brigadier:[9,0,7,0,6],main:[8,3,0,0,23],cashless:[8,0,3,0,13],reserve:[2,0,0,0,11]},groups={};
+ for(const [code,spec] of Object.entries(specs)){const people=previewPeople.filter(p=>p.group_code===code),keys=['ready','not_ready','day_off','responded','no_response'];let offset=0;const g={label:previewGroups[code],counts:{}};keys.forEach((key,i)=>{g[key]=people.slice(offset,offset+spec[i]);g.counts[key]=spec[i];offset+=spec[i]});groups[code]=g}
+ return {work_date:day,groups,cutoff_label:'14:00',totals:{ready_now:27,brigades_on_contact:14,brigades_expected:19}};
+}
+async function previewApi(path,opts={}){
+ if(typeof document!=='undefined'&&document.readyState!=='complete')await new Promise(resolve=>window.addEventListener('load',resolve,{once:true}));
+ const url=new URL(path,'https://preview.invalid'),p=url.pathname,day=url.searchParams.get('work_date')||previewToday,method=(opts.method||'GET').toUpperCase();
+ const body=typeof opts.body==='string'?JSON.parse(opts.body):{};
+ if(p==='/api/bootstrap')return {user:{id:-999,name:'Тестовый владелец'},is_owner:window.name!=='assistant',cabinet_only:false,cabinet_kind:window.name==='assistant'?'assistant':'owner',can_manage_cabinets:window.name!=='assistant',can_manage_cash:true,can_record_cash:true,can_use_owner_cabinet:false,can_view_vlad_allowance:false,selected_date:day,today:previewToday,groups:previewGroups,dates:Array.from({length:8},(_,i)=>({date:'2026-10-'+(17+i),label:i===0?'Сегодня':i===1?'Завтра':'',count:i===0?previewPrivateCount+previewGbuCount:0})),summary:{orders_total:previewPrivateCount+previewGbuCount,private_count:previewPrivateCount,gbu_count:previewGbuCount,requested_staff:previewPrivateCount*4+previewGbuCount*4+2,requested_staff_by_source:{private:previewPrivateCount*4+2,gbu:previewGbuCount*4},brigades_on_contact:previewCards.filter(c=>c.on_contact).length,photo_reports:previewPhotoCounts(),order_completion:previewProgress(),number_cards_count:19},day_comment:previewStore.comments[day]||{text:'Условная заметка для проверки интерфейса',version:1,updated_by:'Тестовый пользователь'}};
+ if(p==='/api/readiness/summary')return previewReadiness(day);
+ if(p==='/api/employees')return previewPeople;
+ if(p==='/api/orders')return [];
+ if(p==='/api/brigade-contact-orders')return {work_date:day,items:previewCards,can_edit:true};
+ if(p==='/api/photo-control')return {work_date:day,items:previewCards.filter(c=>c.source===url.searchParams.get('source')),can_edit:true};
+ if(/^\/api\/photo-control\/\d+$/.test(p)&&method==='PATCH'){
+  const card=previewCards.find(c=>c.id===Number(p.split('/').pop()));if(!card)throw Error('Нет тестовой карточки');
+  const key=body.stage===2?'second':'first';card[key+'_received']=body.received===null?false:!!body.received;card[key+'_manual']=body.received!==null;return {counts:previewPhotoCounts()};
+ }
+ if(p==='/api/owner/brigade-control')return {work_date:day,updated_at:'2026-10-17T09:00:00Z',totals:Object.fromEntries(['all','private','gbu'].map(s=>[s,previewTotals(s)])),order_completion:previewProgress(),items:previewCards.map(c=>({...c,photos_required:c.source==='gbu'?2:1,photos_received:Number(c.first_received)+(c.source==='gbu'?Number(c.second_received):0),photos_complete:c.first_received&&(c.source!=='gbu'||c.second_received)}))};
+ if(p.startsWith('/api/day-comments/')){const key=p.split('/').pop();if(method==='PUT')previewStore.comments[key]={text:String(body.text||''),version:Number(body.version||0)+1,updated_by:'Тестовый пользователь'};return previewStore.comments[key]||{text:'Условная заметка для проверки интерфейса',version:1,updated_by:'Тестовый пользователь'}}
+ if(p.startsWith('/api/dispatch-counts/')&&method==='PATCH'){if(body.field==='private_count')previewPrivateCount=Number(body.value);else if(body.field==='gbu_count')previewGbuCount=Number(body.value);return {ok:true}}
+ if(p==='/api/gbu/agents'&&method==='GET'){const q=(url.searchParams.get('search')||'').toLowerCase();return previewStore.agents.filter(a=>(a.full_name+a.phone).toLowerCase().includes(q))}
+ if(p==='/api/gbu/agents'&&method==='POST'){const a={id:previewStore.agents.length+1,full_name:String(body.full_name),phone:String(body.phone)};previewStore.agents.push(a);return a}
+ throw Error('Тестовая страница: это действие пока не смоделировано. Рабочие данные и сообщения не затронуты.');
+}
+// Fail closed even if a future UI action bypasses the shared api() helper.
+window.fetch=()=>Promise.reject(new Error('Сеть отключена на тестовой странице'));
+window.XMLHttpRequest=function(){throw Error('Сеть отключена на тестовой странице')};
+try{navigator.sendBeacon=()=>false}catch{}
+'''
+
+
+def _isolated_preview_screen_html():
+    html = INLINE_INDEX_HTML
+    # No real Telegram SDK, credentials, database session or notifications.
+    html = re.sub(r'<script\b[^>]*\bsrc=["\'][^"\']+["\'][^>]*>\s*</script>', '', html)
+    start = html.index('async function api(path, opts={}) {')
+    end = html.index('function toast(', start)
+    html = html[:start] + 'async function api(path, opts={}) {return previewApi(path,opts)}\n\n' + html[end:]
+    csp = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'"
+    html = html.replace('<head>', '<head><meta http-equiv="Content-Security-Policy" content="' + csp + '"><script>' + _PREVIEW_FIXTURE_SCRIPT + '</script>', 1)
+    return html.replace('<title>ЛЕГИОН — Диспетчерская</title>', '<title>ЛЕГИОН — тестовые данные</title>', 1)
+
+
+def legion_ui_preview_html():
+    # srcdoc makes the page self-contained and fixes the *actual* viewport seen
+    # by the production fit routine. Toolbar remains outside that viewport.
+    screen = escape(_isolated_preview_screen_html(), quote=True)
+    return '''<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ЛЕГИОН — проверка интерфейса</title><style>
+body{margin:0;background:#deddd8;color:#303330;font:14px system-ui,sans-serif}header{padding:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;border-bottom:1px solid #c9c7bf}h1{font-size:17px;margin:0}p{margin:0;padding:8px 12px;font-size:12px}select,button{font:inherit;padding:7px;border:1px solid #bbb8ae;border-radius:8px;background:#faf8f3;color:inherit}main{padding:12px;display:flex;justify-content:center;overflow:auto}iframe{flex:none;width:393px;height:700px;border:1px solid #bcb9ae;border-radius:14px;background:#e8e7e3}strong{color:#966e20}#result{font-variant-numeric:tabular-nums}
+</style></head><body><header><h1>ЛЕГИОН · Проверка интерфейса</h1><strong>ТОЛЬКО ТЕСТОВЫЕ ДАННЫЕ</strong><label>Экран <select id="size"><option value="393,700">393 × 700</option><option value="320,568">320 × 568</option><option value="393,620">393 × 620</option><option value="430,800">430 × 800</option></select></label><label>Роль <select id="role"><option value="owner">Владелец</option><option value="assistant">Диспетчер</option></select></label><button id="reset">Сбросить</button><button id="measure">Проверить размещение</button><span id="result" role="status"></span></header><p>Интерфейс взят из текущего app.py. Комментарии, счётчики и отметки меняются только в памяти этой страницы. Несмоделированные действия показывают предупреждение. Финансовые расчёты и отправка сообщений здесь не проверяются.</p><main><iframe id="screen" name="owner" title="Тестовая диспетчерская" srcdoc="''' + screen + '''"></iframe></main><script>
+const frame=document.querySelector('#screen'),initial=frame.srcdoc;
+function reset(){frame.name=document.querySelector('#role').value;frame.srcdoc=initial;document.querySelector('#result').textContent=''}
+document.querySelector('#size').onchange=e=>{const [w,h]=e.target.value.split(',');frame.style.width=w+'px';frame.style.height=h+'px';document.querySelector('#result').textContent=''};
+document.querySelector('#role').onchange=reset;document.querySelector('#reset').onclick=reset;
+document.querySelector('#measure').onclick=()=>{const doc=frame.contentDocument,main=doc.querySelector('main'),nav=doc.querySelector('#roleNavigation'),groups=[...doc.querySelectorAll('#readinessGroups .group-block')];if(!main||!nav||groups.length!==4){document.querySelector('#result').textContent='Сначала откройте «Заказы» и дождитесь загрузки';return}const bottom=Math.max(...[main,...groups].map(e=>e.getBoundingClientRect().bottom)),limit=nav.getBoundingClientRect().top,overflow=[...doc.querySelectorAll('#summary button,#brigadeWork button,#readinessGroups button')].some(e=>e.getBoundingClientRect().right>frame.clientWidth+1);document.querySelector('#result').textContent=bottom<=limit+1&&!overflow?'✓ Четыре группы видны, перекрытий с нижним меню нет':'⚠ Есть выход за границы экрана';};
+</script></body></html>'''
+
+
+@app.get('/preview', response_class=HTMLResponse, include_in_schema=False)
+def legion_ui_preview():
+    """Public fictional UI sandbox; never calls working APIs or database code."""
+    return HTMLResponse(legion_ui_preview_html(), headers={
+        'Cache-Control': 'no-store',
+        'X-Robots-Tag': 'noindex, nofollow',
+        'Referrer-Policy': 'no-referrer',
+        'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src 'self' about:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'",
+    })
