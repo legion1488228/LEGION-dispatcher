@@ -10895,6 +10895,62 @@ try{navigator.sendBeacon=()=>false}catch{}
 '''
 
 
+_CONTROL_COMPACT_CSS = r'''<style id="control-compact-layout-style">
+/* Compact Control summaries shared by production and isolated preview. */
+#ownerBrigadeControlContent #orderPreparation{padding:6px 7px;margin:0 0 6px;border-radius:11px}
+#ownerBrigadeControlContent #orderPreparation h2{font-size:15px;line-height:1.2;margin:0 0 4px}
+#ownerBrigadeControlContent #numberCardsBtn{min-height:28px;padding:4px 5px;margin-bottom:4px;font-size:11px;line-height:1.2;border-radius:8px}
+#ownerBrigadeControlContent #orderPreparation .summary-grid{gap:4px}
+#ownerBrigadeControlContent #orderPreparation .metric{min-height:43px;padding:5px 7px;border-radius:8px}
+#ownerBrigadeControlContent #orderPreparation .metric b{font-size:13px;line-height:1.15}
+#ownerBrigadeControlContent #orderPreparation .metric span{font-size:9px;line-height:1.15;margin-top:1px}
+#ownerBrigadeControlContent .bc-heading{padding:5px 7px 4px;gap:4px;grid-template-columns:minmax(0,1fr) 110px;border-radius:11px 11px 0 0}
+#ownerBrigadeControlContent .bc-heading h2{font-size:14px;line-height:1.2;white-space:normal}
+#ownerBrigadeControlContent .bc-date{font-size:9px;line-height:1.1}
+#ownerBrigadeControlContent .bc-date input{min-height:26px;padding:3px 4px;font-size:10px;border-radius:7px}
+#ownerBrigadeControlContent .bc-counters{gap:4px;padding:0 7px 4px}
+#ownerBrigadeControlContent .bc-counters button{min-height:42px;padding:4px 3px;border-radius:8px}
+#ownerBrigadeControlContent .bc-counters b{font-size:18px;line-height:1.1}
+#ownerBrigadeControlContent .bc-counters span{font-size:9px;line-height:1.15;margin-top:2px}
+#ownerBrigadeControlContent .bc-counters .bc-gbu-photo-counter{padding:4px;gap:2px}
+#ownerBrigadeControlContent .bc-counters .bc-gbu-photo-counter .bc-photo-count-line{gap:4px;font-size:10px;line-height:1.1}
+#ownerBrigadeControlContent .bc-counters .bc-gbu-photo-counter .bc-photo-count-line>span{font-size:9px;line-height:1.1;margin:0}
+#ownerBrigadeControlContent .bc-counters .bc-gbu-photo-counter .bc-photo-count-line>b{font-size:15px;line-height:1.1}
+#ownerBrigadeControlContent .bc-sources{gap:3px;padding:2px 7px 5px;border-radius:0 0 11px 11px}
+#ownerBrigadeControlContent .bc-sources button{min-height:28px;padding:4px 2px;font-size:10px;line-height:1.2;border-radius:7px}
+#ownerBrigadeControlContent .bc-list-caption{margin:6px 0 4px;font-size:10px}
+/* Put heading/action together and remove tall summary tiles. */
+#ownerBrigadeControlContent #orderPreparation{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:center;gap:4px 5px;padding:5px 6px;margin-bottom:5px}
+#ownerBrigadeControlContent #orderPreparation h2{grid-column:1;grid-row:1;font-size:13px;line-height:1.15;margin:0}
+#ownerBrigadeControlContent #numberCardsBtn{grid-column:2;grid-row:1;width:100%;min-width:0;max-width:100%;min-height:25px;padding:3px 5px;margin:0;font-size:10px;line-height:1.15;border-radius:6px}
+#ownerBrigadeControlContent #orderPreparation .summary-grid{grid-column:1/-1;gap:5px}
+#ownerBrigadeControlContent #orderPreparation .metric{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:1px 6px;min-height:27px;padding:3px 5px;border-radius:6px}
+#ownerBrigadeControlContent #orderPreparation .metric b{grid-column:1;grid-row:1/3;font-size:11px;line-height:1.15}
+#ownerBrigadeControlContent #orderPreparation .metric span{grid-column:2;font-size:9px;line-height:1.1;margin:0;white-space:nowrap}
+#ownerBrigadeControlContent .bc-heading{padding:4px 6px 3px;grid-template-columns:minmax(0,1fr) 104px}
+#ownerBrigadeControlContent .bc-heading h2{font-size:13px;line-height:1.15}
+#ownerBrigadeControlContent .bc-date{font-size:0;line-height:1}
+#ownerBrigadeControlContent .bc-date input{min-height:25px;font-size:10px;margin:0}
+#ownerBrigadeControlContent .bc-counters{padding:0 6px 3px;gap:4px}
+#ownerBrigadeControlContent .bc-counters button{min-height:32px;padding:3px 2px;border-radius:6px}
+#ownerBrigadeControlContent .bc-counters b{font-size:16px;line-height:1.05}
+#ownerBrigadeControlContent .bc-counters span{font-size:9px;line-height:1.1;margin-top:1px}
+#ownerBrigadeControlContent .bc-counters .bc-gbu-photo-counter{gap:1px;padding:2px}
+#ownerBrigadeControlContent .bc-counters .bc-gbu-photo-counter .bc-photo-count-line>b{font-size:13px;line-height:1}
+#ownerBrigadeControlContent .bc-sources{padding:1px 6px 4px;gap:3px}
+#ownerBrigadeControlContent .bc-sources button{min-height:24px;padding:3px 2px;font-size:10px;border-radius:6px}
+#ownerBrigadeControlContent .bc-list-caption{margin:5px 0 3px;font-size:9px}
+@media(max-width:350px){#ownerBrigadeControlContent .bc-heading{grid-template-columns:minmax(0,1fr) 100px}#ownerBrigadeControlContent .bc-heading h2{font-size:12px}#ownerBrigadeControlContent #orderPreparation h2{font-size:12px}#ownerBrigadeControlContent #numberCardsBtn{font-size:9px}#ownerBrigadeControlContent #orderPreparation .metric{gap:1px 4px;padding:3px}#ownerBrigadeControlContent #orderPreparation .metric b{font-size:10px}}
+#ownerBrigadeControlContent .bc-heading>div{min-width:0}
+#ownerBrigadeControlContent .bc-date{display:block;width:100%;min-width:0;max-width:100%;overflow:hidden}
+#ownerBrigadeControlContent .bc-date input{display:block;box-sizing:border-box;width:100%;min-width:0;max-width:100%;height:26px;text-align:center}
+#ownerBrigadeControlContent .bc-date input::-webkit-date-and-time-value{min-width:0;text-align:center}
+</style>'''
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', _CONTROL_COMPACT_CSS + '</body>', 1)
+
+
 def _isolated_preview_screen_html():
     html = INLINE_INDEX_HTML
     # No real Telegram SDK, credentials, database session or notifications.
