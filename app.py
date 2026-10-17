@@ -7436,6 +7436,13 @@ def cabinet_command_create(data: CabinetCommandInput, db: Session = Depends(get_
             if not deletion['can_delete']:
                 raise HTTPException(409, deletion['delete_reason'])
         payload['replace_report_key' if data.action == 'number' else 'report_key'] = f'card:{card.chat_id}:{card.message_id}'
+    if data.action in {'number', 'edit', 'photo'} and 'uniform_category' in payload['values']:
+        category = payload['values']['uniform_category']
+        source = payload['values'].get('source') if data.action in {'number', 'edit'} else card.source
+        if source is None and data.action == 'edit':
+            source = card.source
+        if category not in ({'standard', 'elite'} if source == 'gbu' else {'standard', 'vip', 'elite'}):
+            raise HTTPException(422, 'Выберите категорию заказа')
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     if len(encoded.encode()) > 5600000:
         raise HTTPException(413, 'Фото слишком большое. Выберите другое фото')
@@ -7502,6 +7509,17 @@ def cabinet_command_finish(data: CabinetCommandResult, db: Session = Depends(get
     if row.status not in {'done','error'}:
         result = dict(data.result)
         intent = json.loads(row.payload)
+        if data.status == 'done' and intent.get('action') in {'number', 'edit', 'photo'} and intent.get('values', {}).get('uniform_category') in {'standard', 'vip', 'elite'}:
+            key = str(result.get('report_key') or intent.get('report_key') or '')
+            if re.fullmatch(r'card:-?\d+:\d+', key):
+                saved = db.get(CabinetOrderState, key)
+                meta = json.loads(saved.payload) if saved and saved.tg_id == row.tg_id else {}
+                if not (result.get('duplicate') and meta.get('uniform_category')):
+                    if saved is None:
+                        saved = CabinetOrderState(report_key=key, tg_id=row.tg_id)
+                        db.add(saved)
+                    saved.tg_id = row.tg_id
+                    saved.payload = json.dumps(dict(meta, uniform_category=intent['values']['uniform_category']))
         if data.status == 'done' and intent.get('action') == 'cash_summary':
             record_cash_period_reconciliation(db, row, intent)
         if data.status == 'done' and intent.get('action') in {'schedule', 'edit'}:
@@ -7570,6 +7588,8 @@ def cabinet_state_sync(data: list[dict], db: Session = Depends(get_db)):
             row=CabinetOrderState(report_key=key);db.add(row)
         previous = json.loads(row.payload) if row.payload and row.tg_id == card.tg_id else {}
         values = {k:item.get(k) for k in ('prepared','tea_received','tea_amount')}
+        if previous.get('uniform_category') in {'standard', 'vip', 'elite'}:
+            values['uniform_category'] = previous['uniform_category']
         if previous.get('tea_received') and not values['tea_received']:
             values.update(prepared=previous.get('prepared'), tea_received=True,
                 tea_amount=previous.get('tea_amount'))
@@ -11180,6 +11200,22 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('<label data-photo-file-label>Фо
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(" const caption=form.querySelector('[data-photo-caption-fields]'),fileLabel=form.querySelector('[data-photo-file-label]');", " const caption=form.querySelector('[data-photo-caption-fields]'),fileLabel=form.querySelector('[data-photo-file-label]');\n const camera=form.querySelector('[data-photo-camera]'),library=form.querySelector('[data-photo-library]');\n camera.onclick=()=>{if(locked)return;file.setAttribute('capture','environment');file.click()};\n library.onclick=()=>{if(locked)return;file.removeAttribute('capture');file.click()};", 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('controls.forEach(c=>c.disabled=locked);notify();', 'controls.forEach(c=>c.disabled=locked);camera.disabled=locked;library.disabled=locked;notify();', 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '<style id="brigade-columns-and-photo-source-style">\n#modal .brigade-control-grid{position:relative;grid-auto-flow:column;column-gap:14px;isolation:isolate}\n#modal .brigade-control-grid:before{content:"";position:absolute;top:0;bottom:0;left:50%;width:1px;background:var(--line);pointer-events:none;z-index:-1}\n#cabinetNativeForm .cabinet-photo-source-buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:6px 0 12px}\n#cabinetNativeForm .cabinet-photo-source-buttons button{display:flex;align-items:center;justify-content:center;gap:6px;min-height:44px;font-size:13px;white-space:normal}\n</style></body>', 1)
+
+
+
+# Category-specific uniform reminders and approved framing controls.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('async function ownerCabinetAction(key,cardId=null){', 'function cabinetUniformText(source,category){\n if(!category)return \'\';\n if(source===\'gbu\')return category===\'elite\'?\'Наденьте галстуки и перчатки.\':\'Наденьте повязки и значки ГБУ ⬛️.\';\n return {standard:\'Наденьте повязки, шевроны и галстуки.\',vip:\'Наденьте повязки, шевроны, галстуки и перчатки.\',elite:\'Наденьте галстуки и белые перчатки.\'}[category]||\'\';\n}\nfunction cabinetUniformFields(){\n return \'<div data-uniform-fields><label>Категория заказа<select name="uniform_category" required><option value="">Выберите категорию</option></select></label><div class="cabinet-photo-reminder" data-uniform-reminder role="note" hidden><strong>❗ Проверьте форму бригады</strong><span data-uniform-text></span><small>Вся бригада — в полный рост. Атрибутика хорошо видна в кадре.</small></div></div>\';\n}\nfunction setupCabinetUniform(form,card){\n const category=form.querySelector(\'[name=uniform_category]\');if(!category)return;\n const source=form.querySelector(\'[name=source]\'),note=form.querySelector(\'[data-uniform-reminder]\');\n const currentSource=()=>source?.value||card?.source||\'private\';\n const show=()=>{const text=cabinetUniformText(currentSource(),category.value);note.hidden=!text;form.querySelector(\'[data-uniform-text]\').textContent=text};\n const fill=value=>{const types=currentSource()===\'gbu\'?[\'standard\',\'elite\']:[\'standard\',\'vip\',\'elite\'];category.innerHTML=\'<option value="">Выберите категорию</option>\'+types.map(x=>`<option value="${x}">${{standard:\'Стандарт\',vip:\'VIP\',elite:\'Элит\'}[x]}</option>`).join(\'\');category.value=types.includes(value)?value:\'\';show()};\n fill(card?.uniform_category||card?.cash?.category||\'\');\n category.onchange=show;if(source)source.addEventListener(\'change\',()=>fill(category.value));\n}\n\nasync function ownerCabinetAction(key,cardId=null){', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace("+source('private')+`<p class=", "+source('private')+cabinetUniformFields()+`<p class=", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace("+source(card.source)+input('photo_time'", "+source(card.source)+cabinetUniformFields()+input('photo_time'", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('<div class="cabinet-photo-reminder" role="note"><strong>❗ Наденьте повязки и шевроны</strong><span>Проверьте, чтобы они были хорошо видны на фото.</span></div>', '${cabinetUniformFields()}', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace("  const clockHelp=qs('.cabinet-clock-help',form);", "  setupCabinetUniform(form,card);\n  const clockHelp=qs('.cabinet-clock-help',form);", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('if(!metadataReady())return;', "if(!metadataReady())return;\n  const category=form.querySelector('[name=uniform_category]');if(category&&!category.value){category.reportValidity();return;}", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace("cx=600;cy=400;phase='edit';draw();refresh()}", "cx=600;cy=400;phase='edit';draw();refresh();edit.scrollIntoView?.({block:'nearest',behavior:'smooth'})}", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('const x=w<=1200?600:clamp(cx,1200-w/2,w/2),y=h<=800?400:clamp(cy,800-h/2,h/2);', 'const x=w<=1200?clamp(cx,w/2,1200-w/2):clamp(cx,1200-w/2,w/2),y=h<=800?clamp(cy,h/2,800-h/2):clamp(cy,800-h/2,h/2);', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('Поместите всю бригаду в рамку</b><br>Все сотрудники целиком: от головы до обуви.', 'Поместите всю бригаду в золотую рамку</b><br>Все сотрудники целиком. Запас вокруг рамки тоже войдёт в фото.', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('Вся бригада в полный рост, повязки и шевроны видны?', 'Вся бригада в полный рост, нужная атрибутика видна?', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(' const pointers=new Map(),controls=', " const frame=canvas.parentElement;\n for(const type of ['touchstart','touchmove','touchend','touchcancel'])frame.addEventListener(type,event=>{if(event.cancelable)event.preventDefault();event.stopPropagation()},{passive:false});\n const pointers=new Map(),controls=", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '<style id="uniform-and-safe-frame-style">\n#cabinetNativeForm .cabinet-photo-frame{border:0;touch-action:none;overscroll-behavior:none;user-select:none;-webkit-user-select:none}\n#cabinetNativeForm .cabinet-photo-frame::after{inset:6% 4%;border:2px solid var(--gold);border-radius:6px;box-shadow:0 0 0 1000px #00000025}\n#cabinetNativeForm .cabinet-photo-frame canvas{overscroll-behavior:none;-webkit-touch-callout:none}\n#cabinetNativeForm [data-uniform-fields]{margin:8px 0 12px}\n#cabinetNativeForm [data-uniform-reminder] small{display:block;color:var(--muted);margin-top:6px;font-size:12px}\n</style></body>', 1)
 
 def _isolated_preview_screen_html():
     html = INLINE_INDEX_HTML
