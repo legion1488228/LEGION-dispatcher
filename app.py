@@ -5289,7 +5289,7 @@ function openPhotoControl(source,day){
    if(!active()||request!==revision||saving)return;
    items=r.items;canEdit=!!r.can_edit;
    qs('#photoControlHint').textContent=canEdit?'Нажмите на квадратик, чтобы поставить или снять отметку. «Авто» возвращает отметку бота.':source==='gbu'?'Отдельная отметка за первое и второе фото':'Отметка после отправки фото';
-   body.innerHTML=items.length?`<div class="list">${items.map((x,i)=>`<div class="employee-row" style="gap:12px"><div style="min-width:0;flex:1"><b>${i+1}. ${esc(employeeListName(x.employee))}</b><div class="muted">${esc(x.surname)}</div><div>${esc(x.photo_time||'Время не указано')}</div></div><div style="display:flex;gap:4px;flex-shrink:0">${mark(x,1)}${source==='gbu'?mark(x,2):''}</div></div>`).join('')}</div>`:'Номера по заказам на эту дату ещё не выставлены.';
+   body.innerHTML=items.length?`<div class="list photo-control-grid brigade-control-grid">${items.map((x,i)=>`<div class="employee-row">${brigadeControlCardHeading(x,i,source)}<div style="display:flex;gap:4px;align-items:center;flex-shrink:0"><b>${esc(x.photo_time||'—')}</b>${mark(x,1)}${source==='gbu'?mark(x,2):''}</div></div>`).join('')}</div>`:'Номера по заказам на эту дату ещё не выставлены.';
   }catch(e){if(active()&&request===revision&&!saving)body.textContent=e.message}
   if(active()&&!saving&&request===revision)timer=setTimeout(refresh,5000);
  }
@@ -5315,7 +5315,7 @@ async function openContactBrigades(workDay){
     if(!active())return;
     const confirmed=orders.items.filter(x=>x.on_contact);
     body.className='';
-    body.innerHTML=`<div class="attention"><div style="display:flex;align-items:center;justify-content:space-between;gap:8px"><h4>Связь по заказам: ${r.totals.brigades_on_contact}/${r.totals.brigades_expected}</h4><button class="secondary small" id="addBrigadeContact">＋ Добавить</button></div><p>За ${esc(day)}. Каждый заказ — отдельной строкой, по времени связи.</p></div><div class="list">${orders.items.map((x,i)=>`<div class="employee-row"><div class="name"><b>${i+1}. ${esc(employeeListName(x.employee))}</b><small>${x.source==='gbu'?'ГБУ':'Частный'} · ${esc(x.surname||'')}</small></div><div style="display:flex;gap:8px;align-items:center;flex-shrink:0"><b>${esc(x.contact_time||'—')}</b><span aria-label="${x.on_contact?'На связи':'Ожидается связь'}">${x.on_contact?'✅':'⬜'}</span></div></div>`).join('')||'<div class="empty">Заказы пока не добавлены</div>'}</div>`;
+    body.innerHTML=`<div class="attention"><div style="display:flex;align-items:center;justify-content:space-between;gap:8px"><h4>Связь по заказам: ${r.totals.brigades_on_contact}/${r.totals.brigades_expected}</h4><button class="secondary small" id="addBrigadeContact">＋ Добавить</button></div><p>За ${esc(day)}. Заказы по времени связи.</p></div><div class="list contact-orders-grid brigade-control-grid">${orders.items.map((x,i)=>`<div class="employee-row">${brigadeControlCardHeading(x,i)}<div style="display:flex;gap:8px;align-items:center;flex-shrink:0"><b>${esc(x.contact_time||'—')}</b><span aria-label="${x.on_contact?'На связи':'Ожидается связь'}">${x.on_contact?'✅':'⬜'}</span></div></div>`).join('')||'<div class="empty">Заказы пока не добавлены</div>'}</div>`;
     qs('#addBrigadeContact').onclick=()=>openAddBrigadeContact(day,orders.items);
     if(state.bootstrap?.is_owner){
       const button=deleteButton||document.createElement('button');
@@ -10655,3 +10655,42 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style id="cash-com
  #modal.owner-cash-modal.cash-reconciliation-open .cash-notes-send-row>span{display:none}
 }
 </style></body>''', 1)
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style id="contact-orders-compact-style">
+#contactOrdersBody .attention{padding:10px;margin:0 0 8px;border-radius:12px}
+#contactOrdersBody .attention>div{flex-wrap:wrap;gap:5px!important}
+#contactOrdersBody .attention h4{margin:0;font-size:14px;line-height:1.25}
+#contactOrdersBody .attention p{margin:5px 0 0;font-size:11px;line-height:1.3}
+#contactOrdersBody #addBrigadeContact{min-height:32px;padding:5px 8px;font-size:12px}
+#modal .brigade-control-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;border:0;border-radius:0;background:transparent;overflow:visible}
+#modal .brigade-control-grid>.employee-row{display:flex;flex-direction:column;align-items:stretch;justify-content:space-between;gap:6px;min-width:0;padding:7px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+#modal .brigade-control-grid .name{min-width:0;width:100%}
+#modal .brigade-control-grid .name b{display:block;font-size:12px;line-height:1.25;white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere}
+#modal .brigade-control-grid .name small{display:block;margin-top:3px;font-size:10px;line-height:1.25;white-space:normal;overflow-wrap:anywhere}
+#modal .brigade-control-grid>.employee-row>div:last-child{justify-content:flex-end;gap:5px!important}
+#modal .brigade-control-grid>.employee-row>div:last-child b{font-size:14px;line-height:1.2}
+#modal .brigade-control-grid>.employee-row>div:last-child>span{font-size:18px;line-height:1.2}
+#modal .brigade-control-grid>.empty{grid-column:1/-1;padding:12px;font-size:12px}
+
+#photoControlHint{font-size:11px;line-height:1.3;margin:4px 0 8px}
+#modal:has(#photoControlList)>.modal-body>p:first-child{font-size:11px;margin:0 0 4px}
+#modal .photo-control-grid>.employee-row>div:last-child{flex-wrap:wrap;align-items:flex-end!important}
+#modal .photo-control-grid .photo-mark{gap:2px}
+#modal .photo-control-grid .photo-mark-toggle{width:32px;min-width:32px;height:32px;min-height:32px;padding:2px;font-size:19px}
+#modal .photo-control-grid .photo-mark-label{font-size:9px;line-height:1.2}
+#modal .photo-control-grid .photo-mark-auto{min-height:28px;padding:3px;font-size:10px}
+</style></body>''', 1)
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style id="brigade-control-card-lines-style">
+#modal .brigade-control-grid .name{display:grid;gap:2px}
+#modal .brigade-control-grid .brigade-control-metro{display:block;font-size:11px;line-height:1.25;white-space:normal;overflow-wrap:anywhere}
+#modal .brigade-control-grid .name small{margin-top:0}
+</style><script>
+function brigadeControlCardHeading(item,index,source=item.source){
+ const parts=String(employeeListName(item.employee||{})).trim().split(/\s+/);
+ const name=parts.shift()||'—',details=parts.join(' ')||'—';
+ return `<div class="name"><b>${index+1}. ${esc(name)}</b><span class="brigade-control-metro">${esc(details)}</span><small>${source==='gbu'?'ГБУ':'Частный'} · ${esc(item.surname||'—')}</small></div>`;
+}
+</script></body>''', 1)
