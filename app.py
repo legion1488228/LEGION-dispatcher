@@ -5179,7 +5179,7 @@ function renderSummary() {
     <div class="summary-grid" style="grid-template-columns:repeat(3,minmax(0,1fr))">
     <button id="brigadesContactCount" class="metric good"><b>${s.brigades_on_contact||0}/${s.orders_total}</b><span>Бригады на связи ›</span></button>
     <button class="metric" id="privatePhotoControl"><b>${s.photo_reports?.private||0}/${s.private_count}</b><span>Фото · частные ›</span></button>
-    <button class="metric" id="gbuPhotoControl" aria-label="Фото ГБУ: первое фото ${s.photo_reports?.gbu_first??s.photo_reports?.gbu??0} из ${s.gbu_count}, второе фото ${s.photo_reports?.gbu_second||0} из ${s.gbu_count}"><span class="gbu-dashboard-count-line"><span>1 фото</span><b>${s.photo_reports?.gbu_first??s.photo_reports?.gbu??0}/${s.gbu_count}</b></span><span class="gbu-dashboard-count-line"><span>2 фото</span><b>${s.photo_reports?.gbu_second||0}/${s.gbu_count}</b></span></button></div>`;
+    <button class="metric" id="gbuPhotoControl" aria-label="Фото ГБУ: первое фото ${s.photo_reports?.gbu_first??s.photo_reports?.gbu??0} из ${s.gbu_count}, второе фото ${s.photo_reports?.gbu_second||0} из ${s.gbu_count}"><span class="gbu-dashboard-title">ГБУ⬛️</span><span class="gbu-dashboard-photo-columns"><span class="gbu-dashboard-photo-stat"><b>${s.photo_reports?.gbu_first??s.photo_reports?.gbu??0}/${s.gbu_count}</b><span>1 фото</span></span><span class="gbu-dashboard-photo-stat"><b>${s.photo_reports?.gbu_second||0}/${s.gbu_count}</b><span>2 фото</span></span></span></button></div>`;
   qs('#brigadesContactCount').onclick=openContactBrigades;
   qs('#privatePhotoControl').onclick=()=>openPhotoControl('private',day);
   qs('#gbuPhotoControl').onclick=()=>openPhotoControl('gbu',day);
@@ -10750,8 +10750,10 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style id="gbu-stag
 
 
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style id="gbu-dashboard-photo-counts-style">
-#gbuPhotoControl{display:flex;flex-direction:column;align-items:stretch;justify-content:center;gap:3px;padding:6px}
-#gbuPhotoControl .gbu-dashboard-count-line{display:flex;align-items:baseline;justify-content:center;gap:6px;margin:0;font-size:11px;line-height:1.2;white-space:nowrap;overflow:visible}
-#gbuPhotoControl .gbu-dashboard-count-line>span{margin:0;font-size:10px;line-height:1.2}
-#gbuPhotoControl .gbu-dashboard-count-line>b{font-size:16px;line-height:1.2;color:var(--blue);font-variant-numeric:tabular-nums}
+#gbuPhotoControl{display:flex;flex-direction:column;align-items:stretch;justify-content:center;gap:2px;padding:4px 6px}
+#gbuPhotoControl .gbu-dashboard-title{display:block;margin:0;font-size:10px;font-weight:700;line-height:1.15;color:var(--text);white-space:nowrap}
+#gbuPhotoControl .gbu-dashboard-photo-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin:0;overflow:visible}
+#gbuPhotoControl .gbu-dashboard-photo-stat{display:flex;flex-direction:column;align-items:center;gap:1px;margin:0;min-width:0;overflow:visible}
+#gbuPhotoControl .gbu-dashboard-photo-stat>b{font-size:16px;line-height:1.15;color:var(--blue);font-variant-numeric:tabular-nums;white-space:nowrap}
+#gbuPhotoControl .gbu-dashboard-photo-stat>span{margin:0;font-size:9px;line-height:1.15;white-space:nowrap}
 </style></body>''', 1)
