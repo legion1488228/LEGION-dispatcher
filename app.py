@@ -5330,11 +5330,11 @@ async function openContactBrigades(workDay){
   await refresh();
 }
 function contactOrderLabel(x){
-  return `${employeeListName(x.employee)} · ${x.source==='gbu'?'ГБУ':'Частный'} · ${x.surname||'—'} · ${x.contact_time||'—'}`;
+  return `${brigadeControlEmployeeName(x.employee)} · ${x.source==='gbu'?'ГБУ':'Частный'} · ${x.surname||'—'} · ${x.contact_time||'—'}`;
 }
 async function openAddBrigadeContact(day,items){
   const pending=items.filter(x=>!x.on_contact);
-  showModal('Добавить связь по заказу',`<p class="muted">За ${esc(day)}. Каждый заказ отмечается отдельно.</p><div class="list">${pending.map(x=>`<div class="employee-row"><div class="name"><b>${esc(employeeListName(x.employee))}</b><small>${esc(x.source==='gbu'?'ГБУ':'Частный')} · ${esc(x.surname||'—')} · ${esc(x.contact_time||'—')}</small></div><button class="secondary" data-add-contact="${x.id}" aria-label="Отметить связь по заказу">＋</button></div>`).join('')||'<div class="empty">Все заказы на связи</div>'}</div><button class="secondary" id="contactBack" style="margin-top:12px">Назад</button>`);
+  showModal('Добавить связь по заказу',`<p class="muted">За ${esc(day)}. Каждый заказ отмечается отдельно.</p><div class="list">${pending.map(x=>`<div class="employee-row"><div class="name"><b>${esc(brigadeControlEmployeeName(x.employee))}</b><small>${esc(x.source==='gbu'?'ГБУ':'Частный')} · ${esc(x.surname||'—')} · ${esc(x.contact_time||'—')}</small></div><button class="secondary" data-add-contact="${x.id}" aria-label="Отметить связь по заказу">＋</button></div>`).join('')||'<div class="empty">Все заказы на связи</div>'}</div><button class="secondary" id="contactBack" style="margin-top:12px">Назад</button>`);
   qs('#contactBack').onclick=()=>openContactBrigades(day);
   qsa('[data-add-contact]',qs('#modal')).forEach(button=>button.onclick=async()=>{
     if(button.disabled)return;
@@ -10688,8 +10688,11 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style id="brigade-
 #modal .brigade-control-grid .brigade-control-metro{display:block;font-size:11px;line-height:1.25;white-space:normal;overflow-wrap:anywhere}
 #modal .brigade-control-grid .name small{margin-top:0}
 </style><script>
+function brigadeControlEmployeeName(employee){
+ return employeeListName(employee||{}).replace(/([0-9—])\s*см\s*$/i,'$1');
+}
 function brigadeControlCardHeading(item,index,source=item.source){
- const parts=String(employeeListName(item.employee||{})).trim().split(/\s+/);
+ const parts=String(brigadeControlEmployeeName(item.employee||{})).trim().split(/\s+/);
  const name=parts.shift()||'—',details=parts.join(' ')||'—';
  return `<div class="name"><b>${index+1}. ${esc(name)}</b><span class="brigade-control-metro">${esc(details)}</span><small>${source==='gbu'?'ГБУ':'Частный'} · ${esc(item.surname||'—')}</small></div>`;
 }
