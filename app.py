@@ -4658,12 +4658,18 @@ def bot_photo_report(data: PhotoReportInput, db: Session = Depends(get_db)):
 
 
 def photo_report_counts(db: Session, work_date: date):
-    counts = {'private': 0, 'gbu': 0}
+    counts = {'private': 0, 'gbu': 0, 'gbu_first': 0, 'gbu_second': 0}
     cards = db.scalars(select(NumberCardEvent).where(
         NumberCardEvent.work_date == work_date, _visible_number_card())).all()
     for card in cards:
-        if card.source in counts and effective_order_photo(db, card)['first_received']:
+        if card.source not in {'private', 'gbu'}:
+            continue
+        photo = effective_order_photo(db, card)
+        if photo['first_received']:
             counts[card.source] += 1
+        if card.source == 'gbu':
+            counts['gbu_first'] += int(bool(photo['first_received']))
+            counts['gbu_second'] += int(bool(photo['second_received']))
     return counts
 
 
@@ -5173,7 +5179,7 @@ function renderSummary() {
     <div class="summary-grid" style="grid-template-columns:repeat(3,minmax(0,1fr))">
     <button id="brigadesContactCount" class="metric good"><b>${s.brigades_on_contact||0}/${s.orders_total}</b><span>Бригады на связи ›</span></button>
     <button class="metric" id="privatePhotoControl"><b>${s.photo_reports?.private||0}/${s.private_count}</b><span>Фото · частные ›</span></button>
-    <button class="metric" id="gbuPhotoControl"><b>${s.photo_reports?.gbu||0}/${s.gbu_count}</b><span>Фото · ГБУ ›</span></button></div>`;
+    <button class="metric" id="gbuPhotoControl" aria-label="Фото ГБУ: первое фото ${s.photo_reports?.gbu_first??s.photo_reports?.gbu??0} из ${s.gbu_count}, второе фото ${s.photo_reports?.gbu_second||0} из ${s.gbu_count}"><span class="gbu-dashboard-count-line"><span>1 фото</span><b>${s.photo_reports?.gbu_first??s.photo_reports?.gbu??0}/${s.gbu_count}</b></span><span class="gbu-dashboard-count-line"><span>2 фото</span><b>${s.photo_reports?.gbu_second||0}/${s.gbu_count}</b></span></button></div>`;
   qs('#brigadesContactCount').onclick=openContactBrigades;
   qs('#privatePhotoControl').onclick=()=>openPhotoControl('private',day);
   qs('#gbuPhotoControl').onclick=()=>openPhotoControl('gbu',day);
@@ -8505,7 +8511,7 @@ function renderOwnerBrigadeControl(){
   const waiting='<svg class="cabinet-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12M6 21h12M7 3v4l10 10v4M17 3v4L7 17v4"/></svg>';
   const block=(key,icon,value,label,ready,count=null)=>`<div class="bc-stage bc-stage-${key} ${ready?'is-done':''} ${stage===key?'is-focused':''}" aria-label="${esc(label)}: ${esc(value)}" title="${esc(label)}: ${esc(value)}">${key==='done'?'':`<span class="bc-stage-icon">${cabinetIcon(icon)}</span>`}<b>${esc(value)}</b><span class="bc-stage-state" aria-hidden="true">${count!==null?esc(count):ready?cabinetIcon('check'):waiting}</span></div>`;
   root.innerHTML=`<div class="bc-heading"><div><h2>Контроль заказов</h2><p>${esc(fmtDate(data.work_date))}</p></div><label class="bc-date">Дата<input type="date" id="brigadeControlDate" value="${esc(data.work_date)}" aria-label="Дата контроля заказов"></label></div>
-    <div class="bc-counters" role="group" aria-label="Этап контроля">${[['contact','На связи','on_contact'],['photo','Фото получены','photos_complete'],['done','Завершено','completed']].map(([key,label,field])=>`<button type="button" data-brigade-stage="${key}" aria-pressed="${stage===key}"><b>${totals[field]}/${totals.orders}</b><span>${label}</span></button>`).join('')}</div>
+    <div class="bc-counters" role="group" aria-label="Этап контроля">${[['contact','На связи','on_contact'],['photo','Фото получены','photos_complete'],['done','Завершено','completed']].map(([key,label,field])=>`<button type="button" data-brigade-stage="${key}" aria-pressed="${stage===key}" class="${key==='photo'&&source==='gbu'?'bc-gbu-photo-counter':''}">${key==='photo'&&source==='gbu'?`<span class="bc-photo-count-line"><span>1 фото</span><b>${totals.first_photos||0}/${totals.orders}</b></span><span class="bc-photo-count-line"><span>2 фото</span><b>${totals.second_photos||0}/${totals.orders}</b></span>`:`<b>${totals[field]}/${totals.orders}</b><span>${label}</span>`}</button>`).join('')}</div>
     <div class="bc-sources" role="group" aria-label="Тип заказа">${[['all','Все'],['private','Частные'],['gbu','ГБУ ⬛️']].map(([key,label])=>`<button type="button" data-brigade-source="${key}" aria-pressed="${source===key}">${label} · ${data.totals[key].orders}</button>`).join('')}</div>
     <div class="bc-list-caption"><span>${stage?stages[stage]:captions[source]} · ${items.length}</span><span>По времени связи</span></div>
     ${totals.cards<totals.orders?`<p class="bc-missing">Номера в группе: ${totals.cards}/${totals.orders}. Остальные карточки появятся после отправки номера.</p>`:''}
@@ -10732,4 +10738,20 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style id="gbu-phot
 #modal .photo-control-grid.is-gbu>.employee-row>div:last-child>b{position:static;grid-column:1/-1;grid-row:1;text-align:center;margin:0}
 #modal .photo-control-grid.is-gbu .photo-mark{grid-row:2}
 #modal .photo-control-grid.is-gbu .photo-mark-label{white-space:nowrap;font-size:8px}
+</style></body>''', 1)
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style id="gbu-stage-photo-counts-style">
+#ownerBrigadeControlContent .bc-counters .bc-gbu-photo-counter{display:flex;flex-direction:column;align-items:stretch;justify-content:center;gap:5px;padding:8px}
+#ownerBrigadeControlContent .bc-counters .bc-gbu-photo-counter .bc-photo-count-line{display:flex;align-items:baseline;justify-content:center;gap:6px;margin:0;white-space:nowrap;font-size:12px;line-height:1.25}
+#ownerBrigadeControlContent .bc-counters .bc-gbu-photo-counter .bc-photo-count-line>span{margin:0;font-size:11px;line-height:1.25}
+#ownerBrigadeControlContent .bc-counters .bc-gbu-photo-counter .bc-photo-count-line>b{font-size:18px;line-height:1.2}
+</style></body>''', 1)
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style id="gbu-dashboard-photo-counts-style">
+#gbuPhotoControl{display:flex;flex-direction:column;align-items:stretch;justify-content:center;gap:3px;padding:6px}
+#gbuPhotoControl .gbu-dashboard-count-line{display:flex;align-items:baseline;justify-content:center;gap:6px;margin:0;font-size:11px;line-height:1.2;white-space:nowrap;overflow:visible}
+#gbuPhotoControl .gbu-dashboard-count-line>span{margin:0;font-size:10px;line-height:1.2}
+#gbuPhotoControl .gbu-dashboard-count-line>b{font-size:16px;line-height:1.2;color:var(--blue);font-variant-numeric:tabular-nums}
 </style></body>''', 1)
