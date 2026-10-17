@@ -5289,7 +5289,7 @@ function openPhotoControl(source,day){
    if(!active()||request!==revision||saving)return;
    items=r.items;canEdit=!!r.can_edit;
    qs('#photoControlHint').textContent=canEdit?'Нажмите на квадратик, чтобы поставить или снять отметку. «Авто» возвращает отметку бота.':source==='gbu'?'Отдельная отметка за первое и второе фото':'Отметка после отправки фото';
-   body.innerHTML=items.length?`<div class="list photo-control-grid brigade-control-grid">${items.map((x,i)=>`<div class="employee-row">${brigadeControlCardHeading(x,i,source)}<div style="display:flex;gap:4px;align-items:center;flex-shrink:0"><b>${esc(x.photo_time||'—')}</b>${mark(x,1)}${source==='gbu'?mark(x,2):''}</div></div>`).join('')}</div>`:'Номера по заказам на эту дату ещё не выставлены.';
+   body.innerHTML=items.length?`<div class="list photo-control-grid brigade-control-grid${source==='gbu'?' is-gbu':''}">${items.map((x,i)=>`<div class="employee-row">${brigadeControlCardHeading(x,i,source)}<div style="display:flex;gap:4px;align-items:center;flex-shrink:0"><b>${esc(x.photo_time||'—')}</b>${mark(x,1)}${source==='gbu'?mark(x,2):''}</div></div>`).join('')}</div>`:'Номера по заказам на эту дату ещё не выставлены.';
   }catch(e){if(active()&&request===revision&&!saving)body.textContent=e.message}
   if(active()&&!saving&&request===revision)timer=setTimeout(refresh,5000);
  }
@@ -10694,3 +10694,39 @@ function brigadeControlCardHeading(item,index,source=item.source){
  return `<div class="name"><b>${index+1}. ${esc(name)}</b><span class="brigade-control-metro">${esc(details)}</span><small>${source==='gbu'?'ГБУ':'Частный'} · ${esc(item.surname||'—')}</small></div>`;
 }
 </script></body>''', 1)
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style id="brigade-control-top-marks-style">
+#modal .brigade-control-grid>.employee-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:2px 5px;padding:6px}
+#modal .brigade-control-grid>.employee-row>.name{display:contents}
+#modal .brigade-control-grid>.employee-row>.name>b{grid-column:1;grid-row:1}
+#modal .brigade-control-grid>.employee-row>.name>.brigade-control-metro{grid-column:1;grid-row:2}
+#modal .brigade-control-grid>.employee-row>.name>small{grid-column:1/-1;grid-row:3;margin:0}
+#modal .brigade-control-grid>.employee-row>div:last-child{grid-column:2;grid-row:1/3;display:flex!important;flex-direction:column-reverse;align-items:center!important;justify-content:flex-end;gap:2px!important;min-width:0}
+#modal .brigade-control-grid>.employee-row>div:last-child>b{font-size:12px;line-height:1.2;white-space:nowrap}
+#modal .brigade-control-grid>.employee-row>div:last-child>span{font-size:20px;line-height:1.1}
+#modal .photo-control-grid>.employee-row>div:last-child{display:grid!important;grid-auto-flow:column;grid-template-rows:auto auto;align-items:start!important;gap:2px 3px!important}
+#modal .photo-control-grid>.employee-row>div:last-child>b{grid-row:2;grid-column:1/-1;text-align:center}
+#modal .photo-control-grid .photo-mark{grid-row:1;align-self:start}
+#modal .photo-control-grid .photo-mark-toggle{width:28px;min-width:28px;height:28px;min-height:28px;padding:1px;font-size:19px}
+</style></body>''', 1)
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style id="gbu-photo-card-top-time-style">
+#modal .photo-control-grid.is-gbu>.employee-row{position:relative;display:flex;flex-direction:column;align-items:stretch;gap:4px}
+#modal .photo-control-grid.is-gbu>.employee-row>.name{display:grid;gap:2px}
+#modal .photo-control-grid.is-gbu>.employee-row>.name>b{padding-right:42px}
+#modal .photo-control-grid.is-gbu>.employee-row>div:last-child{display:flex!important;flex-direction:row;flex-wrap:wrap;align-items:flex-start!important;justify-content:center;gap:4px 8px!important;grid-column:auto;grid-row:auto;width:100%}
+#modal .photo-control-grid.is-gbu>.employee-row>div:last-child>b{position:absolute;right:6px;top:6px;margin:0;font-size:12px;line-height:1.25;white-space:nowrap}
+</style></body>''', 1)
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style id="gbu-photo-marks-under-time-style">
+#modal .photo-control-grid.is-gbu>.employee-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:2px 5px}
+#modal .photo-control-grid.is-gbu>.employee-row>.name{display:contents}
+#modal .photo-control-grid.is-gbu>.employee-row>.name>b{padding-right:0}
+#modal .photo-control-grid.is-gbu>.employee-row>div:last-child{grid-column:2;grid-row:1/3;display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:auto auto;grid-auto-flow:row;align-items:start!important;justify-content:normal;width:auto;gap:2px 3px!important}
+#modal .photo-control-grid.is-gbu>.employee-row>div:last-child>b{position:static;grid-column:1/-1;grid-row:1;text-align:center;margin:0}
+#modal .photo-control-grid.is-gbu .photo-mark{grid-row:2}
+#modal .photo-control-grid.is-gbu .photo-mark-label{white-space:nowrap;font-size:8px}
+</style></body>''', 1)
