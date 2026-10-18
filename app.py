@@ -11683,6 +11683,22 @@ function markGbuCrewConfirmed(cardId){
 </script>
 </body>''', 1)
 
+# One compact header row shared by every dispatcher tab.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
+<style id="compact-dispatch-header-style">
+body.dispatch-shared-header #app>.topbar{grid-template-columns:minmax(0,1fr) auto auto;grid-template-rows:32px;gap:5px;padding:7px 8px 5px}
+body.dispatch-shared-header #app>.topbar .eyebrow{display:none!important}
+body.dispatch-shared-header #app>.topbar h1{grid-column:1;grid-row:1;font-size:clamp(13px,4vw,20px);line-height:1.2;white-space:nowrap;margin:0;min-width:0}
+body.dispatch-shared-header #app>.topbar .dispatch-month-picker{grid-column:2;grid-row:1;min-width:0;font-size:clamp(9px,2.6vw,11px);padding:5px 6px;min-height:30px}
+body.dispatch-shared-header #app>.topbar>.dispatch-date-title+div{grid-column:3;grid-row:1;gap:4px!important}
+@media(max-width:350px){
+ body.dispatch-shared-header #app>.topbar{gap:4px;grid-template-rows:30px}
+ body.dispatch-shared-header #app>.topbar .icon-btn{width:28px;min-width:28px;height:30px;min-height:30px;font-size:20px}
+ body.dispatch-shared-header #app>.topbar .dispatch-month-picker{padding:5px 4px}
+}
+</style>
+</body>''', 1)
+
 def _isolated_preview_screen_html():
     html = INLINE_INDEX_HTML
     # No real Telegram SDK, credentials, database session or notifications.
