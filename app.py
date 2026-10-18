@@ -1273,6 +1273,13 @@ def gbu_staff_payroll(month: str, db: Session = Depends(get_db), user: TelegramU
         for member in roster['crew']:
             row=people.setdefault(member['id'],{'id':member['id'],'name':member['name'],'exits':0,'amount':0,'orders':[]})
             row['exits']+=1;row['amount']+=member['amount'];row['orders'].append(dict(item,amount=member['amount'],role=member['role'],category=roster['category']))
+    profiles = {employee.id: employee for employee in db.scalars(select(Employee).where(
+        Employee.id.in_(list(people)), _visible_employee()))} if people else {}
+    for employee_id, row in people.items():
+        profile = profiles.get(employee_id)
+        if profile:
+            row.update(first_name=str(profile.full_name or '').split()[0] if profile.full_name else '—',
+                       metro=getattr(profile, 'metro', '') or '', height_cm=getattr(profile, 'height_cm', None))
     return JSONResponse({'month':month,'employees':sorted(people.values(),key=lambda x:x['name'].casefold()),
         'orders':orders,'missing':missing,'total':sum(x['amount'] for x in people.values())},headers={'Cache-Control':'private, no-store'})
 
@@ -11764,6 +11771,71 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
 #modal .gbu-payroll-category>summary .gbu-payroll-shift-dates:empty{display:none}
 #modal .gbu-payroll-category>p{margin-top:3px;line-height:1.25}
 </style>
+</body>''', 1)
+
+# Directory heights have their own fixed column, separate from names and car marks.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "${esc(readinessEmployeeName(x).replace(/\\s+см$/,''))}${x.has_car?' 🚗':''}",
+    "${staffDirectoryIdentity(x)}", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
+<style id="staff-directory-height-column-style">
+#employeesList .staff-directory-person summary>span:first-child{display:grid;grid-template-columns:auto minmax(0,1fr) 14px 3ch;align-items:center;gap:3px;flex:1;min-width:0}
+#employeesList .staff-directory-label{min-width:0;overflow-wrap:anywhere}
+#employeesList .staff-directory-car{width:14px;text-align:center;font-size:12px;line-height:1}
+#employeesList .staff-directory-height{text-align:right;white-space:nowrap;overflow-wrap:normal;font-variant-numeric:tabular-nums}
+</style>
+<script>
+function staffDirectoryIdentity(employee){
+ const label=String(readinessEmployeeName(employee)||'—').trim();
+ const match=label.match(/\s+([12]\d{2}|—)(?:\s*см)?\s*$/i);
+ const height=Number(employee.height_cm)||match?.[1]||'—';
+ const name=match?label.slice(0,match.index).trim():label;
+ return `<span class="staff-directory-label">${esc(name)}</span><span class="staff-directory-car"${employee.has_car?' aria-label="Есть автомобиль"':' aria-hidden="true"'}>${employee.has_car?'🚗':''}</span><span class="staff-directory-height">${esc(height)}</span>`;
+}
+</script>
+</body>''', 1)
+
+# Four compact payroll cards per row; shift breakdown opens on card click.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "  qsa('[data-payroll-roster]',body).forEach(b=>b.onclick=()=>openGbuOrderRoster",
+    "  wireGbuPayrollPeople(body,data,month,period);\n  qsa('[data-payroll-roster]',body).forEach(b=>b.onclick=()=>openGbuOrderRoster", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
+<style id="gbu-payroll-four-cards-style">
+#modal .gbu-payroll-people-grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;padding:4px}
+#modal .gbu-payroll-people-grid>button.gbu-payroll-person{appearance:none;-webkit-appearance:none;display:flex;flex-direction:column;align-items:stretch;gap:3px;margin:0;padding:6px 4px;text-align:left;font:inherit;color:var(--text);cursor:pointer;min-height:66px;min-width:0}
+#modal .gbu-payroll-person .gbu-payroll-person-name{font-size:11px;line-height:1.2;overflow-wrap:anywhere}
+#modal .gbu-payroll-person-location{font-size:9px;line-height:1.25;color:var(--muted);overflow-wrap:anywhere}
+#modal .gbu-payroll-card-salary{margin-top:auto;color:var(--gold2);font-size:10px;line-height:1.2;font-weight:700;overflow-wrap:anywhere}
+#modal .gbu-payroll-people-grid>button.gbu-payroll-person:focus-visible{outline:2px solid var(--gold2);outline-offset:-2px}
+#modal .gbu-payroll-people-grid>button.gbu-payroll-person:active{background:var(--panel2)}
+.gbu-payroll-person-report h3{margin:10px 0 4px}.gbu-payroll-person-report h4{margin:12px 0 5px;color:var(--gold2)}
+.gbu-payroll-person-report .gbu-payroll-report-category{border:1px solid var(--line);border-radius:10px;padding:8px;margin:6px 0;font-size:12px}
+.gbu-payroll-report-category>header{display:flex;justify-content:space-between;gap:8px;font-weight:700}
+.gbu-payroll-report-order{display:flex;justify-content:space-between;gap:8px;margin-top:5px;padding-top:5px;border-top:1px solid var(--line);font-size:11px}
+.gbu-payroll-report-order>span:last-child{white-space:nowrap}
+</style>
+<script>
+function gbuPayrollPersonLabel(employee){
+ const raw=String(employee.name||'—').trim(),match=raw.match(/\s+([12]\d{2})(?:\s*см)?$/i);
+ const parts=(match?raw.slice(0,match.index):raw).split(/\s+/),fallback=parts.shift()||'—';
+ return {name:employee.first_name||fallback,location:[employee.metro||parts.join(' '),employee.height_cm||match?.[1]||'—'].filter(Boolean).join(' ')};
+}
+function gbuPayrollGroupsHtml(data){
+ return gbuPayrollRoleGroups(data).map(group=>`<section class="gbu-payroll-role" data-payroll-role="${group.role}"><div class="gbu-payroll-role-heading"><h4>${group.title}</h4><b>${esc(cabinetMoney(group.total))} ₽</b></div><div class="gbu-payroll-people-grid">${group.employees.map(employee=>{const label=gbuPayrollPersonLabel(employee);return `<button type="button" class="gbu-payroll-person" data-payroll-person="${employee.id}" aria-label="Отчёт: ${esc(employee.name)} · ${group.title}"><b class="gbu-payroll-person-name">${esc(label.name)}</b><span class="gbu-payroll-person-location">${esc(label.location)}</span><span class="gbu-payroll-card-salary">ЗП: ${esc(cabinetMoney(employee.amount))} ₽</span></button>`}).join('')||'<p class="muted gbu-payroll-empty">Выходов за этот период нет</p>'}</div></section>`).join('');
+}
+function wireGbuPayrollPeople(root,data,month,period){
+ qsa('[data-payroll-person]',root).forEach(button=>button.onclick=()=>{
+  const employee=data.employees.find(person=>Number(person.id)===Number(button.dataset.payrollPerson));
+  if(!employee)return;
+  const label=gbuPayrollPersonLabel(employee),end=new Date(Number(month.slice(0,4)),Number(month.slice(5,7)),0).getDate();
+  const monthLabel=new Intl.DateTimeFormat('ru-RU',{month:'long',year:'numeric',timeZone:'UTC'}).format(new Date(month+'-01T12:00:00Z'));
+  const groups=gbuPayrollRoleGroups({employees:[employee]}).filter(group=>group.employees.length);
+  showModal('Отчёт сотрудника',`<div class="gbu-payroll-person-report"><button type="button" class="secondary" data-payroll-back>← К зарплате ГБУ</button><h3>${esc(label.name)}</h3><p class="muted">${esc(label.location)} · ${esc(monthLabel)} · ${period==='first'?'1–15':'15–'+end}</p><h4>Выходы: ${employee.exits} · ЗП: ${esc(cabinetMoney(employee.amount))} ₽</h4>${groups.map(group=>{const person=group.employees[0];return `<section><h4>${group.title} · ${person.exits} · ${esc(cabinetMoney(person.amount))} ₽</h4>${person.categories.map(category=>`<div class="gbu-payroll-report-category"><header><span>${category.category==='elite'?'Элит':'Стандарт'} · ${category.exits}</span><span>${esc(cabinetMoney(category.amount))} ₽</span></header><p class="muted">Числа: ${esc(category.dates.join(', ')||'—')}</p>${category.orders.map(order=>`<div class="gbu-payroll-report-order"><span>${esc(Number(order.date.slice(8,10)))} · ${esc(order.surname)}</span><span>${esc(cabinetMoney(order.amount))} ₽</span></div>`).join('')}</div>`).join('')}</section>`}).join('')}</div>`);
+  qs('#modal').scrollTop=0;
+  qs('[data-payroll-back]').onclick=()=>openGbuPayroll(month,period);
+ });
+}
+</script>
 </body>''', 1)
 
 def _isolated_preview_screen_html():
