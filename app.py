@@ -11744,6 +11744,28 @@ function gbuPayrollGroupsHtml(data){
 </script>
 </body>''', 1)
 
+# Compact shift dates inside the already selected payroll month.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "date.slice(8,10)+'.'+date.slice(5,7)+(count>1?", "String(Number(date.slice(8,10)))+(count>1?", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "esc(order.date.slice(8,10)+'.'+order.date.slice(5,7))", "esc(Number(order.date.slice(8,10)))")
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace("category.dates.join(', ')||'—'", "category.dates.join(', ')")
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
+<style id="gbu-payroll-tighter-cards-style">
+#modal .gbu-payroll-people-grid{gap:4px;padding:4px;align-items:stretch}
+#modal .gbu-payroll-people-grid>.gbu-payroll-person{padding:5px 6px;border-radius:8px}
+#modal .gbu-payroll-person-name{font-size:11px;line-height:1.25}
+#modal .gbu-payroll-person-total{margin:3px 0 4px;font-size:10px}
+#modal .gbu-payroll-person-total strong{font-size:12px}
+#modal .gbu-payroll-person>.gbu-payroll-category{padding-top:3px}
+#modal .gbu-payroll-person>.gbu-payroll-category+.gbu-payroll-category{margin-top:3px}
+#modal .gbu-payroll-category>summary{column-gap:3px;row-gap:1px}
+#modal .gbu-payroll-category>summary .gbu-payroll-shift-dates{margin:0;line-height:1.2}
+#modal .gbu-payroll-category>summary .gbu-payroll-shift-dates:empty{display:none}
+#modal .gbu-payroll-category>p{margin-top:3px;line-height:1.25}
+</style>
+</body>''', 1)
+
 def _isolated_preview_screen_html():
     html = INLINE_INDEX_HTML
     # No real Telegram SDK, credentials, database session or notifications.
