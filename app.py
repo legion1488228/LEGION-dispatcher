@@ -3578,6 +3578,21 @@ def free_staff_snapshot(db, day):
     return {"work_date": day.isoformat(), "groups": groups, "snapshot": signature}
 
 
+def free_staff_person_lines(people, with_phones=False):
+    labels = [f"{i}. {' '.join(str(person['name']).split())} · {' '.join(str(person['metro']).split())}"
+              for i, person in enumerate(people, 1)]
+    width = max((len(label) for label in labels), default=0)
+    lines = []
+    for label, person in zip(labels, people):
+        height = str(person.get('height') or '—')
+        car = ' 🚗' if with_phones and person.get('has_car') else ''
+        lines.append(f"<code>{escape(label.ljust(width))}  {escape(height.rjust(3))}</code>{car}")
+        if with_phones:
+            phone = re.sub(r'[^+0-9]', '', person.get('phone') or '')
+            lines.append(f"📞 {escape(phone)}" if phone else 'Телефон не указан')
+    return lines
+
+
 def free_staff_messages(snapshot, ids, settings, day):
     selected = set(ids)
     valid = {p["id"] for g in snapshot["groups"] for p in g["people"]}
@@ -3595,7 +3610,7 @@ def free_staff_messages(snapshot, ids, settings, day):
         if not chats or any(len(targets[chat]) != 1 for chat in chats):
             raise HTTPException(409, "Проверьте отдельный чат группы: " + group["label"])
         lines = ["<b>Заказы на завтра закрыты❗️</b>", day.strftime("%d.%m.%Y"), "", "<b>Без заказа:👇</b>"]
-        lines.extend(f"{i}. {escape(p['name'])} · {escape(p['metro'])} · {p['height']}" for i, p in enumerate(people, 1))
+        lines.extend(free_staff_person_lines(people))
         for chat in sorted(chats):
             messages.append({"chat_id": chat, "label": group["label"],
                              "chunks": readiness_chat_chunks(lines), "done": 0})
@@ -3603,16 +3618,18 @@ def free_staff_messages(snapshot, ids, settings, day):
     brigadier_chats = [chat for chat, codes in targets.items() if 'brigadier' in codes]
     if not brigadier_chats or any(targets[chat] != {'brigadier'} for chat in brigadier_chats):
         raise HTTPException(409, 'Не настроен отдельный чат бригадиров')
-    people = sorted((p for g in snapshot['groups'] for p in g['people'] if p['id'] in selected),
-                    key=lambda p: (p['name'].casefold(), p['metro'].casefold(), p['id']))
     lines = [f"<b>📋 Свободные на {day.strftime('%d.%m')}</b>",
              'Для замены утром — можно связаться напрямую.', '']
-    for i, person in enumerate(people, 1):
-        car = ' 🚗' if person.get('has_car') else ''
-        lines.append(f"{i}. {escape(person['name'])} {escape(person['metro'])} {escape(str(person['height']))}{car}")
-        phone = re.sub(r'[^+0-9]', '', person.get('phone') or '')
-        lines.append(f"📞 {escape(phone)}" if phone else 'Телефон не указан')
-    lines.extend(['', f'<b>Всего: {len(people)}</b>'])
+    for code in ('brigadier', 'main', 'cashless', 'reserve'):
+        group = next((group for group in snapshot['groups'] if group['code'] == code), None)
+        people = sorted((person for person in group['people'] if person['id'] in selected),
+                        key=lambda person: (person['name'].casefold(), person['metro'].casefold(), person['id'])) if group else []
+        if not people:
+            continue
+        lines.append(f"<b>{escape(group['label'])} · {len(people)}</b>")
+        lines.extend(free_staff_person_lines(people, with_phones=True))
+        lines.append('')
+    lines.append(f'<b>Всего: {len(selected)}</b>')
     messages = [m for m in messages if m['chat_id'] not in brigadier_chats]
     for chat in sorted(brigadier_chats):
         messages.append({'chat_id': chat, 'label': 'Бригадиры — общий список',
@@ -6188,13 +6205,14 @@ async function openFreeStaff(){
   const requestId=Array.from(crypto.getRandomValues(new Uint8Array(20)),b=>b.toString(16).padStart(2,'0')).join('');
   const group=code=>{
    const g=data.groups.find(x=>x.code===code);
-   return `<section class="free-staff-group"><b>${esc(g.label)} · ${g.people.length}</b>${g.people.map(p=>`<label class="free-staff-row"><span>${esc(p.name)} · ${esc(p.metro)} · ${esc(p.height)}</span><input type="checkbox" value="${p.id}" aria-label="Без заказа: ${esc(p.name)} ${esc(p.metro)} ${esc(p.height)}"></label>`).join('')||'<small>Нет готовых</small>'}</section>`;
+   return `<section class="free-staff-group"><b>${esc(g.label)} · ${g.people.length}</b>${g.people.map(p=>`<label class="free-staff-row"><span>${esc(p.name)} · ${esc(p.metro)}</span><span class="free-staff-height">${esc(p.height)}</span><input type="checkbox" value="${p.id}" aria-label="Без заказа: ${esc(p.name)} ${esc(p.metro)} ${esc(p.height)}"></label>`).join('')||'<small>Нет готовых</small>'}</section>`;
   };
   body.innerHTML=`<style>
    #freeStaffBody .free-staff-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}
    #freeStaffBody .free-staff-group{border:1px solid var(--line);border-radius:10px;padding:5px;margin-bottom:8px}
    #freeStaffBody .free-staff-group>b{display:block;color:var(--gold);font-size:12px;padding:5px 0}
-   #freeStaffBody .free-staff-row{display:grid;grid-template-columns:minmax(0,1fr) 17px;align-items:center;gap:5px;min-height:32px;border-top:1px solid var(--line);font-size:11px;line-height:1.2;cursor:pointer}
+   #freeStaffBody .free-staff-row{display:grid;grid-template-columns:minmax(0,1fr) 3ch 17px;align-items:center;gap:5px;min-height:32px;border-top:1px solid var(--line);font-size:11px;line-height:1.2;cursor:pointer}
+   #freeStaffBody .free-staff-row .free-staff-height{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;overflow-wrap:normal}
    #freeStaffBody .free-staff-row span{min-width:0;overflow-wrap:anywhere}
    #freeStaffBody input{width:17px;height:17px;min-width:17px;margin:0;padding:0;accent-color:var(--green)}
    #freeStaffBody .free-staff-footer{position:sticky;bottom:0;background:var(--panel);padding:10px 0;display:flex;align-items:center;gap:10px;border-top:1px solid var(--line)}
