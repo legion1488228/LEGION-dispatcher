@@ -8703,6 +8703,32 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('Не отписались к 15:3
     "Не отписались к ${esc(c.cutoff_label||'14:00')} · ${no.length}", 1)
 
 
+def gbu_control_earning_details(db, work_date):
+    """Expose only category and crew size saved for an exact GBU card."""
+    rows = db.scalars(select(PersonalMonthlyTable).where(
+        PersonalMonthlyTable.kind == 'earnings',
+        PersonalMonthlyTable.month == work_date.strftime('%Y-%m')))
+    candidates = {}
+    for row in rows:
+        if not _is_owner(db, row.owner_id):
+            continue
+        try:
+            details = json.loads(row.payload).get('gbu_details', {}).get(str(work_date.day), {})
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if not isinstance(details, dict):
+            continue
+        for key, detail in details.items():
+            if not isinstance(key, str) or not key.startswith('card:') or not isinstance(detail, dict):
+                continue
+            category, team = detail.get('category'), detail.get('team_size')
+            if category in ('standard', 'elite') and type(team) is int and team in (4, 6):
+                candidates.setdefault(key, set()).add((category, team))
+    # Conflicting owner tables must not silently assign the wrong category.
+    return {key: {'category': next(iter(values))[0], 'team_size': next(iter(values))[1]}
+            for key, values in candidates.items() if len(values) == 1}
+
+
 @app.get('/api/owner/brigade-control')
 def owner_brigade_control(work_date: date, db: Session = Depends(get_db),
         user: TelegramUser = Depends(require_app_user)):
@@ -8724,6 +8750,7 @@ def owner_brigade_control(work_date: date, db: Session = Depends(get_db),
     media_by_key = {}
     for media_row in media_rows:
         media_by_key.setdefault(media_row.report_key, []).append(media_row)
+    earning_details = gbu_control_earning_details(db, work_date) if any(c.source == 'gbu' for c in cards) else {}
     items = []
     for card, key in zip(cards, keys):
         row = states.get(key)
@@ -8738,6 +8765,7 @@ def owner_brigade_control(work_date: date, db: Session = Depends(get_db),
         required = 2 if card.source == 'gbu' else 1
         received = int(bool(photo['first_received'])) + (int(bool(photo['second_received'])) if required == 2 else 0)
         items.append({'id': card.id, 'source': card.source, 'surname': card.surname,
+            'gbu_earning_detail': earning_details.get(f'card:{card.id}') if card.source == 'gbu' else None,
             'employee': _employee_dict(employee) if employee else {'full_name': card.full_name, 'phone': card.phone},
             'contact_time': statuses[card.id]['contact_time'], 'on_contact': bool(contacts.get(card.id)),
             'prepared': bool(meta.get('prepared') or statuses[card.id]['closed']),
@@ -11361,6 +11389,20 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '<style id="gbu-staff-p
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('  await renderCurrentView();\n}\nasync function roleOpenOwn(){', '  await renderCurrentView();\n  if(state.selectedDate===state.bootstrap?.today)requestAnimationFrame(dispatchAlignSelectedDate);\n}\nasync function roleOpenOwn(){', 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace("qsa('.bottom-nav button').forEach(btn=>btn.onclick=async()=>{qsa('.bottom-nav button').forEach", "qsa('.bottom-nav button').forEach(btn=>btn.onclick=async()=>{if(state.bootstrap&&!state.bootstrap.cabinet_only)await dispatchResetToday();qsa('.bottom-nav button').forEach", 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace("if(!ref.revision){area.textContent=card[ref.stage===1?'first_received':'second_received']?'Фото '+ref.stage+' ещё не синхронизировано':'Ожидается фото '+ref.stage;return}", "if(!ref.revision&&!card[ref.stage===1?'first_received':'second_received']){area.textContent='Ожидается фото '+ref.stage;return}", 1)
+
+
+
+# Keep today identifiable when a different date is selected.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('class="date-pill ${d.date===state.selectedDate?\'active\':\'\'}" data-date="${d.date}" aria-pressed="${d.date===state.selectedDate}"', 'class="date-pill ${d.date===state.selectedDate?\'active\':\'\'} ${d.date===today?\'is-today\':\'\'}" data-date="${d.date}" aria-pressed="${d.date===state.selectedDate}"${d.date===today?\' aria-current="date"\':\'\'}', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('<small style="display:block;line-height:1.35;margin-top:4px">${esc(label)}</small>', '<small class="${d.date===today?\'date-today-label\':\'\'}" style="display:block;line-height:1.35;margin-top:4px">${esc(label)}</small>', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '<style>\n#dateStrip .date-pill.is-today:not(.active){border-color:var(--green);box-shadow:inset 0 0 0 1px var(--green)}\n#dateStrip .date-pill.is-today .date-today-label{color:var(--green);font-weight:700}\n</style></body>', 1)
+
+
+
+
+# GBU card category and crew size come from the owner earnings entry.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace("<h2>${esc(card.surname||'—')}</h2><small>Бригадир</small>", '<h2>${esc(card.surname||\'—\')}</h2>${card.source===\'gbu\'&&card.gbu_earning_detail?`<p class="bc-viewer-category">${esc(card.gbu_earning_detail.category===\'elite\'?\'Элит\':\'Стандарт\')} · ${esc(card.gbu_earning_detail.team_size)} ${card.gbu_earning_detail.team_size===4?\'человека\':\'человек\'}</p>`:\'\'}<small>Бригадир</small>', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '<style>.bc-viewer-category{display:table;margin:0 0 10px;padding:4px 9px;border-radius:8px;background:var(--gold-soft,#eee4c8);color:var(--gold,#967334);font-size:14px;font-weight:600;line-height:1.3}</style></body>', 1)
 
 def _isolated_preview_screen_html():
     html = INLINE_INDEX_HTML
