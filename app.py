@@ -1221,6 +1221,14 @@ class GbuPayrollRoster(Base):
     created_by = Column(BigInteger, nullable=False)
 
 
+class GbuOrderCrewSeat(Base):
+    __tablename__ = 'gbu_order_crew_seats'
+    # One confirmed order per employee per date, enforced across concurrent requests.
+    work_date = Column(Date, primary_key=True)
+    employee_id = Column(Integer, primary_key=True)
+    report_key = Column(String(180), nullable=False, index=True)
+
+
 class GbuPayrollRosterInput(BaseModel):
     card_id: StrictInt
     category: Literal['standard', 'elite']
@@ -1278,28 +1286,83 @@ def save_gbu_staff_roster(data: GbuPayrollRosterInput, db: Session = Depends(get
     ids=set(data.employee_ids)
     if len(ids)!=len(data.employee_ids) or len(ids) not in {4,6}:
         raise HTTPException(422,'Выберите состав из 4 или 6 разных сотрудников')
-    employees=list(db.scalars(select(Employee).where(Employee.id.in_(ids),Employee.active.is_(True),_visible_employee())))
-    leaders=[e for e in employees if e.tg_id==card.tg_id]
-    if len(employees)!=len(ids) or len(leaders)!=1:
-        raise HTTPException(422,'В составе должен быть бригадир этого заказа и действующие сотрудники')
     key=f'card:{card.chat_id}:{card.message_id}'
-    crew=[{'id':e.id,'name':_employee_dict(e)['display_name'],'role':'brigadier' if e.id==leaders[0].id else 'member',
-        'amount':gbu_staff_pay(data.category,e.id==leaders[0].id,e.full_name,getattr(e,'metro',''))} for e in employees]
     record=db.get(GbuPayrollRoster,key)
     if record:
-        # Repeated confirmation cannot double-count or silently change a paid roster.
         previous=json.loads(record.payload)
         if previous['category']!=data.category or {m['id'] for m in previous['crew']}!=ids:
             raise HTTPException(409,'Состав уже подтверждён для этого заказа')
         return {'ok':True,'already_saved':True}
+    context = gbu_order_roster_context(db, card)
+    detail = context['detail']
+    if not detail:
+        raise HTTPException(409,'Сначала сохраните категорию и количество человек в заработке ГБУ')
+    if data.category != detail['category'] or len(ids) != detail['team_size']:
+        raise HTTPException(409,'Категория или состав изменились в заработке. Откройте выбор заново')
+    leader = context['leader']
+    available = {e['id'] for e in context['employees'] if not e['busy']}
+    if not leader or leader['id'] not in ids or not ids <= available:
+        raise HTTPException(409,'Сотрудник уже занят или не отписался на эту дату. Обновите состав')
+    employees=list(db.scalars(select(Employee).where(Employee.id.in_(ids),Employee.active.is_(True),_visible_employee())))
+    if len(employees)!=len(ids):
+        raise HTTPException(409,'Список сотрудников изменился. Обновите состав')
+    crew=[{'id':e.id,'name':_employee_dict(e)['display_name'],'role':'brigadier' if e.id==leader['id'] else 'member',
+        'amount':gbu_staff_pay(data.category,e.id==leader['id'],e.full_name,getattr(e,'metro',''))} for e in employees]
+    for employee_id in sorted(ids):
+        db.add(GbuOrderCrewSeat(work_date=card.work_date,employee_id=employee_id,report_key=key))
     db.add(GbuPayrollRoster(report_key=key,work_date=card.work_date,payload=json.dumps({'category':data.category,'crew':crew},ensure_ascii=False),created_by=user.id))
     try:
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(409,'Состав уже сохранён. Обновите страницу')
+        raise HTTPException(409,'Состав уже сохранён или сотрудник занят другим заказом. Обновите страницу')
     return {'ok':True}
 
+
+
+def gbu_order_roster_context(db, card):
+    key = f'card:{card.chat_id}:{card.message_id}'
+    detail = gbu_control_earning_details(db, card.work_date).get(f'card:{card.id}')
+    employees = list(db.scalars(select(Employee).where(Employee.active.is_(True), _visible_employee())))
+    leaders = [e for e in employees if e.tg_id == card.tg_id]
+    leader_id = leaders[0].id if len(leaders) == 1 else None
+    summary = readiness_summary_data(db, card.work_date)
+    reported = {item['id']: item.get('readiness_status', status)
+        for group in summary['groups'].values()
+        for status in ('ready', 'not_ready', 'day_off', 'responded')
+        for item in group.get(status, []) if item.get('id', 0) > 0}
+    busy = set()
+    # Include rosters confirmed before the date/employee uniqueness table existed.
+    for roster in db.scalars(select(GbuPayrollRoster).where(GbuPayrollRoster.work_date == card.work_date)):
+        if roster.report_key != key:
+            busy.update(m['id'] for m in json.loads(roster.payload)['crew'])
+    for seat in db.scalars(select(GbuOrderCrewSeat).where(GbuOrderCrewSeat.work_date == card.work_date)):
+        if seat.report_key != key:
+            busy.add(seat.employee_id)
+    record = db.get(GbuPayrollRoster, key)
+    saved = json.loads(record.payload) if record else None
+    saved_ids = {m['id'] for m in saved['crew']} if saved else set()
+    people = [{**_employee_dict(e), 'busy': e.id in busy,
+        'selected': e.id in saved_ids, 'leader': e.id == leader_id,
+        'readiness_status': reported.get(e.id)} for e in employees
+        if e.id in reported or e.id == leader_id or e.id in saved_ids]
+    people.sort(key=lambda e: (not e['leader'], str(e['display_name']).casefold(), e['id']))
+    return {'card_id': card.id, 'date': card.work_date.isoformat(), 'surname': card.surname,
+        'detail': detail, 'leader': next((e for e in people if e['leader']), None),
+        'employees': people, 'confirmed': saved is not None,
+        'confirmed_detail': {'category': saved['category'], 'team_size': len(saved['crew'])} if saved else None,
+        'photo_received': bool(effective_order_photo(db, card).get('first_received'))}
+
+
+@app.get('/api/gbu-staff-payroll/roster/{card_id}')
+def get_gbu_order_roster(card_id: int, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    if not _dispatcher_access(db, user.id):
+        raise HTTPException(403, 'Доступ только диспетчеру')
+    card = db.scalar(select(NumberCardEvent).where(NumberCardEvent.id == card_id,
+        NumberCardEvent.source == 'gbu', _visible_number_card()))
+    if not card:
+        raise HTTPException(404, 'Заказ ГБУ не найден')
+    return JSONResponse(gbu_order_roster_context(db, card), headers={'Cache-Control':'private, no-store'})
 
 
 def _date_folders(db: Session, selected: date):
@@ -11403,6 +11466,24 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '<style>\n#dateStrip .d
 # GBU card category and crew size come from the owner earnings entry.
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace("<h2>${esc(card.surname||'—')}</h2><small>Бригадир</small>", '<h2>${esc(card.surname||\'—\')}</h2>${card.source===\'gbu\'&&card.gbu_earning_detail?`<p class="bc-viewer-category">${esc(card.gbu_earning_detail.category===\'elite\'?\'Элит\':\'Стандарт\')} · ${esc(card.gbu_earning_detail.team_size)} ${card.gbu_earning_detail.team_size===4?\'человека\':\'человек\'}</p>`:\'\'}<small>Бригадир</small>', 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '<style>.bc-viewer-category{display:table;margin:0 0 10px;padding:4px 9px;border-radius:8px;background:var(--gold-soft,#eee4c8);color:var(--gold,#967334);font-size:14px;font-weight:600;line-height:1.3}</style></body>', 1)
+
+
+
+# GBU category button opens the date-scoped, exclusive crew picker.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('<h2>${esc(card.surname||\'—\')}</h2>${card.source===\'gbu\'&&card.gbu_earning_detail?`<p class="bc-viewer-category">${esc(card.gbu_earning_detail.category===\'elite\'?\'Элит\':\'Стандарт\')} · ${esc(card.gbu_earning_detail.team_size)} ${card.gbu_earning_detail.team_size===4?\'человека\':\'человек\'}</p>`:\'\'}', '<div class="bc-viewer-title-row"><h2>${esc(card.surname||\'—\')}</h2>${card.source===\'gbu\'&&card.gbu_earning_detail?`<button type="button" class="bc-viewer-category" data-gbu-order-roster aria-label="Выбрать состав заказа">${esc(card.gbu_earning_detail.category===\'elite\'?\'Элит\':\'Стандарт\')} · ${esc(card.gbu_earning_detail.team_size)} ${card.gbu_earning_detail.team_size===4?\'человека\':\'человек\'} ›</button>`:\'\'}</div>', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(" const close=dialog.querySelector('header button'),area=dialog.querySelector('.bc-viewer-stage')", " const rosterButton=dialog.querySelector('[data-gbu-order-roster]');if(rosterButton)rosterButton.onclick=()=>openGbuOrderRoster(card.id);\n const close=dialog.querySelector('header button'),area=dialog.querySelector('.bc-viewer-stage')", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '<script>async function openGbuOrderRoster(cardId,afterSave){\n document.querySelector(\'.gbu-crew-dialog\')?.close();\n const dialog=document.createElement(\'dialog\');dialog.className=\'gbu-crew-dialog\';\n dialog.innerHTML=\'<header class="gbu-crew-head"><h3>Состав заказа</h3><button type="button" data-crew-close aria-label="Закрыть">×</button></header><div data-crew-body>Загрузка…</div>\';\n dialog.querySelector(\'[data-crew-close]\').onclick=()=>dialog.close();dialog.addEventListener(\'close\',()=>dialog.remove(),{once:true});document.body.append(dialog);dialog.showModal();\n const root=dialog.querySelector(\'[data-crew-body]\');\n try{\n  const data=await api(\'/api/gbu-staff-payroll/roster/\'+cardId);if(!dialog.open)return;\n  const detail=data.confirmed_detail||data.detail;\n  if(!detail){root.textContent=\'Сначала сохраните категорию и количество человек в заработке ГБУ.\';return}\n  if(!data.leader){root.textContent=\'Бригадир не найден. Проверьте его профиль.\';return}\n  const need=detail.team_size-1;\n  root.innerHTML=`<p><b>${esc(data.surname)}</b> · ${detail.category===\'elite\'?\'Элит\':\'Стандарт\'} · ${detail.team_size} чел.</p><p class="muted">${esc(data.date)} · Сотрудники, отписавшиеся на эту дату</p><form data-crew-form><p><b>Бригадир: ${esc(readinessEmployeeName(data.leader))}</b></p><p>${data.confirmed?\'Состав подтверждён\':\'Добавьте ещё \'+need+\' сотрудников\'}</p><input type="search" class="search" data-crew-search placeholder="Поиск по имени и метро"><div data-crew-list>${data.employees.filter(e=>!e.leader).map((e,i)=>`<label class="gbu-crew-choice ${e.busy?\'is-busy\':\'\'}" data-crew-name="${esc((readinessEmployeeName(e)+\' \'+(e.metro||\'\')).toLowerCase())}"><input type="checkbox" value="${e.id}" ${e.selected?\'checked\':\'\'} ${e.busy||data.confirmed?\'disabled\':\'\'}><span><b data-crew-number>${i+1}.</b> ${esc(readinessEmployeeName(e))}<small>${e.busy?\'Занят в другом заказе\':esc(({ready:\'Готов\',not_ready:\'На основной\',day_off:\'Выходной\',responded:\'Отписался\'})[e.readiness_status]||\'\')}</small></span></label>`).join(\'\')}</div><p data-crew-error role="alert" class="gbu-crew-message"></p><footer class="gbu-crew-footer"><p data-crew-count role="status"></p><button type="submit" class="primary" ${data.confirmed?\'hidden\':\'\'}>Подтвердить состав</button></footer></form>`;\n  const form=root.querySelector(\'[data-crew-form]\'),button=form.querySelector(\'[type=submit]\'),counter=form.querySelector(\'[data-crew-count]\'),error=form.querySelector(\'[data-crew-error]\');\n  const layoutCrewRows=()=>{const rows=[...form.querySelectorAll(\'[data-crew-name]\')].filter(r=>!r.hidden),half=Math.ceil(rows.length/2);rows.forEach((r,i)=>{r.style.gridColumn=i<half?\'1\':\'2\';r.style.gridRow=String(i%half+1)})};layoutCrewRows();\n  const boxes=[...form.querySelectorAll(\'input[type=checkbox]\')];let busy=false;\n  const selected=()=>boxes.filter(x=>x.checked).map(x=>Number(x.value));\n  const update=()=>{const n=selected().length;counter.textContent=\'Выбрано \'+n+\' из \'+need+\' сотрудников\';button.disabled=busy||data.confirmed||n!==need||!data.photo_received||data.leader.busy;boxes.forEach(box=>{const emp=data.employees.find(e=>e.id===Number(box.value));box.disabled=data.confirmed||busy||emp.busy||(!box.checked&&n>=need)});};\n  if(!data.photo_received)error.textContent=\'Подтверждение состава доступно после первого фото.\';\n  if(data.leader.busy)error.textContent=\'Бригадир уже подтверждён в другом заказе на эту дату.\';\n  boxes.forEach(box=>box.onchange=update);update();\n  form.querySelector(\'[data-crew-search]\').oninput=event=>{const term=event.target.value.toLowerCase().trim();form.querySelectorAll(\'[data-crew-name]\').forEach(row=>{row.hidden=!row.dataset.crewName.includes(term)});layoutCrewRows()};\n  form.onsubmit=async event=>{event.preventDefault();if(button.disabled||busy)return;const ids=selected();if(ids.length!==need)return;busy=true;update();error.textContent=\'\';\n   try{await api(\'/api/gbu-staff-payroll/roster\',{method:\'POST\',body:JSON.stringify({card_id:cardId,category:detail.category,employee_ids:[data.leader.id,...ids]})});if(!dialog.open)return;dialog.close();if(afterSave)await afterSave();else await openGbuOrderRoster(cardId)}catch(err){if(!dialog.open)return;error.textContent=err.message;busy=false;update()}\n  };\n }catch(error){if(dialog.open)root.textContent=error.message}\n}\nasync function openGbuPayrollRoster(order,month){return openGbuOrderRoster(order.card_id,()=>openGbuPayroll(month))}\n</script><style>\n.bc-viewer-title-row{display:flex;gap:8px;align-items:center;justify-content:space-between;margin-bottom:12px}\n.bc-viewer-title-row h2{min-width:0;overflow-wrap:anywhere;margin:0;font-size:clamp(20px,5vw,28px)}\n.bc-viewer-title-row .bc-viewer-category{flex:0 0 auto;max-width:49%;margin:0;border:0;min-height:40px;text-align:center;cursor:pointer;font-size:12px;white-space:normal}\n.gbu-crew-dialog{box-sizing:border-box;width:calc(100% - 24px);max-width:540px;max-height:88dvh;overflow:auto;border:1px solid #b49a60;border-radius:20px;padding:16px;background:var(--card,#f7f5ef);color:var(--text,#30342d)}\n.gbu-crew-dialog::backdrop{background:#0008}.gbu-crew-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.gbu-crew-head h3{margin:0}.gbu-crew-head button{min-width:44px;min-height:44px}\n.gbu-crew-choice{display:flex;gap:10px;align-items:center;padding:11px 4px;border-bottom:1px solid #d8d8d0;cursor:pointer}.gbu-crew-choice input{width:21px;height:21px;flex:0 0 auto;accent-color:#987838}.gbu-crew-choice span{min-width:0}.gbu-crew-choice small{display:block;font-size:12px;color:#777}.gbu-crew-choice.is-busy{opacity:.55}.gbu-crew-footer{position:sticky;bottom:-16px;background:var(--card,#f7f5ef);padding:10px 0 16px}.gbu-crew-footer button{width:100%;min-height:44px}.gbu-crew-message{color:#a7463e}\n</style></body>', 1)
+
+
+
+# Crew checklist follows the shared two-column, top-to-bottom directory layout.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', """<style>
+.gbu-crew-choice[hidden]{display:none}
+[data-crew-list]{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:14px;position:relative}
+[data-crew-list]::before{content:'';position:absolute;left:50%;top:0;bottom:0;width:1px;background:#d8d8d0;pointer-events:none}
+.gbu-crew-choice{min-width:0;align-items:flex-start;font-size:13px;line-height:1.35;overflow-wrap:anywhere}
+.gbu-crew-choice small{font-size:11px}.gbu-crew-choice input{width:19px;height:19px;margin:1px 0 0}
+</style></body>""", 1)
 
 def _isolated_preview_screen_html():
     html = INLINE_INDEX_HTML
