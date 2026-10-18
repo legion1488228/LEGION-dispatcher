@@ -11717,6 +11717,33 @@ body.dispatch-shared-header #app>.topbar>.dispatch-date-title+div{grid-column:3;
 </style>
 </body>''', 1)
 
+# Two compact employee cards per row in each GBU payroll role group.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
+<style id="gbu-payroll-employee-cards-style">
+#modal .gbu-payroll-role-heading{padding:7px 8px}
+#modal .gbu-payroll-people-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;padding:6px;align-items:start}
+#modal .gbu-payroll-people-grid>.gbu-payroll-person{min-width:0;border:1px solid var(--line);border-radius:9px;padding:7px;background:var(--panel);font-weight:400}
+#modal .gbu-payroll-person-name{display:block;font-size:12px;line-height:1.3;overflow-wrap:anywhere}
+#modal .gbu-payroll-person-total{display:flex;align-items:baseline;justify-content:space-between;gap:4px;flex-wrap:wrap;margin:5px 0 6px;font-size:10px;color:var(--muted)}
+#modal .gbu-payroll-person-total strong{color:var(--gold2);font-size:13px;white-space:nowrap}
+#modal .gbu-payroll-person>.gbu-payroll-category{margin:0;padding:5px 0 0;border-top:1px solid var(--line);font-size:10px}
+#modal .gbu-payroll-person>.gbu-payroll-category+.gbu-payroll-category{margin-top:5px}
+#modal .gbu-payroll-category>summary{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:baseline;gap:4px;list-style:none;cursor:pointer}
+#modal .gbu-payroll-category>summary::-webkit-details-marker{display:none}
+#modal .gbu-payroll-category>summary>span:first-child::before{content:'▸ ';color:var(--muted)}
+#modal .gbu-payroll-category[open]>summary>span:first-child::before{content:'▾ '}
+#modal .gbu-payroll-category>summary>span:last-child{white-space:nowrap}
+#modal .gbu-payroll-category>summary .gbu-payroll-shift-dates{grid-column:1/-1;font-size:10px;font-weight:400;margin:1px 0 0;white-space:normal;overflow-wrap:anywhere}
+#modal .gbu-payroll-category>p{margin:4px 0 0;font-size:10px;line-height:1.35;color:var(--muted);overflow-wrap:anywhere}
+#modal .gbu-payroll-people-grid>.gbu-payroll-empty{grid-column:1/-1;margin:2px;font-size:12px}
+</style>
+<script>
+function gbuPayrollGroupsHtml(data){
+ return gbuPayrollRoleGroups(data).map(group=>`<section class="gbu-payroll-role" data-payroll-role="${group.role}"><div class="gbu-payroll-role-heading"><h4>${group.title}</h4><b>${esc(cabinetMoney(group.total))} ₽</b></div><div class="gbu-payroll-people-grid">${group.employees.map(employee=>`<article class="gbu-payroll-person"><b class="gbu-payroll-person-name">${esc(employee.name)}</b><div class="gbu-payroll-person-total"><span>Выходы: ${employee.exits}</span><strong>${esc(cabinetMoney(employee.amount))} ₽</strong></div>${employee.categories.map(category=>`<details class="gbu-payroll-category"><summary><span>${category.category==='elite'?'Элит':'Стандарт'} · ${category.exits}</span><span>${esc(cabinetMoney(category.amount))} ₽</span><small class="gbu-payroll-shift-dates">${esc(category.dates.join(', ')||'—')}</small></summary>${category.orders.map(order=>`<p>${esc(order.date.slice(8,10)+'.'+order.date.slice(5,7))} · ${esc(order.surname)} · ${esc(cabinetMoney(order.amount))} ₽</p>`).join('')||'<p>Выходов нет</p>'}</details>`).join('')}</article>`).join('')||'<p class="muted gbu-payroll-empty">Выходов за этот период нет</p>'}</div></section>`).join('');
+}
+</script>
+</body>''', 1)
+
 def _isolated_preview_screen_html():
     html = INLINE_INDEX_HTML
     # No real Telegram SDK, credentials, database session or notifications.
