@@ -1212,6 +1212,96 @@ def bootstrap(work_date: date | None = None, db: Session = Depends(get_db), user
     }
 
 
+# Employee GBU payroll is separate from company earnings and cash tables.
+class GbuPayrollRoster(Base):
+    __tablename__ = 'gbu_payroll_rosters'
+    report_key = Column(String(180), primary_key=True)
+    work_date = Column(Date, nullable=False, index=True)
+    payload = Column(String, nullable=False)
+    created_by = Column(BigInteger, nullable=False)
+
+
+class GbuPayrollRosterInput(BaseModel):
+    card_id: StrictInt
+    category: Literal['standard', 'elite']
+    employee_ids: list[StrictInt] = Field(min_length=4, max_length=6)
+
+
+def gbu_staff_pay(category, is_brigadier, name='', metro=''):
+    if category not in {'standard', 'elite'}:
+        raise ValueError('Не указана категория')
+    if not is_brigadier:
+        return 1700 if category == 'standard' else 2600
+    normalized = f'{name} {metro}'.casefold()
+    vlad = bool(re.search(r'\b(влад|владислав)\b', normalized) and 'рязанск' in normalized)
+    return (3000 if category == 'standard' else 3400) if vlad else (2500 if category == 'standard' else 3000)
+
+
+def gbu_payroll_cards(db, month):
+    start = date.fromisoformat(month+'-01')
+    last = date(start.year, 12, 31) if start.month == 12 else start.replace(month=start.month+1)-timedelta(days=1)
+    return list(db.scalars(select(NumberCardEvent).where(NumberCardEvent.source=='gbu',
+        NumberCardEvent.work_date>=start, NumberCardEvent.work_date<=last, _visible_number_card()).order_by(NumberCardEvent.work_date,NumberCardEvent.id)))
+
+
+@app.get('/api/gbu-staff-payroll')
+def gbu_staff_payroll(month: str, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    if not _dispatcher_access(db,user.id):
+        raise HTTPException(403,'Доступ только диспетчеру')
+    if not re.fullmatch(r'[1-9]\d{3}-(0[1-9]|1[0-2])',month):
+        raise HTTPException(422,'Выберите месяц')
+    people={};orders=[];missing=[]
+    for card in gbu_payroll_cards(db,month):
+        key=f'card:{card.chat_id}:{card.message_id}'
+        if not effective_order_photo(db,card).get('first_received'):
+            continue
+        record=db.get(GbuPayrollRoster,key)
+        item={'card_id':card.id,'date':card.work_date.isoformat(),'surname':card.surname,'brigadier':card.full_name,'tg_id':card.tg_id}
+        if not record:
+            missing.append(item);continue
+        roster=json.loads(record.payload)
+        orders.append(dict(item,category=roster['category'],crew=roster['crew']))
+        for member in roster['crew']:
+            row=people.setdefault(member['id'],{'id':member['id'],'name':member['name'],'exits':0,'amount':0,'orders':[]})
+            row['exits']+=1;row['amount']+=member['amount'];row['orders'].append(dict(item,amount=member['amount'],role=member['role'],category=roster['category']))
+    return JSONResponse({'month':month,'employees':sorted(people.values(),key=lambda x:x['name'].casefold()),
+        'orders':orders,'missing':missing,'total':sum(x['amount'] for x in people.values())},headers={'Cache-Control':'private, no-store'})
+
+
+@app.post('/api/gbu-staff-payroll/roster')
+def save_gbu_staff_roster(data: GbuPayrollRosterInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    if not _dispatcher_access(db,user.id):
+        raise HTTPException(403,'Доступ только диспетчеру')
+    card=db.scalar(select(NumberCardEvent).where(NumberCardEvent.id==data.card_id,NumberCardEvent.source=='gbu',_visible_number_card()))
+    if not card or not effective_order_photo(db,card).get('first_received'):
+        raise HTTPException(409,'Для учёта выхода нужно первое фото заказа')
+    ids=set(data.employee_ids)
+    if len(ids)!=len(data.employee_ids) or len(ids) not in {4,6}:
+        raise HTTPException(422,'Выберите состав из 4 или 6 разных сотрудников')
+    employees=list(db.scalars(select(Employee).where(Employee.id.in_(ids),Employee.active.is_(True),_visible_employee())))
+    leaders=[e for e in employees if e.tg_id==card.tg_id]
+    if len(employees)!=len(ids) or len(leaders)!=1:
+        raise HTTPException(422,'В составе должен быть бригадир этого заказа и действующие сотрудники')
+    key=f'card:{card.chat_id}:{card.message_id}'
+    crew=[{'id':e.id,'name':_employee_dict(e)['display_name'],'role':'brigadier' if e.id==leaders[0].id else 'member',
+        'amount':gbu_staff_pay(data.category,e.id==leaders[0].id,e.full_name,getattr(e,'metro',''))} for e in employees]
+    record=db.get(GbuPayrollRoster,key)
+    if record:
+        # Repeated confirmation cannot double-count or silently change a paid roster.
+        previous=json.loads(record.payload)
+        if previous['category']!=data.category or {m['id'] for m in previous['crew']}!=ids:
+            raise HTTPException(409,'Состав уже подтверждён для этого заказа')
+        return {'ok':True,'already_saved':True}
+    db.add(GbuPayrollRoster(report_key=key,work_date=card.work_date,payload=json.dumps({'category':data.category,'crew':crew},ensure_ascii=False),created_by=user.id))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409,'Состав уже сохранён. Обновите страницу')
+    return {'ok':True}
+
+
+
 def _date_folders(db: Session, selected: date):
     today = datetime.now(MOSCOW).date()
     # The date ribbon is bounded by the selected calendar month.
@@ -11248,6 +11338,29 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('const dispatchDateCache=new Map()
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('<header class="topbar">\n      <div>', '<header class="topbar">\n      <div class="dispatch-date-title">', 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('    </header>\n\n    <section class="date-strip" id="dateStrip">', '      <label class="dispatch-month-picker"><span id="dispatchMonthLabel">Месяц ▾</span><input id="dispatchMonth" type="month" min="1900-01" max="9998-12" aria-label="Месяц и год заказов"></label>\n    </header>\n\n    <section class="date-strip" id="dateStrip">', 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '<style id="dispatch-month-picker-style">\n.topbar:has(.dispatch-month-picker){display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px;align-items:center}\n.topbar .dispatch-date-title{display:contents}\n.topbar .dispatch-date-title .eyebrow{grid-column:1;grid-row:1}\n.topbar .dispatch-date-title h1{grid-column:1;grid-row:2;min-width:0}\n.topbar>.dispatch-date-title+div{grid-column:2;grid-row:2}\n.topbar .dispatch-month-picker{grid-column:1/-1;grid-row:1;justify-self:end;position:relative;display:block;margin:0;padding:4px 9px;border:1px solid var(--line);border-radius:9px;background:var(--panel);color:var(--gold);font-size:12px;line-height:1.4;min-height:30px;box-sizing:border-box}\n.dispatch-month-picker input{position:absolute;inset:0;width:100%;height:100%;opacity:0;margin:0;font-size:16px;cursor:pointer}\n.dispatch-month-picker:focus-within{outline:2px solid var(--gold);outline-offset:2px}\n.owner-cabinet-open .dispatch-month-picker{display:none!important}\n</style></body>', 1)
+
+
+
+# Six date buttons, reset on bottom navigation, compact employee actions.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('let dispatchRenderedMonth=null,dispatchDateAccount=null;', 'function dispatchAlignSelectedDate(){\n const el=qs(\'#dateStrip\'),selected=el?.querySelector(`[data-date="${state.selectedDate}"]`);if(!el||!selected)return;\n const padding=parseFloat(getComputedStyle(el).paddingLeft)||0;\n const x=Math.max(0,selected.offsetLeft-padding);el.scrollLeft=x;\n const remaining=Math.max(0,el.clientWidth-padding-(parseFloat(getComputedStyle(el).paddingRight)||0)-selected.offsetWidth);\n const tail=el.querySelector(\'.date-strip-tail\');if(tail)tail.style.width=remaining+\'px\';el.scrollLeft=x;\n}\nasync function dispatchResetToday(){\n if(state.bootstrap?.cabinet_only)return;\n dispatchRenderedMonth=null;await loadBootstrap();dispatchAlignSelectedDate();\n}\n\nlet dispatchRenderedMonth=null,dispatchDateAccount=null;', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(' el.scrollLeft=changed&&selected?Math.max(0,selected.offsetLeft-100):oldScroll;', " if(changed&&selected){const tail=document.createElement('span');tail.className='date-strip-tail';tail.setAttribute('aria-hidden','true');el.append(tail);dispatchAlignSelectedDate()}else{const tail=document.createElement('span');tail.className='date-strip-tail';tail.setAttribute('aria-hidden','true');el.append(tail);const padding=parseFloat(getComputedStyle(el).paddingLeft)||0;tail.style.width=Math.max(0,el.clientWidth-padding-(parseFloat(getComputedStyle(el).paddingRight)||0)-(selected?.offsetWidth||0))+'px';el.scrollLeft=oldScroll;}", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('  roleNavigationActive=target;updateRoleNavigation();', "  if(['owner','assistant'].includes(kind)){await dispatchResetToday()}\n  roleNavigationActive=target;updateRoleNavigation();", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('<button class="secondary small" id="gbuAgentsBtn">⬛ Агенты ГБУ</button>', '<button type="button" class="secondary small" id="gbuPayrollBtn">₽ Зарплата ГБУ</button><button class="secondary small" id="gbuAgentsBtn">⬛ Агенты ГБУ</button>', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('<summary><span><span class="staff-directory-number">', '<summary ${canEdit?`data-employee-profile="${index}"`:""}><span><span class="staff-directory-number">', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('${canEdit?`<button type="button" class="secondary" data-profile-edit="${index}" aria-label="Изменить данные сотрудника">✍🏻</button>`:\'\'}', '', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace("qsa('[data-profile-edit]',qs('#employeesList')).forEach(button=>button.onclick=()=>openEmployeeProfile(filtered[Number(button.dataset.profileEdit)],loadEmployees));", "qsa('[data-employee-profile]',qs('#employeesList')).forEach(button=>button.onclick=event=>{event.preventDefault();openEmployeeProfile(filtered[Number(button.dataset.employeeProfile)],loadEmployees)});\n  const payroll=qs('#gbuPayrollBtn');payroll.hidden=!canEdit;payroll.onclick=()=>openGbuPayroll();", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '<style id="six-dates-staff-actions-style">\n#dateStrip{--date-gap:4px;gap:var(--date-gap);padding-left:8px;padding-right:8px;position:relative}\n#dateStrip .date-pill{box-sizing:border-box;flex:0 0 calc((100% - 20px)/6);width:calc((100% - 20px)/6);min-width:0!important;padding:7px 2px!important;letter-spacing:0}\n#dateStrip .date-pill strong{font-size:clamp(9px,2.6vw,13px)!important}\n#dateStrip .date-pill small{font-size:clamp(8px,2.3vw,11px)!important;letter-spacing:0}\n#dateStrip .date-strip-tail{display:block;flex:0 0 auto;min-height:1px;pointer-events:none}\n#employeesView>.section-head{gap:8px}\n#employeesView>.section-head>.section-actions{display:flex;gap:6px}\n#employeesView #gbuAgentsBtn,#employeesView #gbuPayrollBtn{font-size:11px;padding:7px 8px;min-height:36px;white-space:normal;line-height:1.2;max-width:100px}\n#employeesView .staff-directory-person.is-editable{grid-template-columns:minmax(0,1fr)}\n#employeesView .staff-directory-person summary{min-height:36px}\n@media(max-width:360px){#employeesView>.section-head{flex-wrap:wrap}#employeesView>.section-head>.section-actions{margin-left:auto}}\n</style></body>', 1)
+
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '<style id="gbu-staff-payroll-style">.gbu-staff-payroll-table{overflow-x:auto}.gbu-staff-payroll-table table{width:100%;border-collapse:collapse;font-size:13px}.gbu-staff-payroll-table td,.gbu-staff-payroll-table th{padding:8px 5px;text-align:left;border-bottom:1px solid var(--line)}.gbu-staff-payroll-table th:first-child{width:60%}.gbu-staff-payroll-table p{font-size:12px;color:var(--muted)}#gbuPayrollBody small{display:block}#gbuPayrollRoster .gbu-roster-choice{display:flex;gap:10px;align-items:center;padding:8px;min-height:40px}#gbuPayrollRoster .gbu-roster-choice input{width:18px;height:18px}#gbuPayrollRoster [hidden]{display:none!important}</style><script>async function openGbuPayroll(month=state.selectedDate.slice(0,7)){\n showModal(\'Зарплата ГБУ\',`<label>Месяц<input id="gbuPayrollMonth" type="month" value="${esc(month)}"></label><div id="gbuPayrollBody">Загрузка…</div>`);\n const body=qs(\'#gbuPayrollBody\'),active=()=>qs(\'#gbuPayrollBody\')===body&&!qs(\'#modal\').classList.contains(\'hidden\');\n qs(\'#gbuPayrollMonth\').onchange=event=>{if(event.target.value)openGbuPayroll(event.target.value)};\n try{\n  const data=await api(\'/api/gbu-staff-payroll?month=\'+month);if(!active())return;\n  body.innerHTML=`<p class="muted">Один заказ — один выход. Повторное фото не добавляет начисление.</p><h3>Начислено: ${esc(cabinetMoney(data.total))} ₽</h3><div class="gbu-staff-payroll-table"><table><thead><tr><th>Сотрудник</th><th>Выходы</th><th>Начислено</th></tr></thead><tbody>${data.employees.map(x=>`<tr><td><details><summary>${esc(x.name)}</summary>${x.orders.map(o=>`<p>${esc(o.date.slice(8)+\'.\'+o.date.slice(5,7))} · ${esc(o.surname)} · ${o.category===\'elite\'?\'Элит\':\'Стандарт\'} · ${esc(cabinetMoney(o.amount))} ₽</p>`).join(\'\')}</details></td><td>${x.exits}</td><td>${esc(cabinetMoney(x.amount))} ₽</td></tr>`).join(\'\')||\'<tr><td colspan="3">Подтверждённых составов пока нет</td></tr>\'}</tbody></table></div>${data.missing.length?`<h4>Укажите состав · ${data.missing.length}</h4><p class="muted">Первое фото отмечено, но состав сотрудников не сохранён. Эти заказы пока не включены в начисления.</p><div class="list">${data.missing.map((o,i)=>`<button type="button" class="secondary" data-payroll-roster="${i}">${esc(o.date.slice(8)+\'.\'+o.date.slice(5,7))} · ${esc(o.surname)}<small>${esc(o.brigadier)}</small></button>`).join(\'\')}</div>`:\'\'}`;\n  qsa(\'[data-payroll-roster]\',body).forEach(b=>b.onclick=()=>openGbuPayrollRoster(data.missing[Number(b.dataset.payrollRoster)],month));\n }catch(error){if(active())body.textContent=error.message}\n}\nasync function openGbuPayrollRoster(order,month){\n showModal(\'Состав ГБУ · \'+order.surname,\'<div id="gbuPayrollRoster">Загрузка…</div>\');const root=qs(\'#gbuPayrollRoster\');\n try{\n  const employees=await api(\'/api/employees\');if(qs(\'#gbuPayrollRoster\')!==root)return;\n  const leader=employees.find(e=>Number(e.tg_id)===Number(order.tg_id));\n  if(!leader){root.textContent=\'Бригадир не найден в списке сотрудников. Проверьте его профиль.\';return}\n  root.innerHTML=`<form id="gbuPayrollRosterForm"><p>${esc(order.brigadier)} · ${esc(order.date)}</p><label>Категория<select name="category" required><option value="">Выберите категорию</option><option value="standard">Стандарт</option><option value="elite">Элит</option></select></label><input class="search" data-roster-search placeholder="Поиск сотрудника"><div class="list">${employees.map(e=>`<label class="gbu-roster-choice" data-roster-name="${esc(readinessEmployeeName(e).toLowerCase())}"><input type="checkbox" value="${e.id}" ${e.id===leader.id?\'checked disabled\':\'\'}>${esc(readinessEmployeeName(e))}${e.id===leader.id?\' · бригадир\':\'\'}</label>`).join(\'\')}</div><p data-roster-status role="status"></p><button type="submit" class="primary">Подтвердить состав и начислить</button></form><button type="button" class="secondary" data-roster-back>Назад</button>`;\n  qs(\'[data-roster-search]\',root).oninput=e=>qsa(\'[data-roster-name]\',root).forEach(row=>row.hidden=!row.dataset.rosterName.includes(e.target.value.toLowerCase().trim()));\n  qs(\'[data-roster-back]\',root).onclick=()=>openGbuPayroll(month);\n  let busy=false;qs(\'#gbuPayrollRosterForm\').onsubmit=async event=>{\n   event.preventDefault();if(busy)return;const form=event.currentTarget,ids=qsa(\'input[type=checkbox]:checked\',form).map(x=>Number(x.value));\n   if(![4,6].includes(ids.length)){qs(\'[data-roster-status]\',root).textContent=\'Выберите 4 или 6 сотрудников вместе с бригадиром\';return}\n   busy=true;const button=qs(\'[type=submit]\',form);button.disabled=true;\n   try{await api(\'/api/gbu-staff-payroll/roster\',{method:\'POST\',body:JSON.stringify({card_id:order.card_id,category:form.elements.category.value,employee_ids:ids})});await openGbuPayroll(month)}catch(error){qs(\'[data-roster-status]\',root).textContent=error.message;busy=false;button.disabled=false}\n  };\n }catch(error){if(qs(\'#gbuPayrollRoster\')===root)root.textContent=error.message}\n}\n</script></body>', 1)
+
+
+
+# Align after section layout; allow retrying newly synchronized historical images.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('  await renderCurrentView();\n}\nasync function roleOpenOwn(){', '  await renderCurrentView();\n  if(state.selectedDate===state.bootstrap?.today)requestAnimationFrame(dispatchAlignSelectedDate);\n}\nasync function roleOpenOwn(){', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace("qsa('.bottom-nav button').forEach(btn=>btn.onclick=async()=>{qsa('.bottom-nav button').forEach", "qsa('.bottom-nav button').forEach(btn=>btn.onclick=async()=>{if(state.bootstrap&&!state.bootstrap.cabinet_only)await dispatchResetToday();qsa('.bottom-nav button').forEach", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace("if(!ref.revision){area.textContent=card[ref.stage===1?'first_received':'second_received']?'Фото '+ref.stage+' ещё не синхронизировано':'Ожидается фото '+ref.stage;return}", "if(!ref.revision&&!card[ref.stage===1?'first_received':'second_received']){area.textContent='Ожидается фото '+ref.stage;return}", 1)
 
 def _isolated_preview_screen_html():
     html = INLINE_INDEX_HTML
