@@ -11498,6 +11498,18 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '<style>.gbu-crew-group
 # Rectangular gold action for the GBU order category and crew.
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '<style>\n.bc-photo-viewer .bc-viewer-title-row button.bc-viewer-category{\n appearance:none;-webkit-appearance:none;box-sizing:border-box;\n border:1px solid #b49a60;border-radius:9px;\n background:#eee3c6;color:#8b6b30;padding:8px 10px;\n min-height:40px;line-height:1.3;font-weight:700;box-shadow:none;\n}\n.bc-photo-viewer .bc-viewer-title-row button.bc-viewer-category:active{background:#e5d3a4}\n.bc-photo-viewer .bc-viewer-title-row button.bc-viewer-category:focus-visible{outline:2px solid #a7853f;outline-offset:2px}\n</style></body>', 1)
 
+
+
+# Ready status is implicit in the ready-only crew picker.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace("<small>${e.busy?'Занят в другом заказе':e.readiness_status==='ready'?'Готов':'В подтверждённом составе'}</small>", "${e.busy?'<small>Занят в другом заказе</small>':e.readiness_status!=='ready'?'<small>В подтверждённом составе</small>':''}", 1)
+
+
+
+# Compact crew header: gold order badge, fixed leader, then search.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('<p><b>${esc(data.surname)}</b> · ${detail.category===\'elite\'?\'Элит\':\'Стандарт\'} · ${detail.team_size} чел.</p><p class="muted">${esc(data.date)} · Готовые сотрудники на эту дату</p><form data-crew-form><p><b>Бригадир: ${esc(readinessEmployeeName(data.leader))}</b></p><p>${data.confirmed?\'Состав подтверждён\':\'Добавьте ещё \'+need+\' сотрудников\'}</p>', '<div class="gbu-crew-order-badge"><b>${esc(data.surname)}</b><span>${detail.category===\'elite\'?\'Элит\':\'Стандарт\'} · ${detail.team_size} чел.</span></div><form data-crew-form><div class="gbu-crew-leader"><small>Бригадир</small><b>${esc(readinessEmployeeName(data.leader))}</b></div><p class="gbu-crew-instruction">${data.confirmed?\'Состав подтверждён\':\'Добавьте ещё \'+need+\' сотрудников\'}</p>', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '<style>\n.gbu-crew-dialog .gbu-crew-head{margin-bottom:8px;gap:8px}\n.gbu-crew-dialog .gbu-crew-head h3{font-size:19px;line-height:1.25}\n.gbu-crew-dialog .gbu-crew-head button{width:38px;min-width:38px;height:38px;min-height:38px;padding:0;border-radius:10px;font-size:22px}\n.gbu-crew-order-badge{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px 10px;padding:8px 10px;border:1px solid #b49a60;border-radius:9px;background:#eee3c6;color:#8b6b30;font-size:13px;line-height:1.3;margin-bottom:9px}\n.gbu-crew-order-badge b{min-width:0;overflow-wrap:anywhere;font-size:14px}.gbu-crew-order-badge span{font-weight:600}\n.gbu-crew-leader{display:flex;align-items:baseline;flex-wrap:wrap;gap:3px 7px;font-size:14px;line-height:1.35}\n.gbu-crew-leader small{font-size:12px;color:#777}.gbu-crew-instruction{margin:6px 0 8px;font-size:13px}\n.gbu-crew-dialog [data-crew-search]{box-sizing:border-box;width:100%;min-height:40px;padding:8px 10px;font-size:16px;border-radius:10px;margin:0}\n.gbu-crew-dialog .gbu-crew-group{margin:10px 0}\n</style></body>', 1)
+
+
 def _isolated_preview_screen_html():
     html = INLINE_INDEX_HTML
     # No real Telegram SDK, credentials, database session or notifications.
