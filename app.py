@@ -6001,6 +6001,8 @@ def get_gbu_earnings(work_date: date, db: Session = Depends(get_db), user: Teleg
     employees = list(db.scalars(select(Employee).where(_visible_employee())))
     choices = []
     for employee in employees:
+        if employee.group_code != 'brigadier':
+            continue
         name = _employee_dict(employee)['display_name']
         _, special = gbu_earnings_rate(name, employee.metro, 'standard', 4)
         choices.append({'id': employee.id, 'name': name, 'special': special})
@@ -6035,6 +6037,8 @@ def save_gbu_earnings(work_date: date, change: GbuEarningsInput, db: Session = D
                 raise HTTPException(400, 'Некорректный номер ручного заказа.')
             employee = employees.get(item.employee_id)
             previous = old_details.get(key, {})
+            if employee is not None and employee.group_code != 'brigadier' and previous.get('employee_id') != item.employee_id:
+                raise HTTPException(400, 'Выберите сотрудника из группы бригадиров.')
             if employee is None and previous.get('employee_id') != item.employee_id:
                 raise HTTPException(400, 'Выберите сотрудника из списка.')
             if item.employee_id is None:
