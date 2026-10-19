@@ -6705,6 +6705,7 @@ def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends
             OrderBrigadeContact.event_id.in_([card.id for card in cards])))} if cards else {}
     items = [{"id": card.id, "source": card.source, "surname": card.surname,
               "photo_team_size": photo_sizes.get(card.id), "order_spec": cabinet_assigned_spec(db, card),
+              "spec_step_enabled": card.work_date >= BRIGADIER_SPEC_START,
               "work_date": card.work_date.isoformat(),
               "_action_ref": f"{card.chat_id}_{card.message_id}", "report_key": f"card:{card.chat_id}:{card.message_id}",
               "composition_closed": statuses[card.id]["closed"],
@@ -7684,6 +7685,8 @@ def cabinet_command_create(data: CabinetCommandInput, db: Session = Depends(get_
             raise HTTPException(404, 'Заказ удалён или передан другому бригадиру')
         if data.action == 'cash':
             cabinet_cash_stage_guard(db, card)
+        if data.action in {'schedule', 'close'} and card.work_date >= BRIGADIER_SPEC_START:
+            cabinet_check_assigned_values(db, card, {}, required=True)
         if data.action in {'cash', 'photo', 'edit', 'number'}:
             cabinet_check_assigned_values(db, card, payload['values'], required=data.action in {'cash', 'photo'})
         if data.action == 'photo':
@@ -8958,15 +8961,15 @@ def cabinet_assigned_spec(db, card):
 
 
 def cabinet_check_assigned_values(db, card, values, required=False):
-    """Brigadier commands may echo assigned values, but never assign them."""
+    """Stage commands echo saved values; the separate spec step assigns them."""
     spec = cabinet_assigned_spec(db, card)
     fields = {'uniform_category': 'category', 'category': 'category',
               'frame_team_size': 'team_size', 'team_size': 'team_size'}
     if not spec and (required or any(key in values for key in fields)):
-        raise HTTPException(409, 'Диспетчер ещё не назначил категорию и количество людей')
+        raise HTTPException(409, 'Сначала выберите категорию и количество людей в карточке заказа')
     for key, target in fields.items():
         if key in values and (type(values[key]) is not type(spec[target]) or values[key] != spec[target]):
-            raise HTTPException(403, 'Категорию и количество людей меняют только владелец и диспетчер. Обновите карточку')
+            raise HTTPException(409, 'Категория или состав изменились. Обновите карточку заказа')
     if spec and values.get('source', card.source) != card.source:
         raise HTTPException(409, 'Для изменения типа назначенного заказа обратитесь к диспетчеру')
 
@@ -8977,13 +8980,39 @@ class DispatchOrderSpecInput(BaseModel):
     version: StrictInt = Field(ge=0)
 
 
-def dispatch_spec_context(db, user, card_id):
-    if not _dispatcher_access(db, user.id) or cabinet_kind(db, user.id) not in {'owner', 'assistant'}:
-        raise HTTPException(403, 'Выбор доступен только владельцу и диспетчеру')
+BRIGADIER_SPEC_START = date(2026, 10, 20)
+
+
+def order_spec_dispatcher(db, uid):
+    return _dispatcher_access(db, uid) and cabinet_kind(db, uid) in {'owner', 'assistant'}
+
+
+def order_spec_own_access(db, uid, card, trusted_native=False):
+    if card.tg_id != uid or card.work_date < BRIGADIER_SPEC_START or uid in HIDDEN_TG_IDS:
+        return False
+    if db.get(OwnerManagedBlock, uid):
+        return False
+    if not trusted_native:
+        return _can_use_owner_cabinet(db, uid)
+    return db.scalar(select(Employee.id).where(Employee.tg_id == uid, Employee.active.is_(True),
+        Employee.group_code == 'brigadier', _visible_employee()).limit(1)) is not None
+
+
+def order_spec_own_editable(db, card):
+    meta = cabinet_extra_state(db, card)
+    return not (meta.get('prepared') or meta.get('cash') or meta.get('tea_received')
+        or number_card_statuses(db, [card])[card.id]['closed']
+        or effective_order_photo(db, card).get('first_received'))
+
+
+def dispatch_spec_context(db, user, card_id, trusted_native=False):
+    dispatcher = order_spec_dispatcher(db, user.id)
     card = db.scalar(select(NumberCardEvent).where(NumberCardEvent.id == card_id,
         NumberCardEvent.tg_id.notin_(HIDDEN_TG_IDS), _visible_number_card()).with_for_update())
     if not card or card.source not in {'private', 'gbu'}:
         raise HTTPException(404, 'Заказ не найден')
+    if not dispatcher and not order_spec_own_access(db, user.id, card, trusted_native):
+        raise HTTPException(403, 'Можно выбрать параметры только своего заказа с 20 октября')
     if card.source == 'gbu':
         config = db.get(OwnerCabinetConfig, 1)
         owner_id = config.owner_tg_id if config else None
@@ -9004,13 +9033,20 @@ def dispatch_spec_context(db, user, card_id):
 def get_dispatch_order_spec(card_id: int, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     card, row, payload, version, owner_id = dispatch_spec_context(db, user, card_id)
     return {'card_id': card.id, 'source': card.source, 'surname': card.surname,
-            'version': version, 'order_spec': cabinet_assigned_spec(db, card)}
+            'version': version, 'order_spec': cabinet_assigned_spec(db, card),
+            'can_edit': order_spec_dispatcher(db, user.id) or order_spec_own_editable(db, card)}
 
 
 @app.put('/api/owner/order-spec/{card_id}')
 def save_dispatch_order_spec(card_id: int, change: DispatchOrderSpecInput,
         db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
-    card, row, payload, version, owner_id = dispatch_spec_context(db, user, card_id)
+    return save_order_spec_values(card_id, change, db, user)
+
+
+def save_order_spec_values(card_id, change, db, user, trusted_native=False):
+    card, row, payload, version, owner_id = dispatch_spec_context(db, user, card_id, trusted_native)
+    if not order_spec_dispatcher(db, user.id) and not order_spec_own_editable(db, card):
+        raise HTTPException(409, 'Заказ уже закрыт. Для изменения категории или количества людей обратитесь к диспетчеру')
     allowed = {'standard': (4, 6), 'elite': (4, 6)} if card.source == 'gbu' else {
         'standard': (3, 4, 5, 6), 'vip': (4, 6), 'elite': (4, 6)}
     if change.team_size not in allowed.get(change.category, ()):
@@ -9039,6 +9075,44 @@ def save_dispatch_order_spec(card_id: int, change: DispatchOrderSpecInput,
         db.rollback()
         raise HTTPException(409, 'Параметры изменились. Откройте карточку заново')
     return {'saved': True, 'order_spec': spec, 'version': version + 1}
+
+
+class BotOrderSpecRequest(BaseModel):
+    tg_id: StrictInt = Field(gt=0)
+    report_key: str = Field(pattern=r'^card:-?\d+:\d+$')
+
+
+class BotOrderSpecSave(BotOrderSpecRequest):
+    category: Literal['standard', 'vip', 'elite']
+    team_size: StrictInt = Field(ge=3, le=6)
+    version: StrictInt = Field(ge=0)
+
+
+def bot_order_spec_card(db, data):
+    _, chat, message = data.report_key.split(':')
+    card = db.scalar(select(NumberCardEvent).where(NumberCardEvent.chat_id == int(chat),
+        NumberCardEvent.message_id == int(message), NumberCardEvent.tg_id == data.tg_id,
+        _visible_number_card()))
+    if not card:
+        raise HTTPException(404, 'Карточка ещё не синхронизирована или передана другому бригадиру')
+    return card
+
+
+@app.post('/api/bot/order-spec/context', dependencies=[Depends(_bot_key)])
+def bot_order_spec_context(data: BotOrderSpecRequest, db: Session = Depends(get_db)):
+    card = bot_order_spec_card(db, data)
+    user = TelegramUser(id=data.tg_id, first_name='Бригадир')
+    card, row, payload, version, owner_id = dispatch_spec_context(db, user, card.id, trusted_native=True)
+    return {'card_id': card.id, 'source': card.source, 'surname': card.surname, 'version': version,
+            'order_spec': cabinet_assigned_spec(db, card),
+            'can_edit': order_spec_dispatcher(db, user.id) or order_spec_own_editable(db, card)}
+
+
+@app.post('/api/bot/order-spec', dependencies=[Depends(_bot_key)])
+def bot_order_spec_save(data: BotOrderSpecSave, db: Session = Depends(get_db)):
+    card = bot_order_spec_card(db, data)
+    return save_order_spec_values(card.id, data, db,
+        TelegramUser(id=data.tg_id, first_name='Бригадир'), trusted_native=True)
 
 
 @app.get('/api/owner/brigade-control')
@@ -12303,7 +12377,7 @@ function bindDispatchOrderSpec(root,items){
   badge.onclick=open;badge.onkeydown=e=>{if(e.key==='Enter'||e.key===' ')open(e)};
  });
 }
-async function openDispatchOrderSpec(card,trigger){
+async function openDispatchOrderSpec(card,trigger,afterSave=null){
  if(document.querySelector('.dispatch-spec-dialog'))return;
  const dialog=document.createElement('dialog');dialog.className='dispatch-spec-dialog';
  dialog.innerHTML='<header><h3>Параметры заказа</h3><button type="button" data-close aria-label="Закрыть">×</button></header><div data-body>Загрузка…</div>';
@@ -12315,6 +12389,7 @@ async function openDispatchOrderSpec(card,trigger){
  document.body.append(dialog);dialog.showModal();const body=dialog.querySelector('[data-body]');
  try{
   const data=await api('/api/owner/order-spec/'+card.id);if(!dialog.open)return;
+  if(data.can_edit===false){body.innerHTML=`<p>${esc(cabinetAssignedSpecText({order_spec:data.order_spec}))}</p><p>Заказ уже закрыт. Для изменения обратитесь к диспетчеру.</p>`;return}
   const allowed=data.source==='gbu'?{standard:[4,6],elite:[4,6]}:{standard:[3,4,5,6],vip:[4,6],elite:[4,6]};
   const labels={standard:'Стандарт',vip:'Вип',elite:'Элит'};
   body.innerHTML=`<b>${esc(data.surname)}</b><form><label>Категория<select name="category" required><option value="">Выбрать</option>${Object.keys(allowed).map(key=>`<option value="${key}" ${data.order_spec?.category===key?'selected':''}>${labels[key]}</option>`).join('')}</select></label><label>Количество людей<select name="team_size" required></select></label><p role="status"></p><button type="submit" class="primary">Сохранить</button></form>`;
@@ -12325,7 +12400,7 @@ async function openDispatchOrderSpec(card,trigger){
    try{const saved=await api('/api/owner/order-spec/'+card.id,{method:'PUT',body:JSON.stringify({version:data.version,category:category.value,team_size:Number(team.value)})});
     card.order_spec=saved.order_spec;const badge=trigger?.querySelector('.bc-order-spec');
     if(badge)badge.remove();trigger?.insertAdjacentHTML('beforeend',controlOrderSpecHtml(card));
-    dialog.close();toast('Категория и состав сохранены');
+    dialog.close();toast('Категория и состав сохранены');if(afterSave)await afterSave();
    }catch(error){if(dialog.open){status.textContent=error.message;busy=false;form.querySelectorAll('button,select').forEach(x=>x.disabled=false)}}
   };
  }catch(error){if(dialog.open)body.textContent=error.message}
@@ -12341,6 +12416,30 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     "${key.startsWith('elite')?'Элит':'Стандарт'} · ${key.endsWith('6')?'6':'4'} чел.",
     "${key.startsWith('elite')?'Э':'Ст'}${key.endsWith('6')?'6':'4'}", 1,
 )
+
+
+def _brigadier_spec_step_html(html):
+    html = html.replace("function cabinetNextAction(c,data){", """function cabinetNextAction(c,data){
+  if(c.spec_step_enabled&&!c.order_spec)return {key:'order_spec',title:'Категория и количество людей',icon:'check'};""", 1)
+    html = html.replace('  if(cardId!==null&&!card)return;', '''  if(cardId!==null&&!card)return;
+  if(card&&(key==='order_spec'||(card.spec_step_enabled&&!card.order_spec&&['schedule','close','cash','photo'].includes(key)))){
+    return openDispatchOrderSpec(card,null,async()=>{
+      if(state.bootstrap?.user?.id!==uid||currentViewId()!=='ownerCabinetView')return;
+      await loadOwnerCabinet();
+      const fresh=ownerCabinetData?.number_cards?.find(x=>Number(x.id)===Number(card.id));
+      if(!fresh||!fresh.order_spec||state.bootstrap?.user?.id!==uid||currentViewId()!=='ownerCabinetView')return;
+      ownerCabinetSelectedCard=fresh.id;renderOwnerCabinet(ownerCabinetData);
+      const next=cabinetNextAction(fresh,ownerCabinetData);if(next)await ownerCabinetAction(next.key,fresh.id);
+    });
+  }''', 1)
+    html = html.replace("Категорию и количество людей назначает диспетчер", "Категория и количество людей ещё не выбраны")
+    html = html.replace("Диспетчер ещё не назначил категорию и количество людей", "Сначала выберите категорию и количество людей")
+    html = html.replace("${c.source==='gbu'?'ГБУ':'Частный'}</span><small class=\"cabinet-card-date\">",
+        "${c.source==='gbu'?'ГБУ':'Частный'}</span>${controlOrderSpecHtml(c)}<small class=\"cabinet-card-date\">", 1)
+    return html.replace('</body>', '<style>.cabinet-order-top>.bc-order-spec{color:var(--gold);font-size:11px;font-weight:700;background:transparent;white-space:nowrap}</style></body>', 1)
+
+
+INLINE_INDEX_HTML = _brigadier_spec_step_html(INLINE_INDEX_HTML)
 
 
 def _isolated_preview_screen_html():
