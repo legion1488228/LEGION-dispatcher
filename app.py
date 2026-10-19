@@ -11256,15 +11256,15 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', '''<style id="gbu-earni
 #modal:has(#gbuEarnBody)>.modal-head h3{font-size:18px;line-height:1.2}
 #modal:has(#gbuEarnBody)>.modal-head .close-btn{width:32px;height:32px;min-height:32px}
 #modal>#gbuEarnBack{min-height:36px;padding:6px 10px;margin-bottom:2px}
-#gbuEarnBody .gbu-earning-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;margin-top:6px;align-items:stretch}
-#gbuEarnBody .gbu-earning-card{min-width:0;display:flex;flex-direction:column;gap:4px;padding:6px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
-#gbuEarnBody .gbu-earning-card>b{display:block;min-height:2.4em;font-size:12px;line-height:1.2;overflow-wrap:anywhere}
-#gbuEarnBody .gbu-card-controls{display:grid;grid-template-columns:minmax(0,1fr) 42px;gap:4px;align-items:end}
-#gbuEarnBody .gbu-card-controls label{display:flex;flex-direction:column;min-width:0;gap:2px;font-size:10px;color:var(--muted);line-height:1.15}
+#gbuEarnBody .gbu-earning-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;margin-top:6px;align-items:stretch}
+#gbuEarnBody .gbu-earning-card{min-width:0;display:flex;flex-direction:column;gap:3px;padding:5px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+#gbuEarnBody .gbu-earning-card>b{display:block;min-height:0;margin:0;font-size:11px;line-height:1.15;overflow-wrap:anywhere}
+#gbuEarnBody .gbu-card-controls{display:grid;grid-template-columns:minmax(0,1fr) 30px;gap:3px;align-items:end}
+#gbuEarnBody .gbu-card-controls label{display:flex;flex-direction:column;min-width:0;gap:1px;margin:0;font-size:9px;color:var(--muted);line-height:1.1}
 #gbuEarnBody .gbu-card-type-label{grid-column:1/-1}
-#gbuEarnBody [data-gbu-type],#gbuEarnBody [data-gbu-money]{display:block;box-sizing:border-box;width:100%;max-width:100%;min-width:0;min-height:36px;margin:0;padding:5px 4px;border:1px solid var(--line);border-radius:6px;background:var(--panel2);color:var(--text);font-size:16px}
-#gbuEarnBody [data-gbu-auto]{min-width:0;min-height:36px;padding:4px 2px;font-size:11px;border-radius:6px;box-sizing:border-box}
-#gbuEarnBody [data-gbu-hint]{display:block;font-size:10px;line-height:1.2;overflow-wrap:anywhere}
+#gbuEarnBody [data-gbu-type],#gbuEarnBody [data-gbu-money]{display:block;box-sizing:border-box;width:100%;max-width:100%;min-width:0;height:32px;min-height:32px;margin:0;padding:3px 4px;border:1px solid var(--line);border-radius:6px;background:var(--panel2);color:var(--text);font-size:16px;line-height:1.15}
+#gbuEarnBody [data-gbu-auto]{min-width:0;height:32px;min-height:32px;padding:3px 2px;font-size:10px;border-radius:6px;box-sizing:border-box}
+#gbuEarnBody [data-gbu-hint]{display:block;margin:0;font-size:9px;line-height:1.15;overflow-wrap:anywhere}
 #gbuEarnBody .gbu-earning-empty{grid-column:1/-1}
 #gbuEarnForm>h3{font-size:14px;line-height:1.2;overflow-wrap:anywhere;margin:6px 0}
 #gbuEarnForm>p.muted{font-size:11px;line-height:1.25;margin:4px 0}
@@ -12334,6 +12334,13 @@ async function openDispatchOrderSpec(card,trigger){
 
 
 INLINE_INDEX_HTML = _dispatch_only_order_spec_html(INLINE_INDEX_HTML)
+
+
+# Short category labels keep the three-column day editor readable on phones.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "${key.startsWith('elite')?'Элит':'Стандарт'} · ${key.endsWith('6')?'6':'4'} чел.",
+    "${key.startsWith('elite')?'Э':'Ст'}${key.endsWith('6')?'6':'4'}", 1,
+)
 
 
 def _isolated_preview_screen_html():
