@@ -12232,8 +12232,11 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     "card?.frame_team_size||card?.cash?.team_size||4", 1,
 ).replace('</body>', r'''
 <style id="compact-control-order-spec-style">
-#ownerBrigadeControlContent .bc-order-title>.bc-kind{display:inline-flex;align-items:center;gap:3px;white-space:nowrap;font-size:9px}
-#ownerBrigadeControlContent .bc-order-spec{font-size:8px;line-height:1;font-weight:800;white-space:nowrap;color:var(--gold)}
+#ownerBrigadeControlContent .bc-order-title>.bc-kind{display:inline-flex;align-items:center;gap:3px;white-space:nowrap;font-size:9px;background:transparent;padding:0}
+#ownerBrigadeControlContent .bc-kind>span:first-child{padding:2px;border-radius:5px}
+#ownerBrigadeControlContent .bc-kind-private>span:first-child{color:var(--green);background:color-mix(in srgb,var(--green) 12%,var(--panel))}
+#ownerBrigadeControlContent .bc-kind-gbu>span:first-child{color:var(--gold);background:color-mix(in srgb,var(--gold) 12%,var(--panel))}
+#ownerBrigadeControlContent .bc-kind>.bc-order-spec{font-size:8px;line-height:1;font-weight:800;white-space:nowrap;color:var(--gold);background:transparent;padding:0;border:0;box-shadow:none}
 @media(max-width:350px){
  #ownerBrigadeControlContent .bc-order-title>.bc-kind{font-size:8px;gap:2px}
  #ownerBrigadeControlContent .bc-kind-gbu .bc-source-mark{display:none}
