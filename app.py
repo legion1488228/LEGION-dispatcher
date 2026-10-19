@@ -12442,6 +12442,352 @@ def _brigadier_spec_step_html(html):
 INLINE_INDEX_HTML = _brigadier_spec_step_html(INLINE_INDEX_HTML)
 
 
+UI_USAGE_CONTROLS = {
+    'nav.orders': ('Заказы', 'Нижнее меню', '[data-role-nav="ready"]'),
+    'nav.staff': ('Сотрудники', 'Нижнее меню', '[data-role-nav="staff"]'),
+    'nav.tables': ('Мои таблицы', 'Нижнее меню', '[data-role-nav="tables"]'),
+    'nav.cabinet': ('Мой кабинет', 'Нижнее меню', '[data-role-nav="own"]'),
+    'nav.control': ('Контроль', 'Нижнее меню', '[data-role-nav="brigadeControl"]'),
+    'nav.cash': ('Касса', 'Нижнее меню', '[data-role-nav="cash"]'),
+    'nav.earnings': ('Заработок', 'Нижнее меню', '[data-role-nav="earnings"]'),
+    'top.management': ('Управление', 'Шапка', '#ownerManagementTop'),
+    'top.refresh': ('Обновить', 'Шапка', '#refreshBtn'),
+    'top.month': ('Выбор месяца', 'Шапка', '#dispatchMonth'),
+    'top.date': ('Выбор дня', 'Шапка', '#dateStrip .date-pill'),
+    'orders.comment': ('Комментарий к заказам', 'Заказы', '#dayCommentBtn'),
+    'orders.contacts': ('Бригады на связи', 'Заказы', '#brigadesContactCount'),
+    'orders.photo.private': ('Фото частных заказов', 'Заказы', '#privatePhotoControl'),
+    'orders.photo.gbu': ('Фото ГБУ', 'Заказы', '#gbuPhotoControl'),
+    'orders.ready': ('Готовые сотрудники', 'Заказы', '#allRespondedCount'),
+    'orders.noresponse': ('Не отписались', 'Заказы', '#noResponseCount'),
+    'orders.dayoff': ('Выходной — кто без заказа', 'Заказы', '#readinessHistoryBtn'),
+    'orders.bell': ('Уведомления — колокольчик', 'Заказы', '#readinessRemindersBtn'),
+    'orders.avral': ('Аврал', 'Заказы', '#readinessAvralBtn'),
+    'orders.send': ('Сверка в чат', 'Заказы', '#readinessSendBtn'),
+    'orders.new': ('Добавить заказ', 'Заказы', '#newOrderBtn'),
+    'orders.gbu.import': ('Загрузка заказов ГБУ', 'Заказы', '#gbuBtn'),
+    'orders.numbers': ('Номера в группе', 'Заказы', '#readinessView #numberCardsBtn'),
+    'orders.group.ready': ('Готовые — по группам', 'Заказы', '[data-rstatus="ready"]'),
+    'orders.group.main': ('На основной — по группам', 'Заказы', '[data-rstatus="main"]'),
+    'orders.group.dayoff': ('Выходной — по группам', 'Заказы', '[data-rstatus="day_off"]'),
+    'orders.group.noresponse': ('Не отписались — по группам', 'Заказы', '[data-rstatus="no_response"]'),
+    'orders.ready.edit': ('Изменить готовность сотрудника', 'Заказы', '[data-ready-edit]'),
+    'orders.subgroup.edit': ('Изменить список готовности', 'Заказы', '[data-subgroup-edit]'),
+    'control.numbers': ('Номера в группе', 'Контроль', '#ownerBrigadeControlContent #numberCardsBtn'),
+    'control.date': ('Дата контроля', 'Контроль', '#brigadeControlDate'),
+    'control.all': ('Все заказы', 'Контроль', '[data-brigade-source="all"]'),
+    'control.private': ('Частные заказы', 'Контроль', '[data-brigade-source="private"]'),
+    'control.gbu': ('Заказы ГБУ', 'Контроль', '[data-brigade-source="gbu"]'),
+    'control.contact': ('На связи', 'Контроль', '[data-brigade-stage="contact"]'),
+    'control.photo': ('Фото получены', 'Контроль', '[data-brigade-stage="photo"]'),
+    'control.done': ('Завершено', 'Контроль', '[data-brigade-stage="done"]'),
+    'control.spec': ('Категория и количество людей', 'Контроль', '[data-control-card] .bc-kind'),
+    'control.card': ('Открыть карточку заказа', 'Контроль', '[data-control-card]>summary'),
+    'control.crew': ('Состав ГБУ', 'Контроль', '[data-gbu-order-roster]'),
+    'control.crew.edit': ('Изменить состав ГБУ', 'Контроль', '[data-edit-crew]'),
+    'control.crew.save': ('Подтвердить состав ГБУ', 'Контроль', '[data-crew-form] [type="submit"]'),
+    'control.numbers.reassign': ('Передать номер другому бригадиру', 'Контроль', '[data-number-reassign]'),
+    'control.numbers.delete': ('Удалить номер', 'Контроль', '[data-number-delete]'),
+    'staff.payroll': ('Зарплата ГБУ', 'Сотрудники', '#gbuPayrollBtn'),
+    'staff.agents': ('Агенты ГБУ', 'Сотрудники', '#gbuAgentsBtn'),
+    'staff.group': ('Фильтр по группе', 'Сотрудники', '#employeeFilters button'),
+    'staff.profile': ('Карточка сотрудника', 'Сотрудники', '[data-employee-profile]'),
+    'staff.save': ('Сохранить сотрудника', 'Сотрудники', '#employeeProfileForm [type="submit"]'),
+    'staff.payroll.person': ('Отчёт сотрудника по зарплате ГБУ', 'Сотрудники', '[data-payroll-person]'),
+    'staff.payroll.period': ('Период зарплаты ГБУ', 'Сотрудники', '[data-payroll-period]'),
+    'staff.payroll.roster': ('Указать состав из зарплаты ГБУ', 'Сотрудники', '[data-payroll-roster]'),
+    'staff.agent.add': ('Добавить агента ГБУ', 'Сотрудники', '#gbuAgentAddBtn'),
+    'staff.agent.copy': ('Скопировать телефон агента', 'Сотрудники', '[data-copy-agent-phone]'),
+    'tables.earnings': ('Заработок', 'Мои таблицы', '[data-personal-kind="earnings"]'),
+    'tables.kickbacks': ('Откаты', 'Мои таблицы', '[data-personal-kind="kickbacks"]'),
+    'tables.orders': ('Таблица заказов', 'Мои таблицы', '[data-personal-kind="orders"]'),
+    'tables.cash': ('Расширенная касса', 'Мои таблицы', '#earningsTables'),
+    'tables.month': ('Месяц таблицы', 'Мои таблицы', '#personalMonth'),
+    'tables.day': ('Ячейка таблицы', 'Мои таблицы', '[data-personal-cell]'),
+    'tables.gbu.add': ('Добавить заказ ГБУ вручную', 'Мои таблицы', '#gbuEarnAdd'),
+    'tables.gbu.save': ('Сохранить заработок ГБУ', 'Мои таблицы', '#gbuEarnForm [type="submit"]'),
+    'tables.orders.day': ('Разбор количества заказов за день', 'Мои таблицы', '[data-order-breakdown-key]'),
+    'tables.orders.edit': ('Изменить количество заказов', 'Мои таблицы', '[data-edit-order-breakdown]'),
+    'tables.gbu.auto': ('Автоматическая сумма ГБУ', 'Мои таблицы', '[data-gbu-auto]'),
+    'cash.edit': ('Редактировать кассу за день', 'Касса', '#cashDayEdit'),
+    'cash.add': ('Добавить запись кассы', 'Касса', '#cashDayAdd'),
+    'cash.notes': ('Отправить кассовым', 'Касса', '#cashNotesSend'),
+    'management.access': ('Кабинеты и доступы', 'Управление', '[data-management-section="access"]'),
+    'management.brigadiers': ('Бригадиры', 'Управление', '[data-management-section="brigadiers"]'),
+    'management.cash': ('Бригадиры и чаты кассы', 'Управление', '[data-management-section="cash"]'),
+    'management.staff': ('Сотрудники и группы', 'Управление', '[data-management-section="staff"]'),
+    'management.bot': ('Настройки бота', 'Управление', '[data-management-section="bot"]'),
+    'management.usage': ('Статистика кнопок', 'Управление', '[data-management-section="usage"]'),
+    'management.add': ('Добавить сотрудника', 'Управление', '#managementAdd'),
+    'management.edit': ('Редактировать сотрудника', 'Управление', '[data-management-edit]'),
+    'management.move': ('Перенести сотрудника в группу', 'Управление', '[data-management-move]'),
+    'cabinet.number': ('Номер в группу', 'Мой кабинет', '[data-cabinet-action="number"]'),
+    'cabinet.photo': ('Фотоотчёт', 'Мой кабинет', '[data-cabinet-action="photo"]'),
+    'cabinet.close': ('Закрыть заказ', 'Мой кабинет', '[data-cabinet-action="close"]'),
+    'cabinet.cash': ('Заполнить кассу', 'Мой кабинет', '[data-cabinet-action="cash"]'),
+    'cabinet.tea': ('Итоговый отчёт', 'Мой кабинет', '[data-cabinet-action="tea"]'),
+    'cabinet.spec': ('Выбор категории и состава', 'Мой кабинет', '[data-cabinet-action="order_spec"]'),
+    'cabinet.ready': ('Готовность на завтра', 'Мой кабинет', '[data-cabinet-action="readiness"]'),
+    'cabinet.schedule': ('Время фото', 'Мой кабинет', '[data-cabinet-action="schedule"]'),
+    'cabinet.contact': ('Бригада на связи', 'Мой кабинет', '[data-cabinet-action="contact"]'),
+    'cabinet.edit': ('Изменить заказ', 'Мой кабинет', '[data-cabinet-action="edit"]'),
+    'cabinet.delete': ('Удалить заказ', 'Мой кабинет', '[data-cabinet-action="delete"]'),
+    'cabinet.profile': ('Мой профиль', 'Мой кабинет', '[data-cabinet-action="profile"]'),
+    'cabinet.staff': ('Поиск сотрудников', 'Мой кабинет', '#cabinetEmployees'),
+    'cabinet.earnings': ('Личный заработок', 'Мой кабинет', '#cabinetFinanceLink'),
+}
+
+
+class UiUsageDaily(Base):
+    __tablename__ = 'ui_usage_daily'
+    work_date = Column(Date, primary_key=True)
+    tg_id = Column(BigInteger, primary_key=True)
+    role = Column(String(16), primary_key=True)
+    control_key = Column(String(64), primary_key=True)
+    shown = Column(Integer, nullable=False, default=0)
+    clicks = Column(Integer, nullable=False, default=0)
+    last_seen = Column(DateTime, nullable=True)
+    last_clicked = Column(DateTime, nullable=True)
+
+
+class UiUsageReceipt(Base):
+    __tablename__ = 'ui_usage_receipts'
+    id = Column(String(64), primary_key=True)
+    tg_id = Column(BigInteger, nullable=False)
+    fingerprint = Column(String(64), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class UiUsageItem(BaseModel):
+    key: StrictStr = Field(min_length=1, max_length=64)
+    shown: StrictInt = Field(ge=0, le=1)
+    clicks: StrictInt = Field(ge=0, le=100)
+
+
+class UiUsageBatch(BaseModel):
+    id: StrictStr = Field(min_length=32, max_length=64, pattern=r'^[a-zA-Z0-9-]+$')
+    items: list[UiUsageItem] = Field(min_length=1, max_length=80)
+
+
+@app.post('/api/ui-usage')
+def record_ui_usage(data: UiUsageBatch, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    role = cabinet_kind(db, user.id)
+    if role not in {'owner', 'assistant'}:
+        raise HTTPException(403, 'Сбор доступен только в диспетчерской')
+    keys = [item.key for item in data.items]
+    if len(keys) != len(set(keys)) or any(key not in UI_USAGE_CONTROLS for key in keys):
+        raise HTTPException(422, 'Неизвестная кнопка')
+    fingerprint = hashlib.sha256(json.dumps(data.model_dump(), sort_keys=True).encode()).hexdigest()
+    receipt = db.get(UiUsageReceipt, data.id)
+    if receipt:
+        if receipt.tg_id != user.id or receipt.fingerprint != fingerprint:
+            raise HTTPException(409, 'Этот пакет уже использован')
+        return {'saved': True}
+    now, day = datetime.utcnow(), datetime.now(MOSCOW).date()
+    try:
+        db.add(UiUsageReceipt(id=data.id, tg_id=user.id, fingerprint=fingerprint))
+        db.flush()
+        for item in data.items:
+            db.execute(text('''INSERT INTO ui_usage_daily
+                (work_date,tg_id,role,control_key,shown,clicks,last_seen,last_clicked)
+                VALUES (:day,:uid,:role,:key,:shown,:clicks,:seen,:clicked)
+                ON CONFLICT (work_date,tg_id,role,control_key) DO UPDATE SET
+                  shown=ui_usage_daily.shown+excluded.shown,
+                  clicks=ui_usage_daily.clicks+excluded.clicks,
+                  last_seen=COALESCE(excluded.last_seen,ui_usage_daily.last_seen),
+                  last_clicked=COALESCE(excluded.last_clicked,ui_usage_daily.last_clicked)'''),
+                {'day':day, 'uid':user.id, 'role':role, 'key':item.key, 'shown':item.shown,
+                 'clicks':item.clicks, 'seen':now if item.shown else None, 'clicked':now if item.clicks else None})
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        receipt = db.get(UiUsageReceipt, data.id)
+        if not receipt or receipt.tg_id != user.id or receipt.fingerprint != fingerprint:
+            raise HTTPException(409, 'Не удалось сохранить пакет статистики')
+    return {'saved': True}
+
+
+def ui_usage_summary(rows):
+    totals = {}
+    for row in rows:
+        if row.control_key not in UI_USAGE_CONTROLS:
+            continue
+        item = totals.setdefault(row.control_key, {'key':row.control_key,
+            'label':UI_USAGE_CONTROLS[row.control_key][0], 'section':UI_USAGE_CONTROLS[row.control_key][1],
+            'shown':0, 'clicks':0, 'days':set(), 'last_clicked':None})
+        item['shown'] += row.shown
+        item['clicks'] += row.clicks
+        if row.clicks:
+            item['days'].add(row.work_date)
+        if row.last_clicked and (item['last_clicked'] is None or row.last_clicked > item['last_clicked']):
+            item['last_clicked'] = row.last_clicked
+    result = []
+    for item in totals.values():
+        result.append({**{key:value for key,value in item.items() if key not in {'days','last_clicked'}},
+            'active_days':len(item['days']),
+            'last_clicked':item['last_clicked'].replace(tzinfo=timezone.utc).isoformat() if item['last_clicked'] else None})
+    return sorted(result, key=lambda item:(item['clicks'], -item['shown'], item['section'], item['label']))
+
+
+@app.get('/api/owner/ui-usage')
+def get_ui_usage(days: Literal[7,14,30] = 14, scope: Literal['owner','assistant','all'] = 'owner',
+        db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    if not _is_cabinet_owner(db, user.id):
+        raise HTTPException(403, 'Статистика доступна только владельцу')
+    start = datetime.now(MOSCOW).date() - timedelta(days=days-1)
+    query = select(UiUsageDaily).where(UiUsageDaily.work_date >= start)
+    if scope == 'owner':
+        query = query.where(UiUsageDaily.tg_id == user.id)
+    elif scope == 'assistant':
+        query = query.where(UiUsageDaily.role == 'assistant', UiUsageDaily.tg_id != user.id)
+    rows = db.scalars(query).all()
+    first = db.scalar(select(func.min(UiUsageDaily.work_date)))
+    return {'days':days, 'scope':scope, 'started_on':first.isoformat() if first else None,
+            'items':ui_usage_summary(rows), 'tracked_controls':len(UI_USAGE_CONTROLS)}
+
+
+def _ui_usage_html(html):
+    html = html.replace("const sections=[['access','Кабинеты и доступы'",
+        "const sections=[['usage','Статистика кнопок','Мои действия · действия диспетчеров','control'],['access','Кабинеты и доступы'", 1)
+    html = html.replace("  const data=await api('/api/owner/management',{cache:'no-store'});",
+        "  if(ownerManagementSection==='usage'){await renderUiUsageReport(root);return}\n  const data=await api('/api/owner/management',{cache:'no-store'});", 1)
+    script = r'''
+<style>
+.ui-usage-toolbar{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}
+.ui-usage-toolbar label{display:grid;gap:3px;font-size:11px;color:var(--muted);min-width:100px;flex:1}
+.ui-usage-toolbar select{width:100%;box-sizing:border-box;font-size:16px;padding:6px;min-height:36px}
+.ui-usage-list{display:grid;gap:6px}.ui-usage-row{padding:9px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+.ui-usage-row header{display:flex;align-items:start;justify-content:space-between;gap:8px}
+.ui-usage-row small{color:var(--muted);font-size:11px}.ui-usage-row b{font-size:13px}
+.ui-usage-count{color:var(--gold);font-size:16px;font-weight:800;white-space:nowrap}
+.ui-usage-details{display:flex;flex-wrap:wrap;gap:5px 12px;font-size:11px;margin-top:5px}
+</style>
+<script>
+const uiUsageControls=__USAGE_CATALOG__;
+async function renderUiUsageReport(root){
+ const uid=state.bootstrap?.user?.id;
+ if(!state.bootstrap?.can_manage_cabinets||state.bootstrap.cabinet_kind!=='owner')return;
+ root.innerHTML='<button class="cabinet-back" data-usage-back>← Управление</button><h2>Статистика кнопок</h2><div class="ui-usage-toolbar"><label>Действия<select data-usage-scope><option value="owner">Мои</option><option value="assistant">Диспетчеры</option><option value="all">Все</option></select></label><label>Период<select data-usage-days><option value="7">7 дней</option><option value="14" selected>14 дней</option><option value="30">30 дней</option></select></label><label>Показать<select data-usage-filter><option value="all">Все кнопки</option><option value="unused">Без нажатий</option><option value="used">С нажатиями</option></select></label><label>Порядок<select data-usage-sort><option value="least">Редкие в начале</option><option value="most">Частые в начале</option></select></label></div><button class="cabinet-secondary" data-usage-refresh>Обновить</button><p class="muted" data-usage-info></p><div class="ui-usage-list" data-usage-body></div>';
+ const body=root.querySelector('[data-usage-body]'),info=root.querySelector('[data-usage-info]');
+ const active=()=>state.bootstrap?.user?.id===uid&&currentViewId()==='ownerManagementView'&&root.querySelector('[data-usage-body]')===body;
+ let items=[],request=0;
+ root.querySelector('[data-usage-back]').onclick=()=>{ownerManagementSection='home';renderOwnerManagement().catch(e=>toast(e.message))};
+ const draw=()=>{
+  if(!active())return;
+  const filter=root.querySelector('[data-usage-filter]').value,most=root.querySelector('[data-usage-sort]').value==='most';
+  const rows=items.filter(x=>filter==='unused'?x.clicks===0:filter==='used'?x.clicks>0:true).slice().sort((a,b)=>(most?b.clicks-a.clicks:a.clicks-b.clicks)||b.shown-a.shown||a.label.localeCompare(b.label,'ru'));
+  body.innerHTML=rows.map(x=>`<article class="ui-usage-row"><header><div><small>${esc(x.section)}</small><br><b>${esc(x.label)}</b></div><span class="ui-usage-count">${x.clicks} нажатий</span></header><div class="ui-usage-details"><span>Показы: ${x.shown}</span><span>Дней с нажатиями: ${x.active_days}</span></div><small>Последнее нажатие: ${x.last_clicked?esc(new Date(x.last_clicked).toLocaleString('ru-RU',{timeZone:'Europe/Moscow',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})):'не было'}</small></article>`).join('')||'<p class="muted">Пока нет данных для этого фильтра. Показанные кнопки появятся здесь по мере использования приложения.</p>';
+ };
+ const load=async()=>{
+  const token=++request;body.textContent='Загрузка…';
+  try{
+   await globalThis.legionUiUsage?.flush();
+   if(!active()||token!==request)return;
+   const days=root.querySelector('[data-usage-days]').value,scope=root.querySelector('[data-usage-scope]').value;
+   const data=await api('/api/owner/ui-usage?days='+days+'&scope='+scope,{cache:'no-store'});
+   if(!active()||token!==request)return;
+   items=data.items;
+   info.textContent=(data.started_on?'Сбор начался '+fmtDate(data.started_on)+'. ':'Сбор начнётся после первых действий в обновлённом приложении. ')+
+    'Здесь только кнопки, которые показывались или нажимались. Показы считаются один раз за сессию в день. Действия диспетчеров видны только вам.';
+   draw();
+  }catch(error){if(active()&&token===request)body.textContent=error.message}
+ };
+ for(const name of ['scope','days'])root.querySelector('[data-usage-'+name+']').onchange=load;
+ for(const name of ['filter','sort'])root.querySelector('[data-usage-'+name+']').onchange=draw;
+ root.querySelector('[data-usage-refresh]').onclick=load;
+ await load();
+}
+(function(){
+ let current=null,scanTimer=null;
+ const entries=Object.entries(uiUsageControls);
+ const day=()=>new Date().toLocaleDateString('sv-SE',{timeZone:'Europe/Moscow'});
+ function persist(u){try{sessionStorage.setItem(u.storage,JSON.stringify({day:u.day,seen:[...u.seen],queue:[...u.queue.values()],pending:u.pending}))}catch(e){}}
+ function validItem(x){return x&&uiUsageControls[x.key]&&Number.isInteger(x.shown)&&x.shown>=0&&x.shown<=1&&Number.isInteger(x.clicks)&&x.clicks>=0&&x.clicks<=100}
+ function identity(){
+  const b=state.bootstrap,role=b?.cabinet_kind,uid=b?.user?.id;
+  if(!uid||!((role==='owner')||(role==='assistant'&&b.cabinet_only===false)))return null;
+  if(!current||current.uid!==uid||current.role!==role){
+   if(current)persist(current);
+   const u={uid,role,storage:'legion-ui-usage:'+uid+':'+role,day:day(),seen:new Set(),queue:new Map(),pending:null,busy:false};
+   try{const saved=JSON.parse(sessionStorage.getItem(u.storage)||'null');
+    if(saved){if(saved.day===u.day)u.seen=new Set((saved.seen||[]).filter(key=>uiUsageControls[key]));
+     for(const item of saved.queue||[])if(validItem(item))u.queue.set(item.key,item);
+     if(saved.pending&&typeof saved.pending.id==='string'&&Array.isArray(saved.pending.items)&&saved.pending.items.length<=80&&saved.pending.items.every(validItem))u.pending=saved.pending;
+    }
+   }catch(e){}
+   current=u;
+  }
+  if(current.day!==day()){current.day=day();current.seen.clear();persist(current)}
+  return current;
+ }
+ function visible(el){
+  if(!el?.isConnected||el.closest('[hidden],.hidden,[aria-hidden="true"]')||el.disabled)return false;
+  const dialogs=[...document.querySelectorAll('dialog[open]')],dialog=dialogs.at(-1);
+  if(dialog&&!dialog.contains(el))return false;
+  const modal=document.querySelector('#modal');
+  if(!dialog&&modal&&!modal.classList.contains('hidden')&&!modal.contains(el))return false;
+  const r=el.getBoundingClientRect();
+  if(!r.width||!r.height||r.bottom<=0||r.right<=0||r.top>=innerHeight||r.left>=innerWidth)return false;
+  const style=getComputedStyle(el);return style.display!=='none'&&style.visibility!=='hidden'&&style.opacity!=='0';
+ }
+ function record(key,click){
+  const u=identity();if(!u)return;
+  const unseen=!u.seen.has(key);if(!click&&!unseen)return;
+  if(unseen)u.seen.add(key);
+  const item=u.queue.get(key)||{key,shown:0,clicks:0};
+  if(unseen)item.shown=1;
+  if(click)item.clicks=Math.min(100,item.clicks+1);
+  u.queue.set(key,item);persist(u);
+ }
+ function scan(){
+  scanTimer=null;if(document.hidden||!identity())return;
+  for(const [key,detail] of entries){if(current.seen.has(key))continue;
+   if([...document.querySelectorAll(detail[2])].some(visible))record(key,false);
+  }
+ }
+ function schedule(){if(scanTimer===null)scanTimer=setTimeout(scan,250)}
+ function clicked(event){
+  if(!identity()||document.hidden)return;
+  const target=event.target?.closest?event.target:event.target?.parentElement;if(!target)return;
+  for(const [key,detail] of entries){const el=target.closest(detail[2]);
+   if(el&&visible(el)){
+    if(event.type==='change'&&!el.matches('select,input[type=date],input[type=month]'))return;
+    if(event.type==='click'&&el.matches('select,input[type=date],input[type=month]'))return;
+    record(key,true);break;
+   }
+  }
+ }
+ async function flush(){
+  const u=identity();if(!u)return;if(u.busy)return u.inflight;
+  if(!u.pending&&u.queue.size){
+   const items=[...u.queue.values()].slice(0,80);
+   u.pending={id:crypto.randomUUID(),items};for(const item of items)u.queue.delete(item.key);persist(u);
+  }
+  if(!u.pending)return;
+  u.busy=true;
+  u.inflight=(async()=>{
+   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),8000);
+   try{await api('/api/ui-usage',{method:'POST',body:JSON.stringify(u.pending),keepalive:true,signal:controller.signal});u.pending=null;persist(u)}catch(e){}
+   finally{clearTimeout(timer);u.busy=false;u.inflight=null}
+  })();
+  return u.inflight;
+ }
+ document.addEventListener('click',clicked,true);document.addEventListener('change',clicked,true);
+ document.addEventListener('scroll',schedule,{passive:true,capture:true});
+ document.addEventListener('visibilitychange',()=>{if(document.hidden)flush();else schedule()});
+ window.addEventListener('pagehide',()=>flush());
+ new MutationObserver(schedule).observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['class','hidden','open','aria-hidden','disabled']});
+ setInterval(()=>{schedule();flush()},10000);schedule();
+ globalThis.legionUiUsage={flush};
+})();
+</script>'''
+    script = script.replace('__USAGE_CATALOG__', json.dumps(UI_USAGE_CONTROLS, ensure_ascii=False).replace('</', '<\\/'))
+    return html.replace('</body>', script + '</body>', 1)
+
+
+INLINE_INDEX_HTML = _ui_usage_html(INLINE_INDEX_HTML)
+
+
 def _isolated_preview_screen_html():
     html = INLINE_INDEX_HTML
     # No real Telegram SDK, credentials, database session or notifications.
