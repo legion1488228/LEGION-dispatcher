@@ -12828,6 +12828,173 @@ def _photo_alignment_guides_html(html):
 INLINE_INDEX_HTML = _photo_alignment_guides_html(INLINE_INDEX_HTML)
 
 
+def _owner_examples_html(html):
+    menu = "const sections=[['usage','Статистика кнопок'"
+    load = "  root.innerHTML='<p class=\"muted\">Загрузка настроек…</p>';"
+    if html.count(menu) != 1 or html.count(load) != 1:
+        raise RuntimeError('Owner example menu anchors missing')
+    html = html.replace(menu, "const sections=[['demo-photo','Образец вставки фото','Примерить фото · проверить рамку и силуэты','camera'],['demo-order','Образец закрытия заказа','Весь путь · без отправки сообщений','check'],['usage','Статистика кнопок'", 1)
+    html = html.replace(load, "  if(['demo-photo','demo-order'].includes(ownerManagementSection)){renderOwnerDemo(root,ownerManagementSection);return}\n" + load, 1)
+    html = html.replace('  const v = currentViewId();', '''  const v = currentViewId();
+  if(v!=='ownerManagementView'&&qs('#ownerManagementContent [data-owner-demo]')){
+   qs('#ownerManagementContent').replaceChildren();ownerDemoSession=null;
+  }''', 1)
+    # No example actions or view events enter the real usage collection queue.
+    html = html.replace(' function identity(){\n  const b=state.bootstrap,role=',
+        " function identity(){\n  if(document.querySelector('#ownerManagementView.active [data-owner-demo]'))return null;\n  const b=state.bootstrap,role=", 1)
+    return html.replace('</body>', r'''
+<style id="owner-examples-style">
+.owner-example{max-width:560px;margin:auto}.owner-example header{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:8px 0}
+.owner-example h2{font-size:21px;margin:4px 0}.owner-example h3{font-size:18px;margin:8px 0 12px}.owner-example h4{font-size:15px;margin:8px 0}
+.owner-example .example-note{padding:10px 12px;border:1px solid var(--gold2);border-radius:12px;background:var(--panel);font-size:12px;color:var(--muted);line-height:1.45;margin:8px 0 12px}
+.owner-example .example-note b{color:var(--gold)}.owner-example .example-progress{font-size:12px;color:var(--gold);margin:10px 0 6px}
+.owner-example .example-card{padding:12px;border:1px solid var(--line);border-radius:14px;background:var(--panel);margin:8px 0 12px}
+.owner-example .example-card p{margin:5px 0;font-size:13px;overflow-wrap:anywhere}.owner-example .example-card small{color:var(--muted)}
+.owner-example .example-actions{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.owner-example .example-actions button{min-height:40px}
+.owner-example .example-crew{display:grid;gap:6px}.owner-example .example-crew label{display:flex!important;align-items:center;gap:10px;padding:10px;border:1px solid var(--line);border-radius:10px;font-size:14px!important}
+.owner-example .example-crew input{width:20px!important;min-height:20px!important;margin:0!important;flex-shrink:0}
+.owner-example .example-log{padding-left:22px;color:var(--muted);font-size:12px;line-height:1.5}.owner-example .example-log li{padding:3px 0}
+.owner-example .example-photos{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.owner-example .example-photos img{width:100%;height:auto;border-radius:8px;display:block}
+.owner-example .example-step [role=alert]{font-size:13px;color:var(--red)}
+.owner-example .example-step #cabinetFrameEdit p{font-size:13px}.owner-example .example-step #cabinetFrameReview img{max-width:100%}
+.owner-example .example-step button{max-width:100%;white-space:normal}.owner-example .example-step select,.owner-example .example-step input{max-width:100%;min-width:0}
+.owner-example .example-step label{font-size:13px}.owner-example .example-step [data-demo-options]{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.owner-example .example-step [data-demo-options] label:first-child{grid-column:1/-1}
+.owner-example .cabinet-photo-frame{border:0;aspect-ratio:5/4;touch-action:none;overscroll-behavior:none;user-select:none;-webkit-user-select:none}
+.owner-example .cabinet-photo-frame::after{inset:5% 4%;border:2px solid var(--gold);border-radius:6px;box-shadow:0 0 0 1000px #00000025;background:none}
+.owner-example .cabinet-photo-frame[data-crew-frame=wide]::after{inset:26% 4% 10%}
+.owner-example .cabinet-photo-frame>.cabinet-frame-guides{position:absolute;inset:0;display:block;width:100%;height:100%;pointer-events:none;overflow:hidden;z-index:1}
+.owner-example .cabinet-frame-guides path{fill:none;stroke:rgba(255,255,255,.78);stroke-width:1.3;stroke-dasharray:4 3;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 1px 1px #000b)}
+.owner-example .cabinet-photo-source-buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:6px 0 12px}
+.owner-example .cabinet-photo-source-buttons button{display:flex;align-items:center;justify-content:center;gap:6px;min-height:44px;font-size:13px}
+.owner-example #cabinetFrameReview img{display:block;width:100%;height:auto;aspect-ratio:auto;background:transparent;object-fit:initial}
+</style>
+<script>
+let ownerDemoSession=null;
+function ownerDemoAllowed(){return state.bootstrap?.can_manage_cabinets&&state.bootstrap?.cabinet_kind==='owner'}
+function ownerDemoNew(kind){
+ const today=state.bootstrap?.today||new Date().toLocaleDateString('sv-SE',{timeZone:'Europe/Moscow'});
+ const tomorrow=new Date(Date.parse(today+'T12:00:00Z')+86400000).toISOString().slice(0,10);
+ return {uid:state.bootstrap.user.id,kind,stage:kind==='demo-photo'?'photo':'number',today,tomorrow,cashier:true,
+  card:{source:'gbu',surname:'ОБРАЗЕЦ',work_date:kind==='demo-photo'?today:tomorrow,spec_step_enabled:true,order_spec:kind==='demo-photo'?{category:'standard',team_size:4}:null},
+  crew:[],photos:[],log:[],history:[]};
+}
+function ownerDemoNext(s){
+ if(s.kind==='demo-photo')return 'photo';
+ const next=cabinetNextAction(s.card,{today:s.today,can_record_cash:s.cashier});
+ if(next)return next.key;
+ return s.card.tea_received?'done':'day';
+}
+function renderOwnerDemo(root,kind){
+ if(!ownerDemoAllowed()){root.textContent='Образцы доступны только владельцу';return}
+ const uid=state.bootstrap.user.id;
+ if(ownerDemoSession?.uid===uid&&ownerDemoSession.kind===kind&&root.querySelector('[data-owner-demo]')?.dataset.ownerDemo===kind)return;
+ const s=ownerDemoSession=ownerDemoNew(kind);
+ const title=kind==='demo-photo'?'Образец вставки фото':'Образец закрытия заказа';
+ root.innerHTML=`<section class="owner-example" data-owner-demo="${kind}"><button type="button" class="cabinet-back" data-demo-exit>← Управление</button><header><h2>${title}</h2><button type="button" class="cabinet-secondary" data-demo-reset>Начать заново</button></header><p class="example-note"><b>Только образец · Только вы</b><br>Вымышленный заказ. Фото и данные остаются в этом примере. Сообщения не отправляются, заказы, касса и зарплаты не меняются.</p><div class="example-step" data-demo-body></div></section>`;
+ const shell=root.querySelector('[data-owner-demo]'),body=root.querySelector('[data-demo-body]');
+ const active=()=>ownerDemoAllowed()&&state.bootstrap.user.id===uid&&ownerDemoSession===s&&currentViewId()==='ownerManagementView'&&shell.isConnected;
+ const snapshot=()=>({stage:s.stage,today:s.today,cashier:s.cashier,card:{...s.card,order_spec:s.card.order_spec?{...s.card.order_spec}:null},crew:s.crew.slice(),photos:s.photos.slice(),log:s.log.slice()});
+ const commit=(mutate,next)=>{if(!active())return;s.history.push(snapshot());mutate();s.stage=next||ownerDemoNext(s);draw()};
+ const input=(name,label,value='',type='text',extra='')=>`<label>${label}<input name="${name}" type="${type}" value="${esc(value)}" ${extra}></label>`;
+ const select=(name,label,items,value)=>`<label>${label}<select name="${name}">${items.map(([v,t])=>`<option value="${v}" ${String(v)===String(value)?'selected':''}>${t}</option>`).join('')}</select></label>`;
+ const time=(name,label,value)=>input(name,label,value,'text','required inputmode="numeric" maxlength="5" placeholder="09:00"');
+ const labels={number:'Номер в группу',order_spec:'Категория и количество людей',schedule:'Время фото',close:'Отчёт о закрытии',crew:'Состав ГБУ · вид диспетчера',day:'День заказа',contact:'Бригада на связи',cash:'Касса',photo:'Фотоотчёт',tea:'Итоговый отчёт',done:'Заказ завершён'};
+ const log=text=>s.log.push(text);
+ function formHtml(fields,submit){return `<form id="ownerExampleForm" class="cabinet-native-form" data-demo-form>${fields}<p id="cabinetActionStatus" role="alert"></p><button type="submit" class="cabinet-primary cabinet-wide">${submit}</button></form>`}
+ function bindSubmit(handler){const form=body.querySelector('[data-demo-form]');form.onsubmit=event=>{event.preventDefault();event.stopPropagation();if(!active()||!form.reportValidity())return false;handler(form);return false};return form}
+ function fail(form,text){form.querySelector('#cabinetActionStatus').textContent=text}
+ function specs(form){
+  const source=form.querySelector('[name=demo_source]'),category=form.querySelector('[name=demo_category]'),count=form.querySelector('[name=demo_team]');
+  const fill=()=>{
+   const cat=category.value,number=Number(count.value),gbu=source.value==='gbu';
+   category.innerHTML=(gbu?[['standard','Стандарт'],['elite','Элит']]:[['standard','Стандарт'],['vip','Вип'],['elite','Элит']]).map(([v,t])=>`<option value="${v}">${t}</option>`).join('');
+   category.value=(gbu?['standard','elite']:['standard','vip','elite']).includes(cat)?cat:'standard';
+   const sizes=gbu||category.value!=='standard'?[4,6]:[3,4,5,6];count.innerHTML=sizes.map(n=>`<option value="${n}">${n} ${n<=4?'человека':'человек'}</option>`).join('');count.value=String(sizes.includes(number)?number:4);
+  };
+  source.onchange=fill;category.onchange=fill;fill();return {source,category,count};
+ }
+ function options(){const spec=s.card.order_spec||{category:'standard',team_size:4};return `<div data-demo-options>${select('demo_source','Тип заказа',[['private','Частный'],['gbu','ГБУ']],s.card.source)}${select('demo_category','Категория',[['standard','Стандарт'],['vip','Вип'],['elite','Элит']],spec.category)}${select('demo_team','Количество людей',[3,4,5,6].map(n=>[n,n+' человека']),spec.team_size)}</div>`}
+ function photo(){
+  const only=kind==='demo-photo',ordinal=s.photos.length+1;
+  body.innerHTML+=formHtml((only?options()+'<input name="frame_team_size" type="hidden">':'')+
+   `<div data-photo-caption-fields>${!only&&s.card.source==='private'?'<label>Комментарий к фото<textarea name="demo_comment" maxlength="500" required rows="2" placeholder="Название морга, во сколько быть"></textarea></label>':''}</div>`+
+   cabinetPhotoFrameFields(s.card).replace('Фото готово к отправке?','Так будет выглядеть фото')+
+   '<p class="muted">Подтверждение ниже сохраняет фото только в этом образце.</p>','Подтвердить фото в образце');
+  const form=body.querySelector('[data-demo-form]'),button=form.querySelector('[type=submit]');let editor;
+  const metadata=()=>{const comment=form.querySelector('[name=demo_comment]');if(comment&&!comment.value.trim()){comment.reportValidity();return false}return true};
+  editor=setupCabinetPhotoFrame(form,()=>{button.disabled=!active()||!editor?.ready},metadata,s.card);setupCabinetUniform(form,s.card);
+  if(only){
+   const fields=specs(form),sync=()=>{
+    if(!active())return;s.card.source=fields.source.value;s.card.order_spec={category:fields.category.value,team_size:Number(fields.count.value)};
+    setupCabinetUniform(form,s.card);form.querySelector('[name=frame_team_size]').onchange?.();
+   };
+   for(const field of [fields.source,fields.category]){const previous=field.onchange;field.onchange=()=>{previous();sync()}}
+   fields.count.onchange=sync;
+  }
+  const comment=form.querySelector('[name=demo_comment]');if(comment)comment.oninput=()=>{button.disabled=!editor.ready||!comment.value.trim()};
+  form.onsubmit=event=>{
+   event.preventDefault();event.stopPropagation();if(!active()||!editor.ready||!metadata())return false;
+   if(only){form.querySelector('#cabinetActionStatus').textContent='Фото проверено в образце. Ничего не отправлено.';button.disabled=true;return false}
+   const jpeg=editor.image;
+   commit(()=>{s.photos.push(jpeg);s.card.first_received=true;if(ordinal===2)s.card.second_received=true;log('Фото '+ordinal+' — проверено в образце'+(comment?' · '+comment.value.trim():''))});return false;
+  };
+ }
+ function draw(){
+  if(!active())return;
+  const c=s.card,spec=c.order_spec;
+  body.innerHTML=`<div class="example-actions">${s.history.length?'<button type="button" class="cabinet-back" data-demo-prev>← Предыдущий шаг</button>':''}</div><p class="example-progress">${s.stage==='photo'&&kind==='demo-order'?(c.source==='gbu'?'Фото '+(s.photos.length+1)+' из 2':'Фото 1 из 1'):esc(labels[s.stage])}</p>${s.stage!=='number'&&kind!=='demo-photo'?`<article class="example-card"><b>${c.source==='gbu'?'ГБУ':'Частный'} · ${esc(c.surname)}</b><p>${esc(fmtDate(c.work_date))}${spec?' · '+esc(cabinetAssignedSpecText(c)):''}</p><small>${c.prepared?'Закрытие ✅':'Закрытие ⏳'} · ${c.on_contact?'На связи ✅':'Связь ⏳'} · Фото ${s.photos.length}/${c.source==='gbu'?2:1}</small></article>`:''}<h3>${esc(labels[s.stage])}</h3>`;
+  if(s.stage==='number'){
+   body.innerHTML+=formHtml(input('demo_surname','Фамилия умершего',c.surname,'text','required maxlength="100"')+select('demo_source','Тип заказа',[['private','Частный'],['gbu','ГБУ']],c.source)+select('demo_cashier','Кабинет в образце',[['cash','Кассовый бригадир'],['ordinary','Обычный бригадир']],s.cashier?'cash':'ordinary')+`<p>Заказ на завтра · ${esc(fmtDate(s.tomorrow))}</p><p class="muted">Покажем образец номера в группе; настоящего сообщения не будет.</p>`,'Номер в группу · пример');
+   bindSubmit(form=>commit(()=>{c.surname=form.querySelector('[name=demo_surname]').value.trim().toLocaleUpperCase('ru');c.source=form.querySelector('[name=demo_source]').value;s.cashier=form.querySelector('[name=demo_cashier]').value==='cash';log('Образец номера в группе · '+c.surname+' · телефон тестового бригадира')},'order_spec'));return;
+  }
+  if(s.stage==='order_spec'){
+   body.innerHTML+=formHtml(options(),'Выбрать категорию и состав');const form=bindSubmit(form=>commit(()=>{c.source=form.querySelector('[name=demo_source]').value;c.order_spec={category:form.querySelector('[name=demo_category]').value,team_size:Number(form.querySelector('[name=demo_team]').value)};log(cabinetAssignedSpecText(c))}));
+   // The type was chosen with the number and is read-only at this stage.
+   specs(form);form.querySelector('[name=demo_source]').disabled=true;return;
+  }
+  if(s.stage==='schedule'){
+   body.innerHTML+=formHtml(time('demo_photo_time',c.source==='gbu'?'Время первого фото':'Время фото',c.photo_time||'09:00'),'Сохранить время');
+   bindSubmit(form=>{const value=normalizeCabinetClock(form.querySelector('[name=demo_photo_time]').value);if(!value){fail(form,'Введите время, например 09:00');return}commit(()=>{c.photo_time=value;log('Фото запланировано на '+value)})});return;
+  }
+  if(s.stage==='close'){
+   body.innerHTML+=formHtml(select('demo_agent','Связь с агентом',[['yes','Связался с агентом'],['sms','Написал СМС — агент не на связи'],['missing','Номер агента не указан']],c.agent_status||'yes')+time('demo_contact_time','Во сколько бригада выйдет на связь',c.contact_time||'07:00'),'Подтвердить закрытие · пример');
+   bindSubmit(form=>{const value=normalizeCabinetClock(form.querySelector('[name=demo_contact_time]').value);if(!value){fail(form,'Введите время, например 07:00');return}commit(()=>{c.contact_time=value;c.agent_status=form.querySelector('[name=demo_agent]').value;c.prepared=true;log('Закрытие: '+c.surname+' · Фото '+c.photo_time+' · Связь '+value)},c.source==='gbu'?'crew':null)});return;
+  }
+  if(s.stage==='crew'){
+   const need=spec.team_size-1;
+   body.innerHTML+=formHtml(`<p class="muted">Вид диспетчера в образце. Бригадир уже включён, добавьте ещё ${need}. Это вымышленные сотрудники.</p><div class="example-crew">${Array.from({length:7},(_,i)=>`<label><input type="checkbox" name="demo_member" value="${i+1}" ${s.crew.includes(i+1)?'checked':''}>Тестовый сотрудник ${i+1} · ${184+i}</label>`).join('')}</div><p data-demo-crew-count role="status"></p>`,'Подтвердить состав в образце');
+   const form=bindSubmit(form=>{const ids=[...form.querySelectorAll('[name=demo_member]:checked')].map(x=>Number(x.value));if(ids.length!==need){fail(form,'Выберите '+need+' сотрудников');return}commit(()=>{s.crew=ids;log('Состав ГБУ: тестовый бригадир и '+need+' сотрудников')})});
+   const count=()=>{const n=form.querySelectorAll('[name=demo_member]:checked').length;form.querySelector('[data-demo-crew-count]').textContent='Выбрано '+n+' из '+need;form.querySelector('[type=submit]').disabled=n!==need};form.querySelectorAll('[name=demo_member]').forEach(x=>x.onchange=count);count();return;
+  }
+  if(s.stage==='day'){
+   body.innerHTML+=formHtml(`<p>Закрытие оформлено на завтра. Связь, касса и фото доступны в день заказа.</p><p>В образце можно сразу перейти к ${esc(fmtDate(c.work_date))}.</p>`,'Перейти к дню заказа · пример');bindSubmit(()=>commit(()=>{s.today=c.work_date;log('В образце наступил день заказа')}));return;
+  }
+  if(s.stage==='contact'){
+   body.innerHTML+=formHtml(`<p>Подтвердить, что бригада на связи? План: ${esc(c.contact_time)}.</p>`,'Бригада на связи · пример');bindSubmit(()=>commit(()=>{c.on_contact=true;log('Бригада на связи — пример подтверждения')}));return;
+  }
+  if(s.stage==='cash'){
+   body.innerHTML+=formHtml(input('demo_commission','Комиссия, ₽',c.cash?.commission??2000,'number','required min="0" max="10000000" step="1" inputmode="numeric"')+input('demo_kickback','Откат, ₽',c.cash?.kickback??0,'number','required min="0" max="10000000" step="1" inputmode="numeric"')+input('demo_reserve','Сотрудников из резерва',0,'number',`required min="0" max="${spec.team_size}" step="1" inputmode="numeric"`),'Сохранить кассу в образце');
+   bindSubmit(form=>commit(()=>{c.cash={commission:Number(form.querySelector('[name=demo_commission]').value),kickback:Number(form.querySelector('[name=demo_kickback]').value),reserve:Number(form.querySelector('[name=demo_reserve]').value)};log('Пример кассы: '+c.cash.commission+' ₽ · откат '+c.cash.kickback+' ₽')}));return;
+  }
+  if(s.stage==='photo'){photo();return}
+  if(s.stage==='tea'){
+   body.innerHTML+=formHtml(input('demo_tea','Чай по заказу, ₽',0,'number','required min="0" max="10000000" step="1" inputmode="numeric"')+'<p>Если чая не было, укажите 0.</p>','Завершить заказ в образце');
+   bindSubmit(form=>commit(()=>{c.tea_amount=Number(form.querySelector('[name=demo_tea]').value);c.tea_received=true;log('Итоговый отчёт: '+c.tea_amount+' ₽ чая. В рабочем кабинете карточка исчезнет из активных.')}));return;
+  }
+  body.innerHTML+=`<p class="cabinet-done">✅ Образец пройден от начала до конца.</p><p class="muted">Ничего не отправлено и не записано в рабочие таблицы.</p><div class="example-photos">${s.photos.map((jpeg,i)=>`<img src="data:image/jpeg;base64,${jpeg}" alt="Фото ${i+1} в образце">`).join('')}</div><h4>Что получилось в образце</h4><ol class="example-log">${s.log.map(text=>`<li>${esc(text)}</li>`).join('')}</ol>`;
+ }
+ body.onclick=event=>{if(!event.target.closest('[data-demo-prev]')||!active()||!s.history.length)return;event.preventDefault();event.stopPropagation();Object.assign(s,s.history.pop());draw()};
+ root.querySelector('[data-demo-exit]').onclick=()=>{if(!active())return;ownerDemoSession=null;ownerManagementSection='home';renderOwnerManagement().catch(e=>toast(e.message))};
+ root.querySelector('[data-demo-reset]').onclick=()=>{if(!active())return;ownerDemoSession=null;renderOwnerDemo(root,kind)};
+ draw();
+}
+</script></body>''', 1)
+
+
+INLINE_INDEX_HTML = _owner_examples_html(INLINE_INDEX_HTML)
+
+
 def _isolated_preview_screen_html():
     html = INLINE_INDEX_HTML
     # No real Telegram SDK, credentials, database session or notifications.
