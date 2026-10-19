@@ -6699,10 +6699,12 @@ def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends
         NumberCardEvent.sent_at >= CABINET_ACTIVE_START_UTC if active_only else True,
         _visible_number_card()).order_by(NumberCardEvent.sent_at, NumberCardEvent.id)).all()
     statuses = number_card_statuses(db, cards)
+    photo_sizes = cabinet_photo_team_sizes(db, cards)
     contacts = {row.event_id: bool(row.confirmed) for row in db.scalars(
         select(OrderBrigadeContact).where(OrderBrigadeContact.tg_id == user.id,
             OrderBrigadeContact.event_id.in_([card.id for card in cards])))} if cards else {}
     items = [{"id": card.id, "source": card.source, "surname": card.surname,
+              "photo_team_size": photo_sizes.get(card.id),
               "work_date": card.work_date.isoformat(),
               "_action_ref": f"{card.chat_id}_{card.message_id}", "report_key": f"card:{card.chat_id}:{card.message_id}",
               "composition_closed": statuses[card.id]["closed"],
@@ -7684,6 +7686,16 @@ def cabinet_command_create(data: CabinetCommandInput, db: Session = Depends(get_
             cabinet_cash_stage_guard(db, card)
         if data.action == 'photo':
             values = payload['values']
+            if 'frame_team_size' in values:
+                size = values['frame_team_size']
+                if type(size) is not int or size not in (3, 4, 5, 6):
+                    raise HTTPException(422, 'Укажите количество сотрудников для фото')
+                if card.source == 'gbu':
+                    assigned = cabinet_photo_team_sizes(db, [card]).get(card.id)
+                    if assigned is None:
+                        raise HTTPException(409, 'Диспетчер ещё не указал состав заказа ГБУ')
+                    if size != assigned:
+                        raise HTTPException(409, 'Состав заказа изменился. Откройте фото заново')
             if 'original_image' in values or 'frame_confirmed' in values:
                 if values.get('frame_confirmed') is not True or not isinstance(values.get('original_image'), str) or not isinstance(values.get('image'), str):
                     raise HTTPException(422, 'Сначала проверьте и подтвердите фото')
@@ -8899,6 +8911,13 @@ def gbu_control_earning_details(db, work_date):
     # Conflicting owner tables must not silently assign the wrong category.
     return {key: {'category': next(iter(values))[0], 'team_size': next(iter(values))[1]}
             for key, values in candidates.items() if len(values) == 1}
+
+
+def cabinet_photo_team_sizes(db, cards):
+    by_day = {day: gbu_control_earning_details(db, day)
+              for day in {card.work_date for card in cards if card.source == 'gbu'}}
+    return {card.id: by_day[card.work_date].get(f'card:{card.id}', {}).get('team_size')
+            for card in cards if card.source == 'gbu'}
 
 
 @app.get('/api/owner/brigade-control')
@@ -11947,6 +11966,109 @@ function setupCabinetPhotoFrame(form,notify,metadataReady){''',
 ).replace('</body>', r'''
 <style id="photo-only-review-style">
 #cabinetNativeForm #cabinetFrameReview img{aspect-ratio:auto;height:auto;background:transparent;object-fit:initial}
+</style></body>''', 1)
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    'function cabinetPhotoFrameFields(){',
+    'function cabinetPhotoFrameFields(card=null){', 1,
+).replace(
+    'Запас вокруг рамки тоже войдёт в фото.',
+    'В итоговое фото войдёт область внутри рамки.', 1,
+)
+# The choice is shown only for private orders. GBU size is supplied by the owner.
+_photo_fields_start = INLINE_INDEX_HTML.index('function cabinetPhotoFrameFields(')
+_photo_fields_end = INLINE_INDEX_HTML.index('function cabinetFramePlacement(', _photo_fields_start)
+_photo_fields = INLINE_INDEX_HTML[_photo_fields_start:_photo_fields_end]
+_photo_fields = _photo_fields.replace(
+    'return `',
+    "return `${card?.source==='gbu'?`<p data-frame-fixed-size>${[4,6].includes(Number(card.photo_team_size))?'Бригада · '+Number(card.photo_team_size)+' чел.':'Диспетчер ещё не указал состав заказа ГБУ'}</p>`:`<label>Человек в бригаде<select name=\"frame_team_size\" aria-label=\"Количество сотрудников на фото\">${[3,4,5,6].map(n=>`<option value=\"${n}\" ${n===Number(card?.cash?.team_size||4)?'selected':''}>${n} ${n<5?'человека':'человек'}</option>`).join('')}</select></label>`}",
+    1,
+)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_photo_fields_start] + _photo_fields + INLINE_INDEX_HTML[_photo_fields_end:]
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('cabinetPhotoFrameFields()+(card.source', 'cabinetPhotoFrameFields(card)+(card.source', 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    'function setupCabinetPhotoFrame(form,notify,metadataReady){',
+    'function setupCabinetPhotoFrame(form,notify,metadataReady,card=null){', 1,
+).replace(
+    "if(photoCaption&&!photoCaption.value.trim()){photoCaption.reportValidity();return false}return true});",
+    "if(photoCaption&&!photoCaption.value.trim()){photoCaption.reportValidity();return false}return true},card);", 1,
+).replace(
+    'const frame=canvas.parentElement;',
+    r'''const frame=canvas.parentElement;
+ const teamInput=form.querySelector('[name=frame_team_size]');
+ const teamSize=()=>card?.source==='gbu'?Number(card.photo_team_size):Number(teamInput?.value||4);
+ const teamValid=()=>card?.source==='gbu'?[4,6].includes(teamSize()):[3,4,5,6].includes(teamSize());
+ const cropBox=()=>teamSize()>=5?{x:40,y:208,w:920,h:512}:{x:40,y:40,w:920,h:720};
+ const updateFrame=()=>{frame.dataset.crewFrame=teamSize()>=5?'wide':'normal'};
+ updateFrame();
+ if(teamInput)teamInput.onchange=()=>{if(locked)return;updateFrame();change()};''', 1,
+).replace(
+    'if(!metadataReady())return;',
+    "if(!metadataReady())return;\n  if(!teamValid()){form.querySelector('#cabinetActionStatus').textContent='Диспетчер ещё не указал состав заказа ГБУ';return}", 1,
+).replace(
+    'cabinetFramePlacement(image.naturalWidth,image.naturalHeight,zoom,cx,cy),1000,800)',
+    'cabinetFramePlacement(image.naturalWidth,image.naturalHeight,zoom,cx,cy),1000,800,cropBox())', 1,
+).replace(
+    'function cabinetFramePhotoBounds(iw,ih,p,fw,fh){',
+    'function cabinetFramePhotoBounds(iw,ih,p,fw,fh,box={x:0,y:0,w:fw,h:fh}){', 1,
+).replace(
+    'const x=Math.max(0,-left/p.scale),y=Math.max(0,-top/p.scale);',
+    'const x=Math.max(0,(box.x-left)/p.scale),y=Math.max(0,(box.y-top)/p.scale);', 1,
+).replace(
+    'const right=Math.min(iw,(fw-left)/p.scale),bottom=Math.min(ih,(fh-top)/p.scale);',
+    'const right=Math.min(iw,(box.x+box.w-left)/p.scale),bottom=Math.min(ih,(box.y+box.h-top)/p.scale);', 1,
+).replace(
+    'function cabinetFramePhotoJpeg(image,p,fw,fh){',
+    'function cabinetFramePhotoJpeg(image,p,fw,fh,box){', 1,
+).replace(
+    'cabinetFramePhotoBounds(image.naturalWidth,image.naturalHeight,p,fw,fh);',
+    'cabinetFramePhotoBounds(image.naturalWidth,image.naturalHeight,p,fw,fh,box);', 1,
+).replace(
+    'get original(){return source},lock(value){locked=value;',
+    'get original(){return source},get teamSize(){return teamSize()},lock(value){locked=value;if(teamInput)teamInput.disabled=value;', 1,
+).replace(
+    'values.image=photoEditor.image;values.original_image=photoEditor.original;',
+    'values.image=photoEditor.image;values.frame_team_size=photoEditor.teamSize;values.original_image=photoEditor.original;', 1,
+).replace('</body>', r'''
+<style id="crew-size-photo-frame-style">
+#cabinetNativeForm .cabinet-photo-frame[data-crew-frame=normal]::after{inset:5% 4%}
+#cabinetNativeForm .cabinet-photo-frame[data-crew-frame=wide]::after{inset:26% 4% 10%}
+</style></body>''', 1)
+
+
+# Fit the whole source inside the selected gold area before manual adjustments.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    'function cabinetFramePlacement(iw,ih,zoom,cx,cy){\n const fit=Math.min(1000/iw,800/ih)',
+    'function cabinetFramePlacement(iw,ih,zoom,cx,cy,box={w:1000,h:800}){\n const fit=Math.min(box.w/iw,box.h/ih)', 1,
+).replace(
+    'cabinetFramePlacement(image.naturalWidth,image.naturalHeight,zoom,cx,cy)',
+    'cabinetFramePlacement(image.naturalWidth,image.naturalHeight,zoom,cx,cy,cropBox())',
+).replace(
+    'if(teamInput)teamInput.onchange=()=>{if(locked)return;updateFrame();change()};',
+    'if(teamInput)teamInput.onchange=()=>{if(locked)return;updateFrame();zoom=1;cx=500;cy=cropBox().y+cropBox().h/2;change()};', 1,
+).replace(
+    'image=loaded;source=encoded;zoom=1;cx=500;cy=400;',
+    'image=loaded;source=encoded;zoom=1;cx=500;cy=cropBox().y+cropBox().h/2;', 1,
+).replace(
+    'zoom=1;cx=500;cy=400;change()',
+    'zoom=1;cx=500;cy=cropBox().y+cropBox().h/2;change()', 1,
+)
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
+<style id="number-cards-four-columns-style">
+#numberCardsBody{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px;align-items:stretch}
+#numberCardsBody>.attention,#numberCardsBody>.empty{grid-column:1/-1}
+#numberCardsBody .number-card-row{display:flex;flex-direction:column;align-items:stretch;justify-content:space-between;min-width:0;margin:0;padding:6px 4px;gap:6px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+#numberCardsBody .number-card-details{display:flex;flex-direction:column;align-items:stretch;gap:4px;min-width:0;width:100%}
+#numberCardsBody .number-card-name{font-size:10px;line-height:1.3;overflow-wrap:anywhere}
+#numberCardsBody .number-card-category{align-self:flex-start;max-width:100%;padding:2px 3px;font-size:9px;white-space:normal}
+#numberCardsBody .number-card-line{font-size:9px;line-height:1.3;white-space:normal}
+#numberCardsBody .number-card-surname{max-width:100%;font-size:10px;line-height:1.3;overflow-wrap:anywhere;text-align:left}
+#numberCardsBody .number-card-time{font-size:10px;white-space:nowrap}
+#numberCardsBody .number-card-row>div:last-child{flex-direction:row!important;justify-content:center;gap:3px!important;flex-wrap:wrap}
+#numberCardsBody [data-number-reassign],#numberCardsBody [data-number-delete]{box-sizing:border-box;width:28px!important;height:30px!important;min-height:30px;min-width:0;padding:2px!important;font-size:16px!important;border-radius:7px!important}
 </style></body>''', 1)
 
 
