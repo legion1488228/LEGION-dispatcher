@@ -6704,7 +6704,7 @@ def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends
         select(OrderBrigadeContact).where(OrderBrigadeContact.tg_id == user.id,
             OrderBrigadeContact.event_id.in_([card.id for card in cards])))} if cards else {}
     items = [{"id": card.id, "source": card.source, "surname": card.surname,
-              "photo_team_size": photo_sizes.get(card.id),
+              "photo_team_size": photo_sizes.get(card.id), "order_spec": cabinet_assigned_spec(db, card),
               "work_date": card.work_date.isoformat(),
               "_action_ref": f"{card.chat_id}_{card.message_id}", "report_key": f"card:{card.chat_id}:{card.message_id}",
               "composition_closed": statuses[card.id]["closed"],
@@ -7684,6 +7684,8 @@ def cabinet_command_create(data: CabinetCommandInput, db: Session = Depends(get_
             raise HTTPException(404, 'Заказ удалён или передан другому бригадиру')
         if data.action == 'cash':
             cabinet_cash_stage_guard(db, card)
+        if data.action in {'cash', 'photo', 'edit', 'number'}:
+            cabinet_check_assigned_values(db, card, payload['values'], required=data.action in {'cash', 'photo'})
         if data.action == 'photo':
             values = payload['values']
             if 'frame_team_size' in values:
@@ -7721,6 +7723,9 @@ def cabinet_command_create(data: CabinetCommandInput, db: Session = Depends(get_
             if not deletion['can_delete']:
                 raise HTTPException(409, deletion['delete_reason'])
         payload['replace_report_key' if data.action == 'number' else 'report_key'] = f'card:{card.chat_id}:{card.message_id}'
+    if data.action == 'number' and data.card_id is None and any(
+            key in payload['values'] for key in ('uniform_category', 'frame_team_size', 'category', 'team_size')):
+        raise HTTPException(403, 'Категорию и количество людей назначает диспетчер')
     if data.action in {'number', 'edit', 'photo'} and 'uniform_category' in payload['values']:
         category = payload['values']['uniform_category']
         source = payload['values'].get('source') if data.action in {'number', 'edit'} else card.source
@@ -7804,6 +7809,10 @@ def cabinet_command_finish(data: CabinetCommandResult, db: Session = Depends(get
                         saved = CabinetOrderState(report_key=key, tg_id=row.tg_id)
                         db.add(saved)
                     saved.tg_id = row.tg_id
+                    if intent.get('action') == 'photo':
+                        frame_size = intent.get('values', {}).get('frame_team_size')
+                        if type(frame_size) is int and frame_size in (3, 4, 5, 6):
+                            meta['frame_team_size'] = frame_size
                     saved.payload = json.dumps(dict(meta, uniform_category=intent['values']['uniform_category']))
         if data.status == 'done' and intent.get('action') == 'cash_summary':
             record_cash_period_reconciliation(db, row, intent)
@@ -7873,8 +7882,13 @@ def cabinet_state_sync(data: list[dict], db: Session = Depends(get_db)):
             row=CabinetOrderState(report_key=key);db.add(row)
         previous = json.loads(row.payload) if row.payload and row.tg_id == card.tg_id else {}
         values = {k:item.get(k) for k in ('prepared','tea_received','tea_amount')}
+        for key in ('dispatch_spec', 'dispatch_revision'):
+            if key in previous:
+                values[key] = previous[key]
         if previous.get('uniform_category') in {'standard', 'vip', 'elite'}:
             values['uniform_category'] = previous['uniform_category']
+        if type(previous.get('frame_team_size')) is int and previous['frame_team_size'] in (3, 4, 5, 6):
+            values['frame_team_size'] = previous['frame_team_size']
         if previous.get('tea_received') and not values['tea_received']:
             values.update(prepared=previous.get('prepared'), tea_received=True,
                 tea_amount=previous.get('tea_amount'))
@@ -7924,7 +7938,7 @@ class CabinetCashInput(BaseModel):
     tg_id: StrictInt
     report_key: str = Field(pattern=r'^card:-?\d+:\d+$')
     category: Literal['standard','vip','elite']
-    team_size: StrictInt = Field(ge=4, le=6)
+    team_size: StrictInt = Field(ge=3, le=6)
     commission: StrictInt = Field(ge=0, le=10000000)
     kickback: StrictInt = Field(ge=0, le=10000000)
     reserve: StrictInt = Field(ge=0, le=6)
@@ -8009,7 +8023,8 @@ def cabinet_cash_save(data: CabinetCashInput, db: Session = Depends(get_db)):
     cabinet_cash_stage_guard(db, card)
     if card.source != 'private':
         raise HTTPException(422, 'Касса на этом этапе заполняется только для частного заказа')
-    if data.team_size not in (4, 6) or data.reserve > data.team_size:
+    cabinet_check_assigned_values(db, card, {'category': data.category, 'team_size': data.team_size}, required=True)
+    if data.team_size not in (3, 4, 5, 6) or data.reserve > data.team_size:
         raise HTTPException(422, 'Проверьте состав бригады и количество резерва')
     meta = cabinet_extra_state(db, card)
     if not meta.get('prepared') and not number_card_statuses(db, [card])[card.id]['closed']:
@@ -8920,6 +8935,111 @@ def cabinet_photo_team_sizes(db, cards):
             for card in cards if card.source == 'gbu'}
 
 
+def control_order_spec(source, gbu_detail, meta, cash):
+    """Return category and size only, never financial data."""
+    if source == 'gbu':
+        category, size = (gbu_detail or {}).get('category'), (gbu_detail or {}).get('team_size')
+        allowed = {'standard': (4, 6), 'elite': (4, 6)}
+    else:
+        assigned = meta.get('dispatch_spec') or {}
+        category = assigned.get('category') or meta.get('uniform_category') or (cash or {}).get('category')
+        size = assigned.get('team_size') or meta.get('frame_team_size') or (cash or {}).get('team_size')
+        allowed = {'standard': (3, 4, 5, 6), 'vip': (4, 6), 'elite': (4, 6)}
+    if isinstance(category, str) and type(size) is int and size in allowed.get(category, ()):
+        return {'category': category, 'team_size': size}
+    return None
+
+
+def cabinet_assigned_spec(db, card):
+    meta = cabinet_extra_state(db, card)
+    detail = gbu_control_earning_details(db, card.work_date).get(f'card:{card.id}') if card.source == 'gbu' else None
+    return control_order_spec(card.source, detail, meta, meta.get('cash'))
+
+
+def cabinet_check_assigned_values(db, card, values, required=False):
+    """Brigadier commands may echo assigned values, but never assign them."""
+    spec = cabinet_assigned_spec(db, card)
+    fields = {'uniform_category': 'category', 'category': 'category',
+              'frame_team_size': 'team_size', 'team_size': 'team_size'}
+    if not spec and (required or any(key in values for key in fields)):
+        raise HTTPException(409, 'Диспетчер ещё не назначил категорию и количество людей')
+    for key, target in fields.items():
+        if key in values and (type(values[key]) is not type(spec[target]) or values[key] != spec[target]):
+            raise HTTPException(403, 'Категорию и количество людей меняют только владелец и диспетчер. Обновите карточку')
+    if spec and values.get('source', card.source) != card.source:
+        raise HTTPException(409, 'Для изменения типа назначенного заказа обратитесь к диспетчеру')
+
+
+class DispatchOrderSpecInput(BaseModel):
+    category: Literal['standard', 'vip', 'elite']
+    team_size: StrictInt = Field(ge=3, le=6)
+    version: StrictInt = Field(ge=0)
+
+
+def dispatch_spec_context(db, user, card_id):
+    if not _dispatcher_access(db, user.id) or cabinet_kind(db, user.id) not in {'owner', 'assistant'}:
+        raise HTTPException(403, 'Выбор доступен только владельцу и диспетчеру')
+    card = db.scalar(select(NumberCardEvent).where(NumberCardEvent.id == card_id,
+        NumberCardEvent.tg_id.notin_(HIDDEN_TG_IDS), _visible_number_card()).with_for_update())
+    if not card or card.source not in {'private', 'gbu'}:
+        raise HTTPException(404, 'Заказ не найден')
+    if card.source == 'gbu':
+        config = db.get(OwnerCabinetConfig, 1)
+        owner_id = config.owner_tg_id if config else None
+        if not owner_id or not _is_owner(db, owner_id):
+            raise HTTPException(409, 'Не настроен владелец таблицы ГБУ')
+        row = db.scalar(select(PersonalMonthlyTable).where(PersonalMonthlyTable.owner_id == owner_id,
+            PersonalMonthlyTable.kind == 'earnings',
+            PersonalMonthlyTable.month == card.work_date.strftime('%Y-%m')).with_for_update())
+        payload = json.loads(row.payload) if row else {'columns': list(PERSONAL_TABLE_COLUMNS['earnings']), 'cells': {}}
+        return card, row, payload, row.version if row else 0, owner_id
+    key = f'card:{card.chat_id}:{card.message_id}'
+    row = db.get(CabinetOrderState, key)
+    payload = json.loads(row.payload) if row and row.tg_id == card.tg_id else {}
+    return card, row, payload, payload.get('dispatch_revision', 0), None
+
+
+@app.get('/api/owner/order-spec/{card_id}')
+def get_dispatch_order_spec(card_id: int, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    card, row, payload, version, owner_id = dispatch_spec_context(db, user, card_id)
+    return {'card_id': card.id, 'source': card.source, 'surname': card.surname,
+            'version': version, 'order_spec': cabinet_assigned_spec(db, card)}
+
+
+@app.put('/api/owner/order-spec/{card_id}')
+def save_dispatch_order_spec(card_id: int, change: DispatchOrderSpecInput,
+        db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    card, row, payload, version, owner_id = dispatch_spec_context(db, user, card_id)
+    allowed = {'standard': (4, 6), 'elite': (4, 6)} if card.source == 'gbu' else {
+        'standard': (3, 4, 5, 6), 'vip': (4, 6), 'elite': (4, 6)}
+    if change.team_size not in allowed.get(change.category, ()):
+        raise HTTPException(422, 'Такой состав недоступен для выбранной категории')
+    if change.version != version:
+        raise HTTPException(409, 'Параметры изменились. Откройте карточку заново')
+    spec = {'category': change.category, 'team_size': change.team_size}
+    if card.source == 'gbu':
+        details = payload.setdefault('gbu_details', {}).setdefault(str(card.work_date.day), {})
+        previous = details.get(f'card:{card.id}', {})
+        details[f'card:{card.id}'] = {**previous, **spec}
+        if row is None:
+            row = PersonalMonthlyTable(owner_id=owner_id, month=card.work_date.strftime('%Y-%m'), kind='earnings', version=0)
+            db.add(row)
+        row.version += 1
+    else:
+        payload.update(dispatch_spec=spec, dispatch_revision=version + 1)
+        if row is None:
+            row = CabinetOrderState(report_key=f'card:{card.chat_id}:{card.message_id}', tg_id=card.tg_id)
+            db.add(row)
+        row.tg_id = card.tg_id
+    row.payload = json.dumps(payload, ensure_ascii=False)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, 'Параметры изменились. Откройте карточку заново')
+    return {'saved': True, 'order_spec': spec, 'version': version + 1}
+
+
 @app.get('/api/owner/brigade-control')
 def owner_brigade_control(work_date: date, db: Session = Depends(get_db),
         user: TelegramUser = Depends(require_app_user)):
@@ -8942,6 +9062,8 @@ def owner_brigade_control(work_date: date, db: Session = Depends(get_db),
     for media_row in media_rows:
         media_by_key.setdefault(media_row.report_key, []).append(media_row)
     earning_details = gbu_control_earning_details(db, work_date) if any(c.source == 'gbu' for c in cards) else {}
+    cash_by_card = {(r.event_id, r.tg_id): {'category': r.category, 'team_size': r.team_size}
+        for r in db.scalars(select(CabinetOrderCash).where(CabinetOrderCash.event_id.in_([c.id for c in cards])))} if cards else {}
     confirmed_roster_keys = {record.report_key for record in db.scalars(select(GbuPayrollRoster).where(
         GbuPayrollRoster.report_key.in_(keys)))} if keys else set()
     items = []
@@ -8960,6 +9082,8 @@ def owner_brigade_control(work_date: date, db: Session = Depends(get_db),
         items.append({'id': card.id, 'source': card.source, 'surname': card.surname,
             'crew_confirmed': card.source == 'gbu' and key in confirmed_roster_keys,
             'gbu_earning_detail': earning_details.get(f'card:{card.id}') if card.source == 'gbu' else None,
+            'order_spec': control_order_spec(card.source, earning_details.get(f'card:{card.id}'), meta,
+                cash_by_card.get((card.id, card.tg_id))),
             'employee': _employee_dict(employee) if employee else {'full_name': card.full_name, 'phone': card.phone},
             'contact_time': statuses[card.id]['contact_time'], 'on_contact': bool(contacts.get(card.id)),
             'prepared': bool(meta.get('prepared') or statuses[card.id]['closed']),
@@ -12070,6 +12194,142 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
 #numberCardsBody .number-card-row>div:last-child{flex-direction:row!important;justify-content:center;gap:3px!important;flex-wrap:wrap}
 #numberCardsBody [data-number-reassign],#numberCardsBody [data-number-delete]{box-sizing:border-box;width:28px!important;height:30px!important;min-height:30px;min-width:0;padding:2px!important;font-size:16px!important;border-radius:7px!important}
 </style></body>''', 1)
+
+
+# iOS month inputs have intrinsic controls wider than their visible label.
+# Clip the hit area to its own grid cell so it cannot cover adjacent buttons.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
+<style id="independent-header-controls-style">
+#app>.topbar .dispatch-month-picker{overflow:hidden;contain:paint;isolation:isolate;max-width:100%;flex-shrink:0}
+#app>.topbar .dispatch-month-picker #dispatchMonth{box-sizing:border-box;display:block;position:absolute;inset:0;width:100%;max-width:100%;min-width:0;height:100%;min-height:0;max-height:100%;margin:0;padding:0;border:0;clip-path:inset(0);-webkit-appearance:none;appearance:none}
+#app>.topbar>.dispatch-date-title+div{position:relative;z-index:2;isolation:isolate}
+#app>.topbar #ownerManagementTop,#app>.topbar #refreshBtn{position:relative;flex-shrink:0;pointer-events:auto}
+</style></body>''', 1)
+
+
+_numbers_summary_start = INLINE_INDEX_HTML.index('<div class="attention"><h4>Номера: ${r.count}/${r.progress.expected}</h4>')
+_numbers_summary_end = INLINE_INDEX_HTML.index('${r.items.map((x,i)=>', _numbers_summary_start)
+INLINE_INDEX_HTML = (
+    INLINE_INDEX_HTML[:_numbers_summary_start]
+    + '<h4 class="number-cards-total">Номера: ${r.count}/${r.progress.expected}</h4>'
+    + INLINE_INDEX_HTML[_numbers_summary_end:]
+)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    '<small class="number-card-line number-card-sent">${esc(sent)}</small>', '', 1,
+).replace('</body>', r'''
+<style id="number-cards-minimal-summary-style">
+#numberCardsBody>.number-cards-total{grid-column:1/-1;margin:0 0 5px;font-size:18px;line-height:1.3}
+</style></body>''', 1)
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "${card.source==='gbu'?'ГБУ ⬛️':'Частный'}</span>${card.source==='gbu'&&card.crew_confirmed?",
+    "<span>${card.source==='gbu'?'ГБУ <span class=\"bc-source-mark\">⬛️</span>':'Частный'}</span>${controlOrderSpecHtml(card)}</span>${card.source==='gbu'&&card.crew_confirmed?",
+    1,
+).replace(
+    "card?.cash?.team_size||4",
+    "card?.frame_team_size||card?.cash?.team_size||4", 1,
+).replace('</body>', r'''
+<style id="compact-control-order-spec-style">
+#ownerBrigadeControlContent .bc-order-title>.bc-kind{display:inline-flex;align-items:center;gap:3px;white-space:nowrap;font-size:9px}
+#ownerBrigadeControlContent .bc-order-spec{font-size:8px;line-height:1;font-weight:800;white-space:nowrap;color:var(--gold)}
+@media(max-width:350px){
+ #ownerBrigadeControlContent .bc-order-title>.bc-kind{font-size:8px;gap:2px}
+ #ownerBrigadeControlContent .bc-kind-gbu .bc-source-mark{display:none}
+}
+</style>
+<script>
+function controlOrderSpecHtml(card){
+ const detail=card.order_spec||(card.source==='gbu'?card.gbu_earning_detail:null);
+ const labels={standard:'Ст',vip:'В',elite:'Э'},full={standard:'Стандарт',vip:'Вип',elite:'Элит'};
+ const allowed=card.source==='gbu'?{standard:[4,6],elite:[4,6]}:{standard:[3,4,5,6],vip:[4,6],elite:[4,6]};
+ if(!detail||!Number.isInteger(detail.team_size)||!allowed[detail.category]?.includes(detail.team_size))return '';
+ const title=full[detail.category]+' · '+detail.team_size+' чел.';
+ return `<span class="bc-order-spec" aria-label="${esc(title)}" title="${esc(title)}">${labels[detail.category]}${detail.team_size}</span>`;
+}
+</script></body>''', 1)
+
+
+def _dispatch_only_order_spec_html(html):
+    start = html.index('function cabinetUniformFields(){')
+    end = html.index('\nasync function ownerCabinetAction(', start)
+    html = html[:start] + r'''
+function cabinetAssignedSpecText(card){
+ const spec=card?.order_spec;
+ return spec?({standard:'Стандарт',vip:'Вип',elite:'Элит'}[spec.category]+' · '+spec.team_size+' чел.'):'Категорию и количество людей назначает диспетчер';
+}
+function cabinetUniformFields(){
+ return '<div data-uniform-fields><p data-assigned-spec></p><div class="cabinet-photo-reminder" data-uniform-reminder role="note" hidden><strong>❗ Проверьте форму бригады</strong><span data-uniform-text></span><small>Вся бригада — в полный рост. Атрибутика хорошо видна в кадре.</small></div></div>';
+}
+function setupCabinetUniform(form,card){
+ const label=form.querySelector('[data-assigned-spec]');if(label)label.textContent=cabinetAssignedSpecText(card);
+ const text=cabinetUniformText(card?.source,card?.order_spec?.category),note=form.querySelector('[data-uniform-reminder]');
+ if(note){note.hidden=!text;form.querySelector('[data-uniform-text]').textContent=text}
+}
+''' + html[end:]
+    start = html.index(' return `${card?.source===', html.index('function cabinetPhotoFrameFields('))
+    end = html.index('<div data-photo-file-label', start)
+    html = html[:start] + ' return `${cabinetUniformFields()}' + html[end:]
+    html = html.replace("const teamSize=()=>card?.source==='gbu'?Number(card.photo_team_size):Number(teamInput?.value||4);",
+                        "const teamSize=()=>Number(card?.order_spec?.team_size);", 1)
+    html = html.replace("  if(card)data={...data,work_date:card.work_date};",
+        "  if(card)data={...data,work_date:card.work_date};\n  if(['cash','photo'].includes(key)&&!card?.order_spec){toast('Диспетчер ещё не назначил категорию и количество людей');return}", 1)
+    start = html.index('    fields=`<div class="cabinet-form-pair"><label>Категория<select name="category">')
+    end = html.index('`+', start)
+    html = html[:start] + '''    fields=`<p>${esc(cabinetAssignedSpecText(card))}</p><input type="hidden" name="category" value="${esc(card.order_spec.category)}"><input type="hidden" name="team_size" value="${card.order_spec.team_size}">''' + html[end:]
+    html = html.replace('const values=Object.fromEntries(new FormData(form));',
+        "const values=Object.fromEntries(new FormData(form));\n        if(key==='photo')values.uniform_category=card.order_spec.category;", 1)
+    html = html.replace('  bindControlReportPhotos(root);', '  bindControlReportPhotos(root);\n  bindDispatchOrderSpec(root,items);', 1)
+    return html.replace('</body>', r'''
+<style>
+#ownerBrigadeControlContent .bc-kind[role=button]{cursor:pointer}
+.dispatch-spec-dialog{width:min(360px,90vw);box-sizing:border-box;border:1px solid var(--gold);border-radius:18px;background:var(--panel);color:var(--text);padding:18px}
+.dispatch-spec-dialog::backdrop{background:#0008}
+.dispatch-spec-dialog header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}
+.dispatch-spec-dialog h3{margin:0}.dispatch-spec-dialog label{display:grid;gap:6px;margin:12px 0}
+.dispatch-spec-dialog select{width:100%;box-sizing:border-box}
+</style>
+<script>
+function bindDispatchOrderSpec(root,items){
+ root.querySelectorAll('[data-control-card]').forEach(row=>{
+  const card=items.find(x=>Number(x.id)===Number(row.dataset.controlCard)),badge=row.querySelector('.bc-kind');
+  if(!card||!badge)return;
+  badge.setAttribute('role','button');badge.setAttribute('tabindex','0');badge.setAttribute('aria-label','Изменить категорию и количество людей');
+  const open=e=>{e.preventDefault();e.stopPropagation();openDispatchOrderSpec(card,badge)};
+  badge.onclick=open;badge.onkeydown=e=>{if(e.key==='Enter'||e.key===' ')open(e)};
+ });
+}
+async function openDispatchOrderSpec(card,trigger){
+ if(document.querySelector('.dispatch-spec-dialog'))return;
+ const dialog=document.createElement('dialog');dialog.className='dispatch-spec-dialog';
+ dialog.innerHTML='<header><h3>Параметры заказа</h3><button type="button" data-close aria-label="Закрыть">×</button></header><div data-body>Загрузка…</div>';
+ let busy=false;
+ dialog.querySelector('[data-close]').onclick=()=>{if(!busy)dialog.close()};
+ dialog.oncancel=e=>{if(busy)e.preventDefault()};
+ dialog.onclick=e=>{if(e.target!==dialog||busy)return;const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)dialog.close()};
+ dialog.addEventListener('close',()=>{dialog.remove();if(trigger?.isConnected)trigger.focus({preventScroll:true})},{once:true});
+ document.body.append(dialog);dialog.showModal();const body=dialog.querySelector('[data-body]');
+ try{
+  const data=await api('/api/owner/order-spec/'+card.id);if(!dialog.open)return;
+  const allowed=data.source==='gbu'?{standard:[4,6],elite:[4,6]}:{standard:[3,4,5,6],vip:[4,6],elite:[4,6]};
+  const labels={standard:'Стандарт',vip:'Вип',elite:'Элит'};
+  body.innerHTML=`<b>${esc(data.surname)}</b><form><label>Категория<select name="category" required><option value="">Выбрать</option>${Object.keys(allowed).map(key=>`<option value="${key}" ${data.order_spec?.category===key?'selected':''}>${labels[key]}</option>`).join('')}</select></label><label>Количество людей<select name="team_size" required></select></label><p role="status"></p><button type="submit" class="primary">Сохранить</button></form>`;
+  const form=body.querySelector('form'),category=form.querySelector('[name=category]'),team=form.querySelector('[name=team_size]'),status=form.querySelector('[role=status]');
+  const fill=value=>{team.innerHTML='<option value="">Выбрать</option>'+(allowed[category.value]||[]).map(n=>`<option value="${n}" ${n===value?'selected':''}>${n} чел.</option>`).join('')};
+  fill(data.order_spec?.team_size);category.onchange=()=>fill(Number(team.value));
+  form.onsubmit=async e=>{e.preventDefault();if(busy)return;busy=true;form.querySelectorAll('button,select').forEach(x=>x.disabled=true);
+   try{const saved=await api('/api/owner/order-spec/'+card.id,{method:'PUT',body:JSON.stringify({version:data.version,category:category.value,team_size:Number(team.value)})});
+    card.order_spec=saved.order_spec;const badge=trigger?.querySelector('.bc-order-spec');
+    if(badge)badge.remove();trigger?.insertAdjacentHTML('beforeend',controlOrderSpecHtml(card));
+    dialog.close();toast('Категория и состав сохранены');
+   }catch(error){if(dialog.open){status.textContent=error.message;busy=false;form.querySelectorAll('button,select').forEach(x=>x.disabled=false)}}
+  };
+ }catch(error){if(dialog.open)body.textContent=error.message}
+}
+</script></body>''', 1)
+
+
+INLINE_INDEX_HTML = _dispatch_only_order_spec_html(INLINE_INDEX_HTML)
 
 
 def _isolated_preview_screen_html():
