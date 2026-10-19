@@ -8765,7 +8765,8 @@ function ownerManagementAdd(group){
 qs('#cashBtn')''')
     return html.replace('</head>', '''<style id="owner-management-style">
 .management-open #dateStrip,.management-open #summary,.management-open #roleOwnOrders{display:none!important}
-#ownerManagementContent{max-width:680px;margin:auto;padding-bottom:16px}.management-title{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.management-title h2{font-size:24px;margin:12px 0}.management-title small{display:flex;gap:5px;color:var(--gold);align-items:center}.management-title small svg{width:16px;height:16px}
+#ownerManagementContent{max-width:680px;margin:auto;padding-bottom:16px}.management-title{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.management-title h2{font-size:24px;margin:4px 0 6px}.management-title small{display:flex;gap:5px;color:var(--gold);align-items:center}.management-title small svg{width:16px;height:16px}
+.management-open #ownerManagementContent>.muted{margin:4px 0 8px}.management-open .management-menu{margin-top:10px}
 .management-status{font-size:12px}.management-menu{display:grid;gap:12px;margin-top:18px}.management-menu>button{display:flex;align-items:center;gap:14px;width:100%;padding:18px 14px;border:1px solid var(--line);border-radius:18px;background:var(--panel);color:var(--text);text-align:left}.management-menu>button>svg:first-child{width:30px;height:30px;color:var(--gold);flex-shrink:0}.management-menu>button>svg:last-child{margin-left:auto;flex-shrink:0}.management-menu b{display:block;font-size:16px}.management-menu small{display:block;color:var(--muted);font-size:12px;margin-top:6px}
 .management-person{padding:14px;margin:12px 0;border:1px solid var(--line);border-radius:14px;background:var(--panel)}.management-person h3{font-size:16px;margin:0 0 6px}.management-person p{font-size:12px;color:var(--muted)}.management-actions{display:flex;gap:8px;flex-wrap:wrap}.management-actions button{font-size:12px}.management-sync{margin-top:16px;width:100%}#managementSearch{width:100%;margin:14px 0}
 </style></head>''',1)
@@ -10847,7 +10848,7 @@ def _employees_focus_html(html):
             raise RuntimeError('Employees focus anchor missing: ' + anchor[:70])
     html = html.replace(panel, '<div id="dispatcherOrderOverview">' + panel + '</div>', 1)
     html = html.replace(button, '', 1).replace(handler, '', 1)
-    html = html.replace(view, view + "\n  qs('#dispatcherOrderOverview').hidden=['employeesView','ownerBrigadeControlView'].includes(v);", 1)
+    html = html.replace(view, view + "\n  qs('#dispatcherOrderOverview').hidden=['employeesView','ownerBrigadeControlView','ownerManagementView'].includes(v);", 1)
     return html.replace('</head>', '<style>#dispatcherOrderOverview[hidden]{display:none!important}</style></head>', 1)
 
 
@@ -12786,6 +12787,12 @@ async function renderUiUsageReport(root){
 
 
 INLINE_INDEX_HTML = _ui_usage_html(INLINE_INDEX_HTML)
+
+
+# Settings have no work-day context; the shared calendar must not override this.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '''<style id="management-focus-style">
+body.management-open.dispatch-shared-header #app>#dateStrip{display:none!important}
+</style></body>''', 1)
 
 
 def _isolated_preview_screen_html():
