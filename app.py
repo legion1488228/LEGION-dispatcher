@@ -9825,8 +9825,6 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
 #modal.owner-cash-modal .owner-cash-matrix tr[data-period-page="1"]{--period-row:var(--period-first-row)}
 #modal.personal-first-half-modal #personalGrid tr[data-period-page="2"],
 #modal.owner-cash-modal .owner-cash-matrix tr[data-period-page="2"]{--period-row:var(--period-second-row)}
-#modal.personal-first-half-modal #personalGrid tr[data-period-start],
-#modal.owner-cash-modal .owner-cash-matrix tr[data-period-start]{scroll-snap-align:start}
 #modal.personal-first-half-modal #personalGrid .period-page-gap>td,
 #modal.owner-cash-modal .owner-cash-matrix .period-page-gap>td{padding:0;border:0;height:var(--period-gap);min-height:0;background:var(--panel);line-height:0;font-size:0;box-sizing:border-box}
 #modal.owner-cash-modal .owner-cash-matrix .cash-subtotal>td{height:28px;box-sizing:border-box;font-size:12px}
@@ -9869,7 +9867,7 @@ function fitTwoPeriodPages(scroller,available,header,personal){
   const totalHeight=totals.reduce((sum,row)=>sum+(row.offsetHeight||28),0);
   const rowHeight=Math.min(48,Math.max(1,(pageHeight-ownHeader-totalHeight-2)/days.length));
   scroller.style.setProperty(index?'--period-second-row':'--period-first-row',rowHeight+'px');
-  days[0].dataset.periodStart=String(index+1);
+  // Only the whole page is a snap target: snapping to day 1/16 hides its header.
   // CSS table row heights are minima. Measure actual layout and fit it too.
   const natural=item.offsetHeight||ownHeader+days.length*rowHeight+totalHeight;
   const scale=Math.min(1,(pageHeight-1)/natural);
