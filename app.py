@@ -8942,8 +8942,9 @@ def control_order_spec(source, gbu_detail, meta, cash):
         allowed = {'standard': (4, 6), 'elite': (4, 6)}
     else:
         assigned = meta.get('dispatch_spec') or {}
-        category = assigned.get('category') or meta.get('uniform_category') or (cash or {}).get('category')
-        size = assigned.get('team_size') or meta.get('frame_team_size') or (cash or {}).get('team_size')
+        # Old cash/photo forms supplied defaults; they are not a dispatcher's choice.
+        category = assigned.get('category')
+        size = assigned.get('team_size')
         allowed = {'standard': (3, 4, 5, 6), 'vip': (4, 6), 'elite': (4, 6)}
     if isinstance(category, str) and type(size) is int and size in allowed.get(category, ()):
         return {'category': category, 'team_size': size}
