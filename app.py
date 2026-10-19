@@ -12793,6 +12793,41 @@ body.management-open.dispatch-shared-header #app>#dateStrip{display:none!importa
 </style></body>''', 1)
 
 
+def _photo_alignment_guides_html(html):
+    anchor = 'function setupCabinetPhotoFrame(form,notify,metadataReady,card=null){'
+    update = " const updateFrame=()=>{frame.dataset.crewFrame=teamSize()>=5?'wide':'normal'};"
+    if html.count(anchor) != 1 or html.count(update) != 1:
+        raise RuntimeError('Photo alignment guide anchors missing')
+    helper = r'''function cabinetPhotoGuideMarkup(box,count){
+ const height=box.h*.90,scale=height/360,width=100*scale,gap=(box.w-count*width)/(count+1);
+ const person='M50 3 C39 3 34 11 34 23 L34 36 C34 43 38 48 42 51 L42 59 L21 70 C14 74 12 84 10 104 L4 181 Q2 195 7 199 L12 201 L17 195 L18 172 L24 116 L27 193 L28 231 L25 315 L20 347 Q18 354 23 358 L42 358 Q47 355 44 350 L44 319 L49 239 L51 239 L56 319 L56 350 Q53 355 58 358 L77 358 Q82 354 80 347 L75 315 L72 231 L73 193 L76 116 L82 172 L83 195 L88 201 L93 199 Q98 195 96 181 L90 104 C88 84 86 74 79 70 L58 59 L58 51 C62 48 66 43 66 36 L66 23 C66 11 61 3 50 3 Z';
+ return Array.from({length:count},(_,i)=>`<path d="${person}" transform="translate(${box.x+gap+i*(width+gap)} ${box.y+(box.h-height)/2}) scale(${scale})" vector-effect="non-scaling-stroke"/>`).join('');
+}
+'''
+    html = html.replace(anchor, helper + anchor, 1)
+    html = html.replace(update, r''' const updateFrame=()=>{
+  frame.dataset.crewFrame=teamSize()>=5?'wide':'normal';
+  let guides=frame.querySelector('.cabinet-frame-guides');
+  if(!guides){
+   guides=document.createElementNS('http://www.w3.org/2000/svg','svg');
+   guides.setAttribute('class','cabinet-frame-guides');guides.setAttribute('viewBox','0 0 1000 800');
+   guides.setAttribute('aria-hidden','true');guides.setAttribute('focusable','false');frame.append(guides);
+  }
+  // A DOM overlay stays visible while panning/zooming, outside the image export.
+  guides.innerHTML=cabinetPhotoGuideMarkup(cropBox(),teamSize()>=5?6:4);
+ };''', 1)
+    html = html.replace('Все сотрудники целиком. В итоговое фото войдёт область внутри рамки.',
+        'Все сотрудники целиком. Совместите их с пунктирными силуэтами. В итоговое фото пунктир не попадёт.', 1)
+    return html.replace('</body>', r'''<style id="photo-alignment-guides-style">
+#cabinetNativeForm .cabinet-photo-frame::after{background:none}
+#cabinetNativeForm .cabinet-photo-frame>.cabinet-frame-guides{position:absolute;inset:0;display:block;width:100%;height:100%;pointer-events:none;overflow:hidden;z-index:1}
+#cabinetNativeForm .cabinet-frame-guides path{fill:none;stroke:rgba(255,255,255,.78);stroke-width:1.3;stroke-dasharray:4 3;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 1px 1px #000b)}
+</style></body>''', 1)
+
+
+INLINE_INDEX_HTML = _photo_alignment_guides_html(INLINE_INDEX_HTML)
+
+
 def _isolated_preview_screen_html():
     html = INLINE_INDEX_HTML
     # No real Telegram SDK, credentials, database session or notifications.
