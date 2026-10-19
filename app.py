@@ -11905,6 +11905,51 @@ for _table_back_button in ('privateCashBack', 'kickbackBack', 'gbuEarnBack'):
     )
 
 
+# Narrow the photo editor horizontally while preserving its height and gestures.
+_frame_start = INLINE_INDEX_HTML.index('function cabinetPhotoFrameFields(){')
+_frame_end = INLINE_INDEX_HTML.index('async function ownerCabinetAction(', _frame_start)
+INLINE_INDEX_HTML = (
+    INLINE_INDEX_HTML[:_frame_start]
+    + INLINE_INDEX_HTML[_frame_start:_frame_end].replace('1200', '1000').replace('600', '500')
+    + INLINE_INDEX_HTML[_frame_end:]
+)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
+<style id="narrow-photo-frame-style">
+#cabinetNativeForm .cabinet-photo-frame{aspect-ratio:5/4}
+#cabinetNativeForm .cabinet-photo-frame::after{inset:5% 4%}
+#cabinetNativeForm #cabinetFrameReview img{aspect-ratio:5/4}
+</style></body>''', 1)
+
+
+# Export source pixels only; the editor's empty background is never sent.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    'function setupCabinetPhotoFrame(form,notify,metadataReady){',
+    r'''function cabinetFramePhotoBounds(iw,ih,p,fw,fh){
+ const left=p.x-p.w/2,top=p.y-p.h/2;
+ const x=Math.max(0,-left/p.scale),y=Math.max(0,-top/p.scale);
+ const right=Math.min(iw,(fw-left)/p.scale),bottom=Math.min(ih,(fh-top)/p.scale);
+ return {x,y,w:Math.max(0,right-x),h:Math.max(0,bottom-y)};
+}
+function cabinetFramePhotoJpeg(image,p,fw,fh){
+ const crop=cabinetFramePhotoBounds(image.naturalWidth,image.naturalHeight,p,fw,fh);
+ if(crop.w<1||crop.h<1)throw new Error('Поместите фото внутрь рамки');
+ const output=document.createElement('canvas'),scale=Math.min(1,1600/Math.max(crop.w,crop.h));
+ output.width=Math.max(1,Math.round(crop.w*scale));output.height=Math.max(1,Math.round(crop.h*scale));
+ output.getContext('2d').drawImage(image,crop.x,crop.y,crop.w,crop.h,0,0,output.width,output.height);
+ return output.toDataURL('image/jpeg',.92).split(',')[1];
+}
+function setupCabinetPhotoFrame(form,notify,metadataReady){''',
+    1,
+).replace(
+    "draw();jpeg=canvas.toDataURL('image/jpeg',.92).split(',')[1];",
+    "draw();try{jpeg=cabinetFramePhotoJpeg(image,cabinetFramePlacement(image.naturalWidth,image.naturalHeight,zoom,cx,cy),1000,800)}catch(error){form.querySelector('#cabinetActionStatus').textContent=error.message;return}",
+    1,
+).replace('</body>', r'''
+<style id="photo-only-review-style">
+#cabinetNativeForm #cabinetFrameReview img{aspect-ratio:auto;height:auto;background:transparent;object-fit:initial}
+</style></body>''', 1)
+
+
 def _isolated_preview_screen_html():
     html = INLINE_INDEX_HTML
     # No real Telegram SDK, credentials, database session or notifications.
