@@ -12995,6 +12995,22 @@ function renderOwnerDemo(root,kind){
 INLINE_INDEX_HTML = _owner_examples_html(INLINE_INDEX_HTML)
 
 
+def _gbu_payroll_second_half_html(html):
+    changes = [
+        ('Number(order.date.slice(8,10))>=15', 'Number(order.date.slice(8,10))>=16'),
+        ('>15–конец месяца</button>', '>16–конец месяца</button>'),
+        ("period==='first'?'1–15':'15–'+end", "period==='first'?'1–15':'16–'+end"),
+    ]
+    for before, after in changes:
+        if before not in html:
+            raise RuntimeError('GBU payroll period anchor missing: ' + before)
+        html = html.replace(before, after)
+    return html
+
+
+INLINE_INDEX_HTML = _gbu_payroll_second_half_html(INLINE_INDEX_HTML)
+
+
 def _isolated_preview_screen_html():
     html = INLINE_INDEX_HTML
     # No real Telegram SDK, credentials, database session or notifications.
