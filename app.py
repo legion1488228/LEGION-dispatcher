@@ -13041,6 +13041,101 @@ def _control_viewer_caption_html(html):
 INLINE_INDEX_HTML = _control_viewer_caption_html(INLINE_INDEX_HTML)
 
 
+def _staff_contact_actions_html(html):
+    """Separate staff editing from Telegram navigation in administrative lists."""
+    start = html.index('function readyEmployeeGroup(')
+    end = html.index('async function openReadinessGroupedList(', start)
+    group = html[start:end]
+    marker = '${options.indexOnly?`data-subgroup-edit="${index}"`:`data-person-status="${esc(code)}:${index}"`}'
+    group = group.replace('<div class="name"><b>', '<button type="button" class="name staff-edit-name" '+marker+'><b>', 1)
+    button_start = group.index('</div><button type="button" class="secondary" ')
+    button_end = group.index('</button></div>`', button_start)
+    group = group[:button_start] + '</button>${staffTelegramButton(employee)}' + group[button_end+len('</button>'):]
+    html = html[:start] + group + html[end:]
+    # Readiness edit handlers now belong to the name; contact handlers stay separate.
+    for begin, finish in [('function openReadinessPeople(', 'function chooseReadinessEmployee('),
+                          ('async function openReadinessGroupedList(', 'async function loadReadiness(')]:
+        a, b = html.index(begin), html.index(finish, html.index(begin))
+        part = html[a:b]
+        anchor = "  qsa('[data-subgroup-edit]'" if 'openReadinessPeople' in begin else "    qsa('[data-person-status]'"
+        part = part.replace(anchor, "  wireContactButtons(qs('#modal'));\n"+anchor, 1)
+        # The uncommon all-employees readiness drawer uses the same compact rows.
+        if 'openReadinessGroupedList' in begin:
+            a1 = part.index('      return `<section class="drawer-section">')
+            b1 = part.index('\n    }).join', a1)
+            part = part[:a1] + "      return readyEmployeeGroup(code,g.label||label,people,{showStatuses:true,emptyLabel:'В этой группе список пуст'});" + part[b1:]
+        html = html[:a] + part + html[b:]
+    # Keep restricted brigadier directory unchanged; editors get an independent DM button.
+    a, b = html.index('async function loadEmployees(){'), html.index('async function loadControl(){')
+    part = html[a:b]
+    part = part.replace('</div></details></article>`', '</div></details>${canEdit?staffTelegramButton(x):\'\'}</article>`', 1)
+    html = html[:a] + part + html[b:]
+    # Add date-explicit readiness action to the existing profile (including delete).
+    a, b = html.index('function openEmployeeProfile('), html.index('function openManualReadiness(')
+    part = html[a:b]
+    part = part.replace('<p class="muted">Данные сохранятся', '<button type="button" id="profileTomorrowReady" class="secondary">Готовность на завтра</button><p class="muted">Данные сохранятся', 1)
+    anchor = "  const deleteButton=qs('#deleteEmployeeProfile');"
+    part = part.replace(anchor, """  qs('#profileTomorrowReady').onclick=()=>openStaffTomorrowReadiness({...employee,
+    full_name:qs('#profileName').value.trim(),metro:qs('#profileMetro').value.trim(),
+    height_cm:qs('#profileHeight').value?Number(qs('#profileHeight').value):null,
+    phone:qs('#profilePhone').value.trim(),telegram_username:qs('#profileTelegram').value.trim()
+  },onSaved);
+"""+anchor, 1)
+    html = html[:a] + part + html[b:]
+    return html.replace('</body>', r'''
+<style id="staff-contact-actions-style">
+#modal .ready-employee-grid .ready-employee-row>button.staff-edit-name{display:block;grid-column:1;grid-row:1;min-width:0!important;width:100%;min-height:32px!important;padding:3px 4px!important;border:0;border-radius:4px;background:transparent;color:var(--text);text-align:left;font:inherit;font-size:11px!important;cursor:pointer}
+#modal .ready-employee-row>.staff-edit-name b{font-weight:400}
+#modal .ready-employee-row>.staff-edit-name small{display:block;color:var(--muted)}
+.staff-dm-button{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;cursor:pointer}
+.staff-dm-button svg{width:23px;height:23px;display:block}
+.staff-dm-button:disabled{opacity:.35;cursor:default}
+#employeesList .staff-directory-person.is-editable{display:grid;grid-template-columns:minmax(0,1fr) 32px;gap:3px;align-items:center}
+#employeesList .staff-directory-person.is-editable>details{min-width:0}
+#employeesList .is-editable .staff-contact-chevron{display:none}
+#employeesList .staff-dm-button{width:32px;min-width:32px;min-height:32px;padding:2px;border-radius:7px}
+.staff-edit-name:focus-visible,.staff-dm-button:focus-visible{outline:2px solid var(--gold2);outline-offset:-2px}
+</style>
+<script>
+function staffTelegramUrl(employee){
+ const raw=String(employee.telegram_url||'');
+ if(/^https:\/\/t\.me\/[A-Za-z0-9_]{5,32}$/.test(raw)||/^tg:\/\/user\?id=[1-9]\d*$/.test(raw))return raw;
+ const name=String(employee.telegram_username||'').replace(/^@/,'');
+ if(/^[A-Za-z0-9_]{5,32}$/.test(name))return 'https://t.me/'+name;
+ const id=String(employee.tg_id||'');
+ return /^[1-9]\d*$/.test(id)?'tg://user?id='+id:'';
+}
+function staffTelegramButton(employee){
+ const url=staffTelegramUrl(employee),label=url?'Открыть личку Telegram':'Telegram-контакт не указан';
+ return `<button type="button" class="secondary staff-dm-button" ${url?`data-open-tg="${esc(url)}"`:'disabled'} aria-label="${label}" title="${label}"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="11" fill="#269fda"/><path d="M5.5 11.5 18 6.7c.6-.2 1 .1.8.9l-2.1 10c-.1.7-.6.8-1.1.4l-3.2-2.4-1.6 1.5c-.2.2-.3.3-.6.3l.2-3.3 6-5.4c.3-.3-.1-.4-.4-.2l-7.4 4.7-3.2-1c-.7-.2-.7-.6.1-.9Z" fill="white"/></svg></button>`;
+}
+async function openStaffTomorrowReadiness(employee,onSaved){
+ if(state.bootstrap?.can_manage_cash!==true||state.bootstrap?.cabinet_only)return;
+ const day=nextReadinessDay(new Intl.DateTimeFormat('sv-SE',{timeZone:'Europe/Moscow',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date()));
+ const button=qs('#profileTomorrowReady');if(button)button.disabled=true;
+ try{
+  const summary=await api(`/api/readiness/summary?work_date=${day}`);
+  if(button&&!button.isConnected)return;
+  const statuses=['ready','not_ready','day_off','responded','no_response'];
+  let current=null,code=employee.group_code;
+  for(const [key,group] of Object.entries(summary.groups||{}))for(const status of statuses){
+   const found=(group[status]||[]).find(x=>Number(x.id)===Number(employee.id));
+   if(found){current={...found,readiness_status:status};code=key;}
+  }
+  if(!['brigadier','main','cashless','reserve'].includes(code))throw new Error('Не указана группа сотрудника');
+  const person={...current,...employee};
+  if(current?.manual_entry_id)person.manual_entry_id=current.manual_entry_id;
+  else delete person.manual_entry_id;
+  openManualReadiness(code,current?.readiness_status||'no_response',summary.groups?.[code]?.label||'Сотрудник','',day,person,onSaved);
+ }catch(error){toast(error.message,4500);if(button)button.disabled=false;}
+}
+</script>
+</body>''', 1)
+
+
+INLINE_INDEX_HTML = _staff_contact_actions_html(INLINE_INDEX_HTML)
+
+
 def _isolated_preview_screen_html():
     html = INLINE_INDEX_HTML
     # No real Telegram SDK, credentials, database session or notifications.
