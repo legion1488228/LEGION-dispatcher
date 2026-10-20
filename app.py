@@ -129,14 +129,21 @@ def _seed_gbu_agents():
             # GBU names/phones reach an already running Railway database after
             # an application update, while preserving any manually added rows.
             existing_rows = db.execute(select(GbuAgentContact)).scalars().all()
+            edits = list(db.scalars(select(GbuAgentContactEdit)))
+            edited_ids = {edit.contact_id for edit in edits}
+            original_names = {edit.original_name for edit in edits}
             by_name = {str(row.full_name).strip(): row for row in existing_rows}
             for item in items:
                 full_name = str(item.get("full_name") or "").strip()
                 phone = str(item.get("phone") or "").strip()
                 if not full_name:
                     continue
+                if full_name in original_names:
+                    continue  # A manually corrected imported contact must not be recreated.
                 row = by_name.get(full_name)
                 if row:
+                    if row.id in edited_ids:
+                        continue
                     if phone:
                         row.phone = phone
                     if item.get("source_page") is not None:
@@ -3467,6 +3474,17 @@ class GbuAgentContactCreate(BaseModel):
     phone: StrictStr = Field(min_length=1, max_length=40)
 
 
+class GbuAgentContactEdit(Base):
+    __tablename__ = 'gbu_agent_contact_edits'
+    contact_id = Column(Integer, primary_key=True)
+    original_name = Column(String(200), nullable=False)
+
+
+class GbuAgentContactUpdate(GbuAgentContactCreate):
+    expected_full_name: StrictStr = Field(max_length=200)
+    expected_phone: StrictStr = Field(max_length=40)
+
+
 def _gbu_contact_phone(value: str) -> str:
     raw = value.strip()
     if not re.fullmatch(r"[+0-9\s()\-]+", raw):
@@ -3508,6 +3526,40 @@ def create_gbu_agent(data: GbuAgentContactCreate, db: Session = Depends(get_db),
     db.commit()
     db.refresh(row)
     return {"id": row.id, "full_name": row.full_name, "phone": row.phone, "source_page": row.source_page}
+
+
+@app.patch('/api/gbu/agents/{agent_id}')
+def update_gbu_agent(agent_id: int, data: GbuAgentContactUpdate, db: Session = Depends(get_db),
+                     user: TelegramUser = Depends(require_admin)):
+    if cabinet_kind(db, user.id) not in {'owner', 'assistant'}:
+        raise HTTPException(403, 'Редактировать агентов могут только владелец и диспетчеры')
+    full_name = ' '.join(data.full_name.split())
+    if not full_name or any(ord(ch) < 32 for ch in full_name):
+        raise HTTPException(422, 'Введите ФИО агента')
+    phone = _gbu_contact_phone(data.phone)
+    # Same lock as creation: name/phone uniqueness covers both operations.
+    if db.get_bind().dialect.name == 'postgresql':
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtext('legion:gbu-agent-create'))"))
+    row = db.get(GbuAgentContact, agent_id, with_for_update=True)
+    if not row or not row.active:
+        raise HTTPException(404, 'Агент не найден')
+    if (row.full_name or '') != data.expected_full_name or (row.phone or '') != data.expected_phone:
+        raise HTTPException(409, 'Контакт уже изменён. Закройте редактор и откройте карточку заново')
+    for other in db.scalars(select(GbuAgentContact)):
+        if other.id == agent_id:
+            continue
+        same_name = ' '.join(str(other.full_name or '').split()).casefold() == full_name.casefold()
+        try:
+            same_phone = _gbu_contact_phone(str(other.phone or '')) == phone
+        except HTTPException:
+            same_phone = False
+        if same_name or same_phone:
+            raise HTTPException(409, 'Агент с таким ФИО или телефоном уже есть в справочнике')
+    if not db.get(GbuAgentContactEdit, agent_id):
+        db.add(GbuAgentContactEdit(contact_id=agent_id, original_name=row.full_name or ''))
+    row.full_name, row.phone = full_name, phone
+    db.commit()
+    return {'id': row.id, 'full_name': row.full_name, 'phone': row.phone, 'source_page': row.source_page}
 
 
 @app.get("/api/gbu/agents")
@@ -13262,6 +13314,31 @@ dialog.gbu-crew-dialog form[data-crew-form] .gbu-crew-choice{min-height:48px;pad
 
 
 INLINE_INDEX_HTML = _gbu_second_order_html(INLINE_INDEX_HTML)
+
+
+def _gbu_agent_edit_html(html):
+    a=html.index('async function openGbuAgents(){')
+    b=html.index('</script>',a)
+    part=html[a:b]
+    part=part.replace(' let saving=false;', ' let saving=false,editingAgent=null,openAgentEditor=null;',1)
+    part=part.replace("  add.onclick=()=>toggleForm(form.classList.contains('hidden'));", """  add.onclick=()=>{const open=form.classList.contains('hidden')||!!editingAgent;editingAgent=null;form.reset();save.textContent='Сохранить';toggleForm(open)};
+  openAgentEditor=agent=>{if(saving||!active())return;editingAgent={...agent};name.value=agent.full_name||'';phone.value=agent.phone||'';save.textContent='Сохранить изменения';toggleForm(true)};""",1)
+    part=part.replace("    await api('/api/gbu/agents',{method:'POST',body:JSON.stringify({full_name,phone:number})});", """    const editing=editingAgent;
+    await api(editing?'/api/gbu/agents/'+editing.id:'/api/gbu/agents',{method:editing?'PATCH':'POST',body:JSON.stringify({full_name,phone:number,...(editing?{expected_full_name:editing.full_name||'',expected_phone:editing.phone||''}:{})})});""",1)
+    part=part.replace("    toast('Агент добавлен');await draw();", "    toast(editing?'Данные агента сохранены':'Агент добавлен');editingAgent=null;await draw();",1)
+    part=part.replace("save.textContent='Сохранить'}}", "save.textContent=editingAgent?'Сохранить изменения':'Сохранить'}}",1)
+    part=part.replace('<article class="gbu-agent-card"><b>', '<article class="gbu-agent-card">${canAdd?`<button type="button" class="secondary gbu-agent-edit" data-edit-agent="${x.id}" aria-label="Редактировать ${esc(x.full_name||\'агента\')}" title="Редактировать">✍🏻</button>`:\'\'}<b>',1)
+    anchor="   qsa('[data-copy-agent-phone]',root)"
+    part=part.replace(anchor, "   qsa('[data-edit-agent]',root).forEach(button=>button.onclick=event=>{event.stopPropagation();const agent=list.find(x=>String(x.id)===button.dataset.editAgent);if(agent&&openAgentEditor)openAgentEditor(agent)});\n"+anchor,1)
+    html=html[:a]+part+html[b:]
+    return html.replace('</body>', r'''<style id="gbu-agent-edit-style">
+#gbuAgentsList .gbu-agent-card{position:relative}
+#gbuAgentsList .gbu-agent-card:has(.gbu-agent-edit)>b{padding-right:31px;min-height:30px}
+#gbuAgentsList .gbu-agent-card>.gbu-agent-edit{position:absolute;right:5px;top:5px;width:30px;min-width:30px;height:30px;min-height:30px;padding:2px;font-size:18px;line-height:1;border-radius:7px;display:flex;align-items:center;justify-content:center}
+</style></body>''',1)
+
+
+INLINE_INDEX_HTML = _gbu_agent_edit_html(INLINE_INDEX_HTML)
 
 
 def _isolated_preview_screen_html():
