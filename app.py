@@ -9156,6 +9156,7 @@ def owner_brigade_control(work_date: date, db: Session = Depends(get_db),
         required = 2 if card.source == 'gbu' else 1
         received = int(bool(photo['first_received'])) + (int(bool(photo['second_received'])) if required == 2 else 0)
         items.append({'id': card.id, 'source': card.source, 'surname': card.surname,
+            'work_date': card.work_date.isoformat(),
             'crew_confirmed': card.source == 'gbu' and key in confirmed_roster_keys,
             'gbu_earning_detail': earning_details.get(f'card:{card.id}') if card.source == 'gbu' else None,
             'order_spec': control_order_spec(card.source, earning_details.get(f'card:{card.id}'), meta,
@@ -13009,6 +13010,35 @@ def _gbu_payroll_second_half_html(html):
 
 
 INLINE_INDEX_HTML = _gbu_payroll_second_half_html(INLINE_INDEX_HTML)
+
+
+def _control_viewer_caption_html(html):
+    start = html.index('function openControlReportViewer(')
+    end = html.index('</script>', start)
+    section = html[start:end]
+    label = '<small>Фамилия умершего</small>'
+    surname = "<h2>${esc(card.surname||'—')}</h2>"
+    if section.count(label) != 1 or section.count(surname) != 1:
+        raise RuntimeError('Order viewer caption anchors missing')
+    section = section.replace(label, '<small class="bc-viewer-work-date">${esc(controlViewerDate(card))}</small>', 1)
+    section = section.replace(surname, "<h2>ум: ${esc(String(card.surname||'—').replace(/^ум\\s*:\\s*/iu,''))}</h2>", 1)
+    helper = r'''function controlViewerDate(card){
+ const fallback=typeof ownerBrigadeControlData==='undefined'?null:ownerBrigadeControlData?.work_date;
+ const day=String(card.work_date||fallback||'');
+ if(!/^\d{4}-\d{2}-\d{2}$/.test(day))return '—';
+ const date=new Date(day+'T12:00:00Z');
+ if(!Number.isFinite(date.getTime())||date.toISOString().slice(0,10)!==day)return '—';
+ return ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'][date.getUTCDay()]+', '+day.slice(8,10)+'.'+day.slice(5,7);
+}
+'''
+    html = html[:start] + helper + section + html[end:]
+    return html.replace('</body>', '''<style id="control-viewer-caption-style">
+.bc-photo-viewer .bc-viewer-title-row button.bc-viewer-category{margin-top:10px}
+.bc-photo-viewer .bc-viewer-work-date{font-variant-numeric:tabular-nums}
+</style></body>''', 1)
+
+
+INLINE_INDEX_HTML = _control_viewer_caption_html(INLINE_INDEX_HTML)
 
 
 def _isolated_preview_screen_html():
