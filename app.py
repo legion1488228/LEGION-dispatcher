@@ -1223,7 +1223,7 @@ class GbuPayrollRoster(Base):
 
 class GbuOrderCrewSeat(Base):
     __tablename__ = 'gbu_order_crew_seats'
-    # One confirmed order per employee per date, enforced across concurrent requests.
+    # Legacy first-seat reservation. Employee row locks serialize daily roster changes.
     work_date = Column(Date, primary_key=True)
     employee_id = Column(Integer, primary_key=True)
     report_key = Column(String(180), nullable=False, index=True)
@@ -1234,6 +1234,7 @@ class GbuPayrollRosterInput(BaseModel):
     category: Literal['standard', 'elite']
     employee_ids: list[StrictInt] = Field(min_length=4, max_length=6)
     expected_revision: StrictStr | None = Field(default=None, pattern=r'^[0-9a-f]{64}$')
+    second_order_employee_ids: list[StrictInt] = Field(default_factory=list, max_length=6)
 
 
 def gbu_staff_pay(category, is_brigadier, name='', metro=''):
@@ -1302,6 +1303,15 @@ def save_gbu_staff_roster(data: GbuPayrollRosterInput, db: Session = Depends(get
     revision = hashlib.sha256(record.payload.encode()).hexdigest() if record else None
     if getattr(data, 'expected_revision', None) != revision:
         raise HTTPException(409,'Состав изменён другим диспетчером. Откройте его заново')
+    second_ids = set(getattr(data, 'second_order_employee_ids', []))
+    if not second_ids <= ids:
+        raise HTTPException(422,'Второй заказ можно указать только выбранному сотруднику')
+    # Sorted permanent employee locks protect the two-order limit even when two
+    # different cards are being confirmed concurrently. No schema migration needed.
+    employees=list(db.scalars(select(Employee).where(Employee.id.in_(ids),Employee.active.is_(True),
+        _visible_employee()).order_by(Employee.id).with_for_update()))
+    if len(employees)!=len(ids):
+        raise HTTPException(409,'Список сотрудников изменился. Обновите состав')
     context = gbu_order_roster_context(db, card)
     detail = context['detail']
     if not detail:
@@ -1309,12 +1319,11 @@ def save_gbu_staff_roster(data: GbuPayrollRosterInput, db: Session = Depends(get
     if data.category != detail['category'] or len(ids) != detail['team_size']:
         raise HTTPException(409,'Категория или состав изменились в заработке. Откройте выбор заново')
     leader = context['leader']
-    available = {e['id'] for e in context['employees'] if not e['busy']}
+    previous_ids = {m['id'] for m in previous['crew']} if previous else set()
+    available = {e['id'] for e in context['employees'] if not e['busy'] or (
+        e['other_order_count'] == 1 and (e['id'] in second_ids or e['id'] in previous_ids))}
     if not leader or leader['id'] not in ids or not ids <= available:
-        raise HTTPException(409,'Сотрудник уже занят или не готов на эту дату. Обновите состав')
-    employees=list(db.scalars(select(Employee).where(Employee.id.in_(ids),Employee.active.is_(True),_visible_employee())))
-    if len(employees)!=len(ids):
-        raise HTTPException(409,'Список сотрудников изменился. Обновите состав')
+        raise HTTPException(409,'Сотрудник занят: подтвердите «2-й заказ». Не более двух заказов в день. Обновите состав')
     crew=[{'id':e.id,'name':_employee_dict(e)['display_name'],'role':'brigadier' if e.id==leader['id'] else 'member',
         'amount':gbu_staff_pay(data.category,e.id==leader['id'],e.full_name,getattr(e,'metro',''))} for e in employees]
     # Preserve historical rates for unchanged members of the same category.
@@ -1324,13 +1333,15 @@ def save_gbu_staff_roster(data: GbuPayrollRosterInput, db: Session = Depends(get
             old_member = old_members.get(member['id'])
             if old_member and old_member['role'] == member['role']:
                 member['amount'] = old_member['amount']
-    payload = json.dumps({'category':data.category,'crew':crew},ensure_ascii=False)
+    payload = json.dumps({'category':data.category,'crew':crew,
+        'second_order_employee_ids':sorted(e['id'] for e in context['employees']
+            if e['id'] in ids and e['other_order_count'] == 1)},ensure_ascii=False)
     # Acquire new seats before releasing removed seats; commit the roster atomically.
     new_seats = []
     for employee_id in sorted(ids):
         seat = db.get(GbuOrderCrewSeat, (card.work_date, employee_id))
-        if seat and seat.report_key != key:
-            raise HTTPException(409,'Сотрудник уже занят другим заказом')
+        # Keep the first order's seat; the second is independently represented by
+        # its own payroll roster. The employee lock above protects their combined limit.
         if not seat:
             new_seats.append(GbuOrderCrewSeat(work_date=card.work_date,employee_id=employee_id,report_key=key))
     if previous:
@@ -1352,6 +1363,19 @@ def save_gbu_staff_roster(data: GbuPayrollRosterInput, db: Session = Depends(get
 
 
 
+def gbu_other_order_assignments(db, card):
+    key = f'card:{card.chat_id}:{card.message_id}'
+    assignments = {}
+    for roster in db.scalars(select(GbuPayrollRoster).where(GbuPayrollRoster.work_date == card.work_date)):
+        if roster.report_key != key:
+            for member in json.loads(roster.payload)['crew']:
+                assignments.setdefault(member['id'], set()).add(roster.report_key)
+    for seat in db.scalars(select(GbuOrderCrewSeat).where(GbuOrderCrewSeat.work_date == card.work_date)):
+        if seat.report_key != key:
+            assignments.setdefault(seat.employee_id, set()).add(seat.report_key)
+    return assignments
+
+
 def gbu_order_roster_context(db, card):
     key = f'card:{card.chat_id}:{card.message_id}'
     detail = gbu_control_earning_details(db, card.work_date).get(f'card:{card.id}')
@@ -1363,21 +1387,17 @@ def gbu_order_roster_context(db, card):
         for group in summary['groups'].values()
         for status in ('ready',)
         for item in group.get(status, []) if item.get('id', 0) > 0}
-    busy = set()
-    # Include rosters confirmed before the date/employee uniqueness table existed.
-    for roster in db.scalars(select(GbuPayrollRoster).where(GbuPayrollRoster.work_date == card.work_date)):
-        if roster.report_key != key:
-            busy.update(m['id'] for m in json.loads(roster.payload)['crew'])
-    for seat in db.scalars(select(GbuOrderCrewSeat).where(GbuOrderCrewSeat.work_date == card.work_date)):
-        if seat.report_key != key:
-            busy.add(seat.employee_id)
+    assignments = gbu_other_order_assignments(db, card)
+    busy = set(assignments)
     record = db.get(GbuPayrollRoster, key)
     saved = json.loads(record.payload) if record else None
     saved_ids = {m['id'] for m in saved['crew']} if saved else set()
     people = [{**_employee_dict(e), 'busy': e.id in busy,
+        'other_order_count': len(assignments.get(e.id, ())),
+        'second_order_available': len(assignments.get(e.id, ())) == 1,
         'selected': e.id in saved_ids, 'leader': e.id == leader_id,
         'readiness_status': reported.get(e.id)} for e in employees
-        if e.id in reported or e.id == leader_id or e.id in saved_ids]
+        if e.id in reported or e.id == leader_id or e.id in saved_ids or e.id in busy]
     people.sort(key=lambda e: (not e['leader'], str(e['display_name']).casefold(), e['id']))
     return {'card_id': card.id, 'date': card.work_date.isoformat(), 'surname': card.surname,
         'detail': detail, 'leader': next((e for e in people if e['leader']), None),
@@ -13134,6 +13154,114 @@ async function openStaffTomorrowReadiness(employee,onSaved){
 
 
 INLINE_INDEX_HTML = _staff_contact_actions_html(INLINE_INDEX_HTML)
+
+
+def _staff_editor_return_html(html):
+    """Dismiss a staff editor back to its exact originating list, not the dashboard."""
+    for begin, finish in [('function openEmployeeProfile(', 'function openManualReadiness('),
+                          ('function openManualReadiness(', 'function chooseUnansweredEmployee(')]:
+        a = html.index(begin)
+        b = html.index(finish, a)
+        part = html[a:b]
+        anchor = '  const position=captureEmployeeScroll();'
+        if part.count(anchor) != 1:
+            raise ValueError('Staff editor return anchor missing: ' + begin)
+        part = part.replace(anchor, anchor+'\n  const editorOrigin=captureStaffEditorOrigin();', 1)
+        # Form construction and field binding are synchronous; install dismissal
+        # after showModal has reset the previous window's return action.
+        anchor = "  qs('#profileName').value=" if 'openEmployeeProfile' in begin else '  if(employee){'
+        part = part.replace(anchor, '  installStaffEditorReturn(editorOrigin);\n'+anchor, 1)
+        # Saving/deleting uses the existing refresh callbacks, never stale DOM.
+        part = part.replace('closeModal();', "qs('#modal').returnToTable=null;closeModal();")
+        html = html[:a] + part + html[b:]
+    return html.replace('</body>', r'''
+<script>
+function captureStaffEditorOrigin(){
+ const modal=qs('#modal');
+ if(!modal||modal.classList.contains('hidden'))return null;
+ return {nodes:Array.from(modal.childNodes),classes:modal.className,
+   top:modal.scrollTop,left:modal.scrollLeft,page:window.scrollY,
+   returnAction:modal.returnToTable,focus:document.activeElement};
+}
+function installStaffEditorReturn(origin){
+ const modal=qs('#modal');
+ modal.scrollTop=0;modal.scrollLeft=0;
+ if(!origin)return;
+ modal.returnToTable=()=>{
+  modal.replaceChildren(...origin.nodes);
+  modal.className=origin.classes;
+  modal.returnToTable=origin.returnAction||null;
+  qs('#modalBackdrop').classList.remove('hidden');
+  if(origin.focus?.isConnected)origin.focus.focus({preventScroll:true});
+  modal.scrollTop=origin.top;modal.scrollLeft=origin.left;
+  window.scrollTo(0,origin.page);
+  requestAnimationFrame(()=>{
+   if(modal.childNodes[0]!==origin.nodes[0])return;
+   modal.scrollTop=origin.top;modal.scrollLeft=origin.left;
+   window.scrollTo(0,origin.page);
+  });
+ };
+}
+</script>
+</body>''', 1)
+
+
+INLINE_INDEX_HTML = _staff_editor_return_html(INLINE_INDEX_HTML)
+
+
+def _gbu_second_order_html(html):
+    a = html.index('async function openGbuOrderRoster(')
+    b = html.index('</script>', a)
+    part = html[a:b]
+    part = part.replace("  const need=detail.team_size-1;", """  const need=detail.team_size-1;
+  const second=new Set(data.employees.filter(e=>e.selected&&e.busy&&e.second_order_available).map(e=>e.id));
+  const secondAction=e=>e.busy?`<span class="gbu-crew-second-line"><small>${e.second_order_available?'Уже на заказе':'Уже 2 заказа'}</small>${e.second_order_available?`<button type="button" class="gbu-crew-second" data-crew-second="${e.id}" aria-pressed="${second.has(e.id)}" ${readonly?'disabled':''}>2-й заказ${second.has(e.id)?' ✓':''}</button>`:''}</span>`:'';
+""", 1)
+    start = part.index('  const crewSections=')
+    end = part.index('\n  root.innerHTML=', start)
+    part = part[:start] + r'''  const crewSections=crewGroups.map(([code,label])=>{const people=data.employees.filter(e=>!e.leader&&e.group_code===code&&(e.readiness_status==='ready'||e.busy||(data.confirmed&&e.selected)));return `<section class="gbu-crew-group" data-crew-group><h4>${esc(label)} · ${people.length}</h4><div data-crew-list>${people.map((e,i)=>`<div class="gbu-crew-choice ${e.busy&&!second.has(e.id)?'is-busy':''}" data-crew-name="${esc((readinessEmployeeName(e)+' '+(e.metro||'')).toLowerCase())}"><span><b data-crew-number>${i+1}.</b> ${esc(readinessEmployeeName(e))}${secondAction(e)}${!e.busy&&e.readiness_status!=='ready'?'<small>В подтверждённом составе</small>':''}</span><input type="checkbox" aria-label="${esc(readinessEmployeeName(e))}" value="${e.id}" ${e.selected?'checked':''} ${e.busy&&!second.has(e.id)||readonly?'disabled':''}></div>`).join('')}</div>${people.length?'':'<small class="muted">Готовых сотрудников нет</small>'}</section>`}).join('');''' + part[end:]
+    part = part.replace('${esc(readinessEmployeeName(data.leader))}</b></div>', '${esc(readinessEmployeeName(data.leader))}</b>${secondAction(data.leader)}</div>', 1)
+    start = part.index('  const update=')
+    end = part.index("  if(!data.photo_received)", start)
+    part = part[:start] + r'''  const update=()=>{
+   const n=selected().length,leaderBlocked=data.leader.busy&&!second.has(data.leader.id);
+   counter.textContent='Выбрано '+n+' из '+need+' сотрудников';
+   button.disabled=busy||readonly||n!==need||!data.photo_received||leaderBlocked;
+   boxes.forEach(box=>{const emp=data.employees.find(e=>e.id===Number(box.value));box.disabled=readonly||busy||(emp.busy&&!second.has(emp.id))||(!box.checked&&n>=need);box.closest('[data-crew-name]').classList.toggle('is-busy',emp.busy&&!second.has(emp.id));});
+   form.querySelectorAll('[data-crew-second]').forEach(action=>{const id=Number(action.dataset.crewSecond),active=second.has(id);action.textContent='2-й заказ'+(active?' ✓':'');action.setAttribute('aria-pressed',String(active));action.disabled=readonly||busy||(!active&&id!==data.leader.id&&n>=need);});
+  };
+  form.querySelectorAll('[data-crew-second]').forEach(action=>action.onclick=event=>{
+   event.preventDefault();event.stopPropagation();if(action.disabled)return;
+   const id=Number(action.dataset.crewSecond),box=boxes.find(x=>Number(x.value)===id);
+   if(second.has(id)){second.delete(id);if(box)box.checked=false;}
+   else{second.add(id);if(box)box.checked=true;}
+   error.textContent='';update();
+  });
+  form.querySelectorAll('[data-crew-name]').forEach(row=>row.onclick=event=>{
+   if(event.target.closest('input,button'))return;
+   const box=row.querySelector('input');if(!box.disabled){box.checked=!box.checked;box.onchange();}
+  });
+''' + part[end:]
+    part = part.replace("  if(data.leader.busy)error.textContent='Бригадир уже подтверждён в другом заказе на эту дату.';", "  if(data.leader.busy&&!second.has(data.leader.id))error.textContent=data.leader.second_order_available?'Для бригадира подтвердите «2-й заказ».':'У бригадира уже два заказа на эту дату.';", 1)
+    part = part.replace("boxes.forEach(box=>box.onchange=update)", "boxes.forEach(box=>box.onchange=()=>{if(!box.checked)second.delete(Number(box.value));update()})", 1)
+    part = part.replace('expected_revision:data.revision||null', 'expected_revision:data.revision||null,second_order_employee_ids:[...second].filter(id=>id===data.leader.id||ids.includes(id))', 1)
+    html = html[:a] + part + html[b:]
+    return html.replace('</head>', r'''<style id="gbu-second-order-compact-style">
+dialog.gbu-crew-dialog form[data-crew-form] .gbu-crew-choice{min-height:48px;padding:5px 3px;gap:5px;cursor:pointer;align-items:start}
+.gbu-crew-dialog .gbu-crew-choice>span{font-size:11px;line-height:1.3}
+.gbu-crew-dialog .gbu-crew-choice>input{margin-top:3px}
+.gbu-crew-dialog .gbu-crew-second-line{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-top:3px}
+.gbu-crew-dialog .gbu-crew-second-line small{font-size:9px;line-height:1.2;margin:0;color:var(--muted)}
+.gbu-crew-dialog .gbu-crew-second{width:auto;min-width:0;min-height:24px;padding:2px 6px;margin:0;border:1px solid var(--gold2);border-radius:9px;background:transparent;color:var(--gold2);font:inherit;font-size:10px;line-height:1.2;white-space:nowrap;cursor:pointer}
+.gbu-crew-dialog .gbu-crew-second[aria-pressed="true"]{background:#efe3c0;color:#806129}
+.gbu-crew-dialog .gbu-crew-second:disabled{opacity:.5;cursor:default}
+.gbu-crew-dialog .gbu-crew-choice.is-busy{opacity:1}
+.gbu-crew-dialog .gbu-crew-choice.is-busy>span{color:var(--muted)}
+.gbu-crew-dialog .gbu-crew-second:focus-visible{outline:2px solid var(--gold2);outline-offset:2px}
+</style></head>''', 1)
+
+
+INLINE_INDEX_HTML = _gbu_second_order_html(INLINE_INDEX_HTML)
 
 
 def _isolated_preview_screen_html():
