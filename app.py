@@ -13878,7 +13878,8 @@ async def dispatch_send(work_date: date, data: DispatchRevision, db: Session = D
 
 def _dispatch_planning_html(html):
     html=html.replace("    await roleActivateView('employeesView');return;", "    await roleActivateView(kind==='owner'?'dispatchActionsView':'employeesView');return;",1)
-    html=html.replace("const staff={key:'staff',title:'Сотрудники',icon:()=>cabinetIcon('team')};", "const staff={key:'staff',title:kind==='owner'?'Действия':'Сотрудники',icon:()=>cabinetIcon('team')};",1)
+    html=html.replace("const staff={key:'staff',title:'Сотрудники',icon:()=>cabinetIcon('team')};", "const staff={key:'staff',title:kind==='owner'?'Заказы':'Сотрудники',icon:()=>kind==='owner'?'<span>📝</span>':cabinetIcon('team')};",1)
+    html=html.replace("if(kind==='owner')return [{...readiness,title:'Заказы'},staff,", "if(kind==='owner')return [{...readiness,title:'Готовность',icon:()=>cabinetIcon('team')},staff,",1)
     html=html.replace(' bindGbuCrewDisclosure(dialog,card);',' bindGbuCrewDisclosure(dialog,card);\n dispatchAttachControl(dialog,card);',1)
     return html.replace('</body>',r'''
 <style id="dispatch-planning-style">
@@ -13896,6 +13897,8 @@ body.dispatch-actions-open .topbar,body.dispatch-actions-open #dispatcherOrderOv
 <script>
 let dispatchBoard=null,dispatchLoad=0;
 const dispatchSection=document.createElement('section');dispatchSection.id='dispatchActionsView';dispatchSection.className='view';document.querySelector('main').append(dispatchSection);
+const dispatchOriginalCurrentView=currentViewId;
+currentViewId=function(){return qs('#dispatchActionsView.active')?'dispatchActionsView':dispatchOriginalCurrentView()};
 const dispatchOriginalRender=renderCurrentView;
 renderCurrentView=async function(){
  const active=currentViewId()==='dispatchActionsView';document.body.classList.toggle('dispatch-actions-open',active);
@@ -13913,7 +13916,7 @@ async function loadDispatchBoard(){
  if(!dispatchBoard||dispatchBoard.work_date!==day)root.textContent='Загрузка…';
  try{const data=await api('/api/dispatch-board?work_date='+day);if(ticket!==dispatchLoad||state.selectedDate!==day||currentViewId()!=='dispatchActionsView')return;dispatchBoard=data;
  const assigned=data.items.filter(o=>o.composition_complete).length,posted=data.numbers.filter(n=>n.posted).length;
- root.innerHTML=`<div class="dispatch-tools"><button type="button" data-plan-payroll>₽ Зарплата ГБУ</button><button type="button" data-plan-agents>⬛️ Агенты ГБУ</button></div><h2>Действия · ${esc(dispatchShortDay(day))}</h2><div class="dispatch-columns">${['private','gbu'].map(source=>`<div class="dispatch-column"><h3>${source==='gbu'?'ГБУ ⬛️':'Частные'} · ${data.counts[source]}</h3><button type="button" data-plan-add="${source}">+ Добавить заказ</button>${data.items.filter(o=>o.source===source).map(dispatchMini).join('')||'<p class="muted">Заказов нет</p>'}</div>`).join('')}</div><p class="dispatch-selected">Составы назначены: ${assigned}/${data.items.length}</p><button type="button" data-plan-numbers>Номера в группе · ${posted}/${data.items.length} ›</button><button type="button" class="primary dispatch-send" data-plan-send ${!data.items.length||assigned!==data.items.length?'disabled':''}>Отправить заказы ›</button><p class="dispatch-status" data-plan-status role="status"></p><div class="dispatch-free"><b>Свободные · ${data.free.reduce((s,g)=>s+g.people.length,0)}</b>${data.free.map(g=>`<details><summary>${esc(g.label)} · ${g.people.length}</summary>${g.people.map(p=>`<p>${esc(p.name)} ${esc(p.metro)} ${esc(p.height)}</p>`).join('')||'<p>Нет свободных</p>'}</details>`).join('')}</div>`;
+ root.innerHTML=`<div class="dispatch-tools"><button type="button" data-plan-payroll>₽ Зарплата ГБУ</button><button type="button" data-plan-agents>⬛️ Агенты ГБУ</button></div><h2>Заказы · ${esc(dispatchShortDay(day))}</h2><div class="dispatch-columns">${['private','gbu'].map(source=>`<div class="dispatch-column"><h3>${source==='gbu'?'ГБУ ⬛️':'Частные'} · ${data.counts[source]}</h3><button type="button" data-plan-add="${source}">+ Добавить заказ</button>${data.items.filter(o=>o.source===source).map(dispatchMini).join('')||'<p class="muted">Заказов нет</p>'}</div>`).join('')}</div><p class="dispatch-selected">Составы назначены: ${assigned}/${data.items.length}</p><button type="button" data-plan-numbers>Номера в группе · ${posted}/${data.items.length} ›</button><button type="button" class="primary dispatch-send" data-plan-send ${!data.items.length||assigned!==data.items.length?'disabled':''}>Отправить заказы ›</button><p class="dispatch-status" data-plan-status role="status"></p><div class="dispatch-free"><b>Свободные · ${data.free.reduce((s,g)=>s+g.people.length,0)}</b>${data.free.map(g=>`<details><summary>${esc(g.label)} · ${g.people.length}</summary>${g.people.map(p=>`<p>${esc(p.name)} ${esc(p.metro)} ${esc(p.height)}</p>`).join('')||'<p>Нет свободных</p>'}</details>`).join('')}</div>`;
  qs('[data-plan-payroll]',root).onclick=()=>openGbuPayroll();qs('[data-plan-agents]',root).onclick=()=>openGbuAgents();
  qsa('[data-plan-add]',root).forEach(b=>b.onclick=()=>openDispatchEditor(null,b.dataset.planAdd));
  qsa('[data-plan-id]',root).forEach(b=>b.onclick=()=>openDispatchEditor(data.items.find(x=>x.id===Number(b.dataset.planId))));
