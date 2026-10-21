@@ -1026,6 +1026,8 @@ def _order_by_id_for_update(db: Session, order_id: int) -> Order:
     order = db.execute(select(Order).where(Order.id == order_id).with_for_update()).scalar_one_or_none()
     if not order:
         raise HTTPException(404, "Заказ не найден")
+    if db.get(DispatchPlan, order_id):
+        raise HTTPException(409, 'Этот заказ редактируется в разделе «Действия»')
     return order
 
 
@@ -1299,6 +1301,9 @@ def save_gbu_staff_roster(data: GbuPayrollRosterInput, db: Session = Depends(get
     card=db.scalar(select(NumberCardEvent).where(NumberCardEvent.id==data.card_id,NumberCardEvent.source=='gbu',_visible_number_card()).with_for_update())
     if not card or not effective_order_photo(db,card).get('first_received'):
         raise HTTPException(409,'Для учёта выхода нужно первое фото заказа')
+    planned = dispatch_order_for_card(db, card)
+    if planned and db.get(DispatchPlan, planned.id):
+        raise HTTPException(409, 'Назначенный состав подтверждается в «Контроле» кнопкой «Подтвердить состав и начислить»')
     ids=set(data.employee_ids)
     if len(ids)!=len(data.employee_ids) or len(ids) not in {4,6}:
         raise HTTPException(422,'Выберите состав из 4 или 6 разных сотрудников')
@@ -1380,6 +1385,12 @@ def gbu_other_order_assignments(db, card):
     for seat in db.scalars(select(GbuOrderCrewSeat).where(GbuOrderCrewSeat.work_date == card.work_date)):
         if seat.report_key != key:
             assignments.setdefault(seat.employee_id, set()).add(seat.report_key)
+    for order in dispatch_rows(db,card.work_date):
+        linked=dispatch_match_card(db,order)
+        order_key=f'card:{linked.chat_id}:{linked.message_id}' if linked else f'order:{order.id}'
+        if order_key==key: continue
+        for member in dispatch_assignments(db,order):
+            assignments.setdefault(member.employee_id,set()).add(order_key)
     return assignments
 
 
@@ -1527,6 +1538,7 @@ def _reset_order_composition(db: Session, order: Order):
 
 
 def _apply_order_values(order: Order, payload: dict):
+    dispatch_validate_category(payload.get('source', order.source), payload.get('category', order.category), payload.get('team_size', order.team_size))
     for key, value in payload.items():
         setattr(order, key, value)
     if "organization" in payload or "team_size" in payload:
@@ -1662,6 +1674,7 @@ def _registered_agent_tg_id_by_phone(db: Session, phone: str):
 
 
 def _create_order(db: Session, data: OrderCreate) -> Order:
+    dispatch_validate_category(data.source, data.category, data.team_size)
     kickback = data.kickback_rub
     if not kickback and "марин" in data.organization.lower():
         kickback = 1000 if data.team_size == 4 else 1500 if data.team_size == 6 else 0
@@ -9000,8 +9013,13 @@ def gbu_control_earning_details(db, work_date):
             if category in ('standard', 'elite') and type(team) is int and team in (4, 6):
                 candidates.setdefault(key, set()).add((category, team))
     # Conflicting owner tables must not silently assign the wrong category.
-    return {key: {'category': next(iter(values))[0], 'team_size': next(iter(values))[1]}
+    details = {key: {'category': next(iter(values))[0], 'team_size': next(iter(values))[1]}
             for key, values in candidates.items() if len(values) == 1}
+    for order in dispatch_rows(db,work_date):
+        if order.source != 'gbu' or not db.get(DispatchPlan,order.id): continue
+        card=dispatch_match_card(db,order)
+        if card: details[f'card:{card.id}']={'category':order.category,'team_size':order.team_size}
+    return details
 
 
 def cabinet_photo_team_sizes(db, cards):
@@ -9028,6 +9046,9 @@ def control_order_spec(source, gbu_detail, meta, cash):
 
 
 def cabinet_assigned_spec(db, card):
+    planned = dispatch_order_for_card(db, card)
+    if planned and db.get(DispatchPlan, planned.id):
+        return {'category':planned.category, 'team_size':planned.team_size}
     meta = cabinet_extra_state(db, card)
     detail = gbu_control_earning_details(db, card.work_date).get(f'card:{card.id}') if card.source == 'gbu' else None
     return control_order_spec(card.source, detail, meta, meta.get('cash'))
@@ -9118,6 +9139,11 @@ def save_dispatch_order_spec(card_id: int, change: DispatchOrderSpecInput,
 
 def save_order_spec_values(card_id, change, db, user, trusted_native=False):
     card, row, payload, version, owner_id = dispatch_spec_context(db, user, card_id, trusted_native)
+    planned = dispatch_order_for_card(db, card)
+    if planned and db.get(DispatchPlan, planned.id):
+        if change.category == planned.category and change.team_size == planned.team_size:
+            return {'saved':True, 'order_spec':{'category':planned.category,'team_size':planned.team_size}, 'version':version}
+        raise HTTPException(409, 'Категория и количество назначены в «Действиях». Изменение доступно диспетчеру там')
     if not order_spec_dispatcher(db, user.id) and not order_spec_own_editable(db, card):
         raise HTTPException(409, 'Заказ уже закрыт. Для изменения категории или количества людей обратитесь к диспетчеру')
     allowed = {'standard': (4, 6), 'elite': (4, 6)} if card.source == 'gbu' else {
@@ -9227,11 +9253,13 @@ def owner_brigade_control(work_date: date, db: Session = Depends(get_db),
         employee = employees.get(card.tg_id)
         required = 2 if card.source == 'gbu' else 1
         received = int(bool(photo['first_received'])) + (int(bool(photo['second_received'])) if required == 2 else 0)
+        planned = dispatch_order_for_card(db, card)
+        assigned_spec = {'category':planned.category,'team_size':planned.team_size} if planned and db.get(DispatchPlan,planned.id) else None
         items.append({'id': card.id, 'source': card.source, 'surname': card.surname,
             'work_date': card.work_date.isoformat(),
             'crew_confirmed': card.source == 'gbu' and key in confirmed_roster_keys,
-            'gbu_earning_detail': earning_details.get(f'card:{card.id}') if card.source == 'gbu' else None,
-            'order_spec': control_order_spec(card.source, earning_details.get(f'card:{card.id}'), meta,
+            'gbu_earning_detail': (assigned_spec or earning_details.get(f'card:{card.id}')) if card.source == 'gbu' else None,
+            'order_spec': assigned_spec or control_order_spec(card.source, earning_details.get(f'card:{card.id}'), meta,
                 cash_by_card.get((card.id, card.tg_id))),
             'employee': _employee_dict(employee) if employee else {'full_name': card.full_name, 'phone': card.phone},
             'contact_time': statuses[card.id]['contact_time'], 'on_contact': bool(contacts.get(card.id)),
@@ -9252,7 +9280,7 @@ def owner_brigade_control(work_date: date, db: Session = Depends(get_db),
             'completed': sum(item['completed'] for item in entries)}
     totals['all'] = {field: totals['private'][field] + totals['gbu'][field] for field in totals['private']}
     return JSONResponse({'work_date': work_date.isoformat(), 'items': items, 'totals': totals,
-        'order_completion': order_completion_data(db, work_date),
+        'order_completion': (dispatch_control_completion(db, work_date) if _is_cabinet_owner(db,user.id) else None) or order_completion_data(db, work_date),
         'updated_at': datetime.now(MOSCOW).isoformat()},
         headers={'Cache-Control': 'private, no-store'})
 
@@ -13339,6 +13367,624 @@ def _gbu_agent_edit_html(html):
 
 
 INLINE_INDEX_HTML = _gbu_agent_edit_html(INLINE_INDEX_HTML)
+
+
+def _order_header_tools_html(html):
+    start=html.index("  qs('#selectedDayHeader').innerHTML=")
+    end=html.index('\n',start)
+    old=html[start:end]
+    new=old.replace('`<h2>', '`<div class="order-heading-date"><h2>',1)
+    new=new.replace('>Выбрать дату</span>', '>на</span>',1)
+    new=new.replace('dashboardOrderDateText(day)', 'dashboardOrderShortDate(day)',1)
+    new=new.replace('</label>`;', '</label></div>`;',1)
+    if new==old or 'dashboardOrderShortDate(day)' not in new:
+        raise ValueError('Order header tools anchor missing')
+    html=html[:start]+new+html[end:]
+    return html.replace('</body>', r'''
+<style id="order-header-tools-style">
+body.dashboard-compact #selectedDayHeader{display:flex;justify-content:space-between;align-items:center;gap:5px}
+#selectedDayHeader .order-heading-date{display:flex;align-items:center;gap:7px;min-width:0}
+#selectedDayHeader .order-header-tools{display:flex;align-items:center;gap:5px;flex-shrink:0}
+body.dashboard-compact #selectedDayHeader .dashboard-date-prompt{display:inline;font-size:11px}
+body.dashboard-compact #selectedDayHeader label{gap:5px}
+body.dashboard-compact #selectedDayHeader .dashboard-date-picker{padding:4px 6px;min-height:30px}
+#selectedDayHeader .order-header-tools button{font-size:10px;line-height:1.15;min-height:32px;padding:4px 6px;max-width:72px;white-space:normal;border-radius:9px}
+#employeesView .section-actions:empty{display:none}
+@media(max-width:350px){body.dashboard-compact #selectedDayHeader h2{font-size:14px}#selectedDayHeader .order-heading-date{gap:4px}body.dashboard-compact #selectedDayHeader label{gap:3px}#selectedDayHeader .order-header-tools{gap:3px}#selectedDayHeader .order-header-tools button{font-size:9px;padding:4px;max-width:60px}body.dashboard-compact #selectedDayHeader .dashboard-date-value{font-size:9px}}
+</style>
+<script>
+function dashboardOrderShortDate(day){
+ const date=new Date(day+'T12:00:00Z');
+ const label=date.toLocaleDateString('ru-RU',{weekday:'short',day:'numeric',month:'short',timeZone:'Europe/Moscow'});
+ return label.charAt(0).toLocaleUpperCase('ru-RU')+label.slice(1);
+}
+</script>
+</body>''',1)
+
+
+INLINE_INDEX_HTML = _order_header_tools_html(INLINE_INDEX_HTML)
+
+
+def _shared_compact_staff_html(html):
+    a=html.index('async function loadEmployees(){')
+    b=html.index('async function loadControl(){',a)
+    part=html[a:b]
+    part=part.replace("  const list = await api('/api/employees');", """  const response=await api(state.bootstrap?.cabinet_only?'/api/owner/brigadier-cabinet/employees':'/api/employees');
+  const list=Array.isArray(response)?response:(response.items||[]);""",1)
+    part=part.replace("${canEdit?staffTelegramButton(x):''}", '${staffTelegramButton(x)}',1)
+    part=part.replace("  const payroll=qs('#gbuPayrollBtn');", "  const agentsButton=qs('#gbuAgentsBtn');if(agentsButton)agentsButton.hidden=!canEdit;\n  const payroll=qs('#gbuPayrollBtn');",1)
+    html=html[:a]+part+html[b:]
+    old="""    if(dispatcher){await roleActivateView('employeesView');return}
+    await roleOpenOwn();await openCabinetEmployees();return;"""
+    if html.count(old)!=1:
+        raise ValueError('Shared staff navigation anchor missing')
+    html=html.replace(old,"    await roleActivateView('employeesView');return;",1)
+    # The directory shortcut inside a brigadier's cabinet opens the same page.
+    a=html.index('async function openCabinetEmployees(){')
+    b=html.index('async function cabinetResumePending(){',a)
+    html=html[:a]+"async function openCabinetEmployees(){await roleNavigate('staff')}\n"+html[b:]
+    anchor='  const v = currentViewId();'
+    html=html.replace(anchor,anchor+"\n  document.body.classList.toggle('staff-directory-open',v==='employeesView');",1)
+    return html.replace('</body>',r'''
+<style id="shared-compact-staff-style">
+body.cabinet-only.staff-directory-open .topbar,body.cabinet-only.staff-directory-open #dateStrip{display:none}
+#employeesList .staff-directory-person,#employeesList .staff-directory-person.is-editable{grid-template-columns:minmax(0,1fr) 28px;gap:2px;padding:1px 2px;align-items:center}
+#employeesList .staff-directory-person summary{min-height:28px;padding:1px 0;font-size:10px;line-height:1.2;gap:2px}
+#employeesList .staff-directory-person summary>span:first-child{grid-template-columns:auto minmax(0,1fr) 12px 3ch;gap:2px}
+#employeesList .staff-directory-car{width:12px;font-size:10px}
+#employeesList .staff-contact-chevron{display:none}
+#employeesList .staff-directory-person>.staff-dm-button{width:28px;min-width:28px;min-height:28px;height:28px;padding:2px;border-radius:6px}
+#employeesList .staff-dm-button svg{width:21px;height:21px}
+#employeesList .staff-directory-grid{padding:0 3px}
+#employeesList .staff-directory-group h4{padding:6px 7px;font-size:12px}
+#employeesList .staff-directory-person details[open]{padding-bottom:3px}
+#employeesView .section-actions:has(#gbuAgentsBtn[hidden]):has(#gbuPayrollBtn[hidden]){display:none}
+body.staff-directory-open main{padding-bottom:calc(82px + var(--safe-bottom))}
+</style></body>''',1)
+
+
+INLINE_INDEX_HTML = _shared_compact_staff_html(INLINE_INDEX_HTML)
+
+
+# Dispatcher planning uses the existing Order/Assignment records.  Separate
+# metadata avoids schema changes to installations of the original models.
+class DispatchPlan(Base):
+    __tablename__ = 'dispatch_plans'
+    order_id = Column(Integer, primary_key=True)
+    request_key = Column(String(64), nullable=False, unique=True)
+    payload = Column(String, nullable=False, default='{}')
+    approved_card_id = Column(Integer, nullable=True, unique=True)
+
+
+class DispatchDelivery(Base):
+    __tablename__ = 'dispatch_deliveries'
+    fingerprint = Column(String(64), primary_key=True)
+    work_date = Column(Date, nullable=False, index=True)
+    payload = Column(String, nullable=False)
+
+
+class DispatchSendRun(Base):
+    __tablename__ = 'dispatch_send_runs'
+    work_date = Column(Date, primary_key=True)
+    token = Column(String(64), nullable=False)
+    active = Column(Boolean, nullable=False, default=False)
+    heartbeat = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class DispatchPlanInput(BaseModel):
+    work_date: date
+    source: Literal['private', 'gbu']
+    agent_name: StrictStr = Field(max_length=200)
+    agent_phone: StrictStr = Field(max_length=50)
+    category: Literal['standard', 'vip', 'elite']
+    team_size: StrictInt = Field(ge=3, le=6)
+    deceased_name: StrictStr = Field(min_length=1, max_length=100)
+    organization: StrictStr = Field(default='', max_length=200)
+    issue_time: time
+    morgue: StrictStr = Field(default='', max_length=500)
+    church: StrictStr = Field(default='', max_length=500)
+    cemetery: StrictStr = Field(default='', max_length=500)
+    revision: StrictStr | None = None
+    request_key: StrictStr = Field(pattern=r'^[a-zA-Z0-9_-]{16,64}$')
+
+
+class DispatchCrewInput(BaseModel):
+    revision: StrictStr
+    brigadier_id: StrictInt
+    member_ids: list[StrictInt] = Field(max_length=5)
+    second_order_employee_ids: list[StrictInt] = Field(default_factory=list, max_length=6)
+
+
+class DispatchRevision(BaseModel):
+    revision: StrictStr
+
+
+def dispatch_guard(db, user):
+    if not _is_cabinet_owner(db, user.id):
+        raise HTTPException(403, 'Новый раздел пока доступен только владельцу')
+
+
+def dispatch_hash(value):
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def dispatch_day_lock(db, day):
+    # All plan edits and batch snapshots for a date serialize in PostgreSQL.
+    if db.get_bind().dialect.name == 'postgresql':
+        db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'), {'key': 'legion:planning:'+str(day)})
+    db.expire_all()
+    run = db.get(DispatchSendRun, day)
+    if run and run.active and datetime.utcnow()-run.heartbeat < timedelta(minutes=2):
+        raise HTTPException(409, 'Дождитесь завершения отправки заказов')
+
+
+def dispatch_rows(db, day):
+    return list(db.scalars(select(Order).where(Order.work_date == day, Order.status != 'cancelled').order_by(Order.id)))
+
+
+def dispatch_assignments(db, order):
+    return list(db.scalars(select(Assignment).where(Assignment.order_id == order.id).options(selectinload(Assignment.employee))))
+
+
+def dispatch_match_card(db, order, crew=None):
+    crew = crew if crew is not None else dispatch_assignments(db, order)
+    leader = next((a.employee for a in crew if a.role == 'brigadier'), None)
+    if not leader or not leader.tg_id:
+        return None
+    # Never guess between two funerals/duplicate number messages.
+    normalize = lambda s: ' '.join(str(s or '').casefold().replace('ё', 'е').split())
+    cards = [c for c in db.scalars(select(NumberCardEvent).where(NumberCardEvent.work_date == order.work_date,
+        NumberCardEvent.source == order.source, NumberCardEvent.tg_id == leader.tg_id, _visible_number_card()))
+        if normalize(c.surname) == normalize(order.deceased_name)]
+    return cards[0] if len(cards) == 1 else None
+
+
+def dispatch_order_data(db, order, number):
+    data = _order_dict(order, db)
+    plan = db.get(DispatchPlan, order.id)
+    meta = json.loads(plan.payload) if plan else {}
+    card = dispatch_match_card(db, order)
+    data.update(number=number, route_fields=meta.get('route_fields', {}), managed=bool(plan),
+        approved=bool(plan and plan.approved_card_id), number_card_id=card.id if card else None)
+    data['revision'] = dispatch_hash({k: data[k] for k in ('id','source','work_date','issue_time','deceased_name',
+        'category','team_size','organization','agent_name','agent_phone','route','brigadier','members','route_fields','approved')})
+    return data
+
+
+def dispatch_free(db, day, orders):
+    used = set(dispatch_workloads(db, day))
+    snapshot = free_staff_snapshot(db, day)
+    for group in snapshot['groups']:
+        group['people'] = [p for p in group['people'] if p['id'] not in used]
+    return snapshot
+
+
+def dispatch_workloads(db, day, exclude_order_id=None):
+    loads={};covered=set()
+    for order in dispatch_rows(db,day):
+        card=dispatch_match_card(db,order)
+        if card: covered.add(f'card:{card.chat_id}:{card.message_id}')
+        if order.id==exclude_order_id: continue
+        for assignment in dispatch_assignments(db,order):
+            loads[assignment.employee_id]=loads.get(assignment.employee_id,0)+1
+    # Older first-photo payroll rosters may predate native Order records.
+    # Exclude linked rosters to avoid counting one order twice.
+    for roster in db.scalars(select(GbuPayrollRoster).where(GbuPayrollRoster.work_date==day)):
+        if roster.report_key in covered: continue
+        for member in json.loads(roster.payload)['crew']:
+            loads[member['id']]=loads.get(member['id'],0)+1
+    return loads
+
+
+def dispatch_board_data(db, day):
+    rows = dispatch_rows(db, day)
+    numbers = {'private': 0, 'gbu': 0}
+    items = []
+    for order in rows:
+        numbers[order.source] += 1
+        items.append(dispatch_order_data(db, order, numbers[order.source]))
+    free = dispatch_free(db, day, rows)
+    cards = [dispatch_match_card(db, o) for o in rows]
+    statuses = number_card_statuses(db, [c for c in cards if c])
+    return {'work_date': str(day), 'items': items, 'counts': numbers, 'free': free['groups'],
+        'numbers': [{'order_id': x['id'], 'number': x['number'], 'source': x['source'],
+            'brigadier': x['brigadier'], 'surname': x['deceased_name'], 'posted': bool(c),
+            'closed': bool(c and statuses.get(c.id, {}).get('closed'))} for x, c in zip(items, cards)],
+        'revision': dispatch_hash({'items': [(x['id'], x['revision']) for x in items], 'free': free['groups']})}
+
+
+def dispatch_control_completion(db, day):
+    rows=dispatch_rows(db,day)
+    if not any(db.get(DispatchPlan,o.id) for o in rows): return None
+    counts={source:{'cards':0,'closed':0,'expected':0} for source in ORDER_COUNT_TYPES}
+    for order in rows:
+        item=counts[order.source];item['expected']+=1
+        card=dispatch_match_card(db,order)
+        if card:
+            item['cards']+=1;item['closed']+=int(number_card_statuses(db,[card])[card.id]['closed'])
+    for item in counts.values():
+        item.update(missing_numbers=item['expected']-item['cards'],extra_numbers=0,
+            missing_reports=item['expected']-item['closed'],extra_reports=0,
+            complete=item['expected']>0 and item['closed']==item['cards']==item['expected'])
+    return {'work_date':str(day),'sources':counts,**{key:sum(c[key] for c in counts.values()) for key in ('cards','closed','expected')}}
+
+
+@app.get('/api/dispatch-board')
+def dispatch_board(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    dispatch_guard(db, user)
+    return JSONResponse(dispatch_board_data(db, work_date), headers={'Cache-Control':'private, no-store'})
+
+
+def dispatch_validate_category(source, category, size):
+    if source == 'gbu' and category not in {'standard', 'elite'}:
+        raise HTTPException(422, 'В ГБУ только Стандарт и Элит')
+    allowed = {4, 6} if source == 'gbu' or category != 'standard' else {3, 4, 5, 6}
+    if size not in allowed:
+        raise HTTPException(422, 'Недопустимое количество человек для категории')
+
+
+def dispatch_editable(db, order, revision):
+    plan = db.get(DispatchPlan, order.id)
+    if plan and plan.approved_card_id:
+        raise HTTPException(409, 'Состав уже подтверждён в зарплате. Изменять его здесь нельзя')
+    current = dispatch_order_data(db, order, 0)
+    if current['revision'] != revision:
+        raise HTTPException(409, 'Заказ изменён. Откройте его заново')
+    return plan
+
+
+@app.post('/api/dispatch-board/orders')
+def dispatch_create(data: DispatchPlanInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    dispatch_guard(db, user)
+    dispatch_day_lock(db, data.work_date)
+    existing = db.scalar(select(DispatchPlan).where(DispatchPlan.request_key == data.request_key))
+    if existing:
+        meta = json.loads(existing.payload)
+        if meta.get('creation_hash') != dispatch_hash(data.model_dump(exclude={'revision'})):
+            raise HTTPException(409, 'Запрос создания уже использован')
+        return {'ok':True, 'id':existing.order_id}
+    dispatch_validate_category(data.source, data.category, data.team_size)
+    if not data.deceased_name.strip():
+        raise HTTPException(422, 'Укажите фамилию')
+    arrival = (datetime.combine(data.work_date, data.issue_time)-timedelta(minutes=30)).time()
+    order = Order(public_id=_public_id(), source=data.source, work_date=data.work_date,
+        issue_time=data.issue_time, arrival_time=arrival, deceased_name=data.deceased_name.strip(),
+        route='\n'.join([data.morgue, data.church, data.cemetery]), category=data.category, team_size=data.team_size,
+        organization=data.organization.strip(), notes='', kickback_rub=0, agent_name=data.agent_name.strip(),
+        agent_phone=data.agent_phone.strip(), other_agent_phone='', status='new')
+    db.add(order); db.flush()
+    db.add(DispatchPlan(order_id=order.id, request_key=data.request_key, payload=json.dumps({
+        'creation_hash':dispatch_hash(data.model_dump(exclude={'revision'})),
+        'route_fields':{k:getattr(data,k) for k in ('morgue','church','cemetery')}}, ensure_ascii=False)))
+    db.commit()
+    return {'ok':True, 'id':order.id}
+
+
+@app.put('/api/dispatch-board/orders/{order_id}')
+def dispatch_update(order_id: int, data: DispatchPlanInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    dispatch_guard(db, user)
+    order = db.get(Order, order_id)
+    if not order: raise HTTPException(404, 'Заказ не найден')
+    dispatch_day_lock(db, order.work_date)
+    plan = dispatch_editable(db, order, data.revision)
+    if data.work_date != order.work_date or data.source != order.source:
+        raise HTTPException(409, 'Тип и дата сохранённого заказа не меняются')
+    dispatch_validate_category(data.source, data.category, data.team_size)
+    if not data.deceased_name.strip(): raise HTTPException(422, 'Укажите фамилию')
+    if data.team_size != order.team_size and dispatch_assignments(db, order):
+        raise HTTPException(409, 'Сначала снимите назначенный состав перед изменением количества')
+    for field in ('agent_name','agent_phone','organization','category','team_size','issue_time','deceased_name'):
+        value = getattr(data, field)
+        setattr(order, field, value.strip() if isinstance(value,str) else value)
+    order.arrival_time=(datetime.combine(data.work_date,data.issue_time)-timedelta(minutes=30)).time()
+    order.route='\n'.join([data.morgue,data.church,data.cemetery])
+    if not plan:
+        plan=DispatchPlan(order_id=order.id,request_key=secrets.token_hex(16),payload='{}');db.add(plan)
+    meta=json.loads(plan.payload);meta['route_fields']={k:getattr(data,k) for k in ('morgue','church','cemetery')}
+    plan.payload=json.dumps(meta,ensure_ascii=False)
+    db.commit();return {'ok':True}
+
+
+@app.get('/api/dispatch-board/orders/{order_id}/people')
+def dispatch_people(order_id: int, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    dispatch_guard(db, user)
+    order=db.get(Order,order_id)
+    if not order: raise HTTPException(404,'Заказ не найден')
+    rows=list(db.scalars(select(Employee).where(Employee.active.is_(True),_visible_employee())))
+    loads=dispatch_workloads(db,order.work_date,exclude_order_id=order.id)
+    return {'items':[_employee_dict(p,loads.get(p.id,0)) for p in rows]}
+
+
+@app.post('/api/dispatch-board/orders/{order_id}/crew')
+def dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    dispatch_guard(db,user)
+    order=db.get(Order,order_id)
+    if not order: raise HTTPException(404,'Заказ не найден')
+    dispatch_day_lock(db,order.work_date)
+    plan=dispatch_editable(db,order,data.revision)
+    ids=[data.brigadier_id]+data.member_ids
+    if len(ids)!=order.team_size or len(set(ids))!=len(ids):
+        raise HTTPException(422,'Выберите полный состав без повторов')
+    people=list(db.scalars(select(Employee).where(Employee.id.in_(ids),Employee.active.is_(True),
+        _visible_employee()).order_by(Employee.id).with_for_update()))
+    profiles={p.id:p for p in people}
+    if len(people)!=len(ids) or profiles[data.brigadier_id].group_code!='brigadier' or not profiles[data.brigadier_id].tg_id:
+        raise HTTPException(409,'Проверьте бригадира, его Telegram ID и сотрудников')
+    for other in dispatch_rows(db,order.work_date):
+        if other.id==order.id or other.source!=order.source: continue
+        if other.deceased_name.strip().casefold()==order.deceased_name.strip().casefold() and any(
+            a.role=='brigadier' and a.employee_id==data.brigadier_id for a in dispatch_assignments(db,other)):
+            raise HTTPException(409,'Два одинаковых заказа бригадира нельзя однозначно связать с номером в группе')
+    previous={a.employee_id for a in dispatch_assignments(db,order)}
+    loads=dispatch_workloads(db,order.work_date,exclude_order_id=order.id)
+    for person in people:
+        count=loads.get(person.id,0)
+        if count>=2: raise HTTPException(409,'Сотрудник уже назначен на два заказа')
+        if count and person.id not in data.second_order_employee_ids and person.id not in previous:
+            raise HTTPException(409,'Подтвердите «2-й заказ» для занятого сотрудника')
+    for row in dispatch_assignments(db,order): db.delete(row)
+    db.flush()
+    for pid in ids:
+        db.add(Assignment(order_id=order.id,employee_id=pid,role='brigadier' if pid==data.brigadier_id else 'member',created_by_tg_id=user.id))
+    if not plan:
+        db.add(DispatchPlan(order_id=order.id,request_key=secrets.token_hex(16),payload='{}'))
+    order.status='assigning';db.commit();return {'ok':True}
+
+
+@app.delete('/api/dispatch-board/orders/{order_id}/crew')
+def dispatch_clear_crew(order_id: int, data: DispatchRevision, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    dispatch_guard(db,user)
+    order=db.get(Order,order_id)
+    if not order: raise HTTPException(404,'Заказ не найден')
+    dispatch_day_lock(db,order.work_date);dispatch_editable(db,order,data.revision)
+    for row in dispatch_assignments(db,order): db.delete(row)
+    order.status='new';db.commit();return {'ok':True}
+
+
+def dispatch_order_for_card(db, card):
+    matches=[o for o in dispatch_rows(db,card.work_date) if o.source==card.source and
+        (c:=dispatch_match_card(db,o)) and c.id==card.id]
+    return matches[0] if len(matches)==1 else None
+
+
+@app.get('/api/dispatch-board/card/{card_id}')
+def dispatch_card(card_id: int, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    dispatch_guard(db,user)
+    card=db.scalar(select(NumberCardEvent).where(NumberCardEvent.id==card_id,_visible_number_card()))
+    if not card: raise HTTPException(404,'Карточка не найдена')
+    order=dispatch_order_for_card(db,card)
+    if not order: return {'order':None}
+    return {'order':dispatch_order_data(db,order,0)}
+
+
+@app.post('/api/dispatch-board/orders/{order_id}/approve')
+def dispatch_approve(order_id: int, data: DispatchRevision, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    dispatch_guard(db,user)
+    order=db.get(Order,order_id)
+    if not order or order.source!='gbu': raise HTTPException(404,'Заказ ГБУ не найден')
+    dispatch_day_lock(db,order.work_date)
+    plan=db.get(DispatchPlan,order_id)
+    if plan and plan.approved_card_id: return {'ok':True,'already_approved':True}
+    dispatch_editable(db,order,data.revision)
+    card=dispatch_match_card(db,order)
+    if not card or not effective_order_photo(db,card).get('first_received'):
+        raise HTTPException(409,'Нужно выставить номер и первое фото этого заказа')
+    detail=_order_dict(order,db)
+    if not detail['composition_complete']: raise HTTPException(409,'Состав не назначен полностью')
+    if order.category not in {'standard','elite'}:
+        raise HTTPException(409,'В ГБУ только Стандарт и Элит. Исправьте категорию заказа перед подтверждением')
+    key=f'card:{card.chat_id}:{card.message_id}'
+    if db.get(GbuPayrollRoster,key):
+        raise HTTPException(409,'Этот заказ уже есть в зарплате. Проверьте ранее подтверждённый состав')
+    crew=[]
+    assignments=dispatch_assignments(db,order)
+    locked=list(db.scalars(select(Employee).where(Employee.id.in_([a.employee_id for a in assignments])).order_by(Employee.id).with_for_update()))
+    if len(locked)!=order.team_size or any(not p.active or p.tg_id in HIDDEN_TG_IDS for p in locked):
+        raise HTTPException(409,'Список сотрудников изменился')
+    for a in sorted(assignments,key=lambda a:a.role!='brigadier'):
+        p=a.employee
+        crew.append({'id':p.id,'name':_employee_dict(p)['display_name'],'role':a.role,
+            'amount':gbu_staff_pay(order.category,a.role=='brigadier',p.full_name,p.metro)})
+    db.add(GbuPayrollRoster(report_key=key,work_date=order.work_date,payload=json.dumps({
+        'category':order.category,'crew':crew,'dispatch_order_id':order.id},ensure_ascii=False),created_by=user.id))
+    if not plan:
+        plan=DispatchPlan(order_id=order.id,request_key=secrets.token_hex(16),payload='{}');db.add(plan)
+    plan.approved_card_id=card.id
+    db.commit();return {'ok':True}
+
+
+def dispatch_message(order, number):
+    source='ГБУ ⬛️' if order['source']=='gbu' else 'Частный'
+    lines=[f'<b>{source} №{number} · {escape(order["work_date"])}</b>',
+        f'<b>ум: {escape(order["deceased_name"])}</b>',
+        f'{escape(order["category_label"])} · {order["team_size"]} чел.',
+        f'Выдача: {order["issue_time"]} · 📸 {order["arrival_time"] or "—"}',
+        f'Агент: {escape(order["agent_name"])} · {escape(order["agent_phone"])}',
+        f'{escape(order["organization"])}', 'Маршрут:']
+    fields=order.get('route_fields') or {}
+    for key,label in [('morgue','Морг'),('church','Храм'),('cemetery','Кладбище / кремация')]:
+        lines.append(f'{label}: {escape(fields.get(key) or "—")}')
+    if not fields: lines.append(escape(order.get('route') or '—'))
+    lines+=['','Состав:']
+    for p in [order['brigadier']]+order['members']:
+        lines.append(escape(p['display_name']))
+    return '\n'.join(lines)
+
+
+@app.post('/api/dispatch-board/send')
+async def dispatch_send(work_date: date, data: DispatchRevision, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    dispatch_guard(db,user);dispatch_day_lock(db,work_date)
+    board=dispatch_board_data(db,work_date)
+    if board['revision']!=data.revision: raise HTTPException(409,'Заказы или свободные изменились. Обновите страницу')
+    if not board['items'] or any(not x['composition_complete'] for x in board['items']):
+        raise HTTPException(409,'Назначьте составы всех заказов')
+    messages=[]
+    for item in board['items']:
+        leader=item['brigadier']
+        if not leader.get('tg_id'): raise HTTPException(409,'У бригадира не указан Telegram ID')
+        for i,chunk in enumerate(readiness_chat_chunks(dispatch_message(item,item['number']).splitlines())):
+            messages.append({'chat_id':leader['tg_id'],'text':chunk,'label':leader['display_name'],'status':'pending'})
+    free=board['free']
+    if any(g['people'] for g in free):
+        config=db.get(ReadinessChatConfig,1)
+        if not config or datetime.utcnow()-config.updated_at>timedelta(minutes=5):
+            raise HTTPException(409,'Нет актуальных настроек групп от бота. Повторите через минуту')
+        groups=json.loads(config.payload).get('groups',[])
+        for group in free:
+            if not group['people']: continue
+            chats={int(g['chat_id']) for g in groups if g['group_code']==group['code']}
+            if not chats or any(any(int(g['chat_id'])==chat and g['group_code']!=group['code'] for g in groups) for chat in chats):
+                raise HTTPException(409,'Проверьте отдельную группу: '+group['label'])
+            lines=[f'<b>Свободные · {work_date.strftime("%d.%m")}</b>',escape(group['label'])]+free_staff_person_lines(group['people'])
+            for chat in sorted(chats):
+                for chunk in readiness_chat_chunks(lines):
+                    messages.append({'chat_id':chat,'text':chunk,'label':group['label'],'status':'pending'})
+    # Each immutable target+text has a durable receipt, so changed/retried batches
+    # never resend unaffected orders or group lists. Ambiguous delivery is not retried.
+    receipts=[]
+    for m in messages:
+        key=dispatch_hash({'day':str(work_date),'chat':m['chat_id'],'text':m['text']})
+        row=db.get(DispatchDelivery,key)
+        if not row: row=DispatchDelivery(fingerprint=key,work_date=work_date,payload=json.dumps(m,ensure_ascii=False));db.add(row)
+        receipts.append(key)
+    token=secrets.token_hex(16)
+    run=db.get(DispatchSendRun,work_date)
+    if run is None: run=DispatchSendRun(work_date=work_date);db.add(run)
+    run.token=token;run.active=True;run.heartbeat=datetime.utcnow()
+    db.commit()
+    failed=[];sent=0
+    for key in receipts:
+        run=db.scalar(select(DispatchSendRun).where(DispatchSendRun.work_date==work_date).with_for_update())
+        if run.token!=token:
+            raise HTTPException(409,'Отправку продолжил другой запрос. Обновите статус')
+        run.heartbeat=datetime.utcnow()
+        row=db.scalar(select(DispatchDelivery).where(DispatchDelivery.fingerprint==key).with_for_update())
+        message=json.loads(row.payload)
+        if message['status']=='sent': sent+=1;db.commit();continue
+        if message['status'] in {'sending','unknown'}:
+            failed.append(message['label']+' — проверьте доставку вручную');db.commit();continue
+        message['status']='sending';row.payload=json.dumps(message,ensure_ascii=False);db.commit()
+        try:
+            result=await free_staff_telegram_call('sendMessage',{'chat_id':message['chat_id'],'text':message['text'],'parse_mode':'HTML'})
+            if not isinstance(result,dict) or not result.get('message_id'): raise ValueError('Нет подтверждения')
+            message.update(status='sent',message_id=result['message_id']);sent+=1
+        except Exception:
+            message['status']='unknown';failed.append(message['label']+' — доставка не подтверждена')
+        row=db.get(DispatchDelivery,key);row.payload=json.dumps(message,ensure_ascii=False);db.commit()
+    run=db.get(DispatchSendRun,work_date)
+    if run.token==token: run.active=False;db.commit()
+    return {'sent':sent,'failed':failed,'total':len(receipts)}
+
+
+def _dispatch_planning_html(html):
+    html=html.replace("    await roleActivateView('employeesView');return;", "    await roleActivateView(kind==='owner'?'dispatchActionsView':'employeesView');return;",1)
+    html=html.replace("const staff={key:'staff',title:'Сотрудники',icon:()=>cabinetIcon('team')};", "const staff={key:'staff',title:kind==='owner'?'Действия':'Сотрудники',icon:()=>cabinetIcon('team')};",1)
+    html=html.replace(' bindGbuCrewDisclosure(dialog,card);',' bindGbuCrewDisclosure(dialog,card);\n dispatchAttachControl(dialog,card);',1)
+    return html.replace('</body>',r'''
+<style id="dispatch-planning-style">
+body.dispatch-actions-open .topbar,body.dispatch-actions-open #dispatcherOrderOverview,body.dispatch-actions-open #summary{display:none!important}
+#dispatchActionsView{padding-bottom:18px}#dispatchActionsView h2{font-size:20px;margin:10px 0}
+.dispatch-tools{display:flex;justify-content:flex-end;gap:7px;margin:8px 0}.dispatch-tools button{font-size:12px;padding:7px 12px}
+.dispatch-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.dispatch-column{min-width:0}
+.dispatch-column h3{font-size:15px;color:var(--gold);margin:5px}.dispatch-column>button{width:100%;padding:7px 2px;font-size:11px;margin-bottom:6px}
+.dispatch-mini{display:block;text-align:left;width:100%;border:1px solid var(--line);background:var(--panel,var(--bg));border-radius:11px;padding:7px!important;margin-bottom:6px;font-size:11px;line-height:1.35;min-height:0;overflow-wrap:anywhere;color:var(--text)}
+.dispatch-mini header{display:flex;gap:6px;align-items:center}.dispatch-mini header span{flex:1;font-size:10px}.dispatch-mini b{font-size:12px}.dispatch-mini p{margin:4px 0}.dispatch-gold{color:var(--gold)}.dispatch-mini footer{font-size:10px;color:var(--muted)}.dispatch-done{color:var(--green,#398771)!important}
+.dispatch-send{width:100%;margin:8px 0;padding:10px}.dispatch-free{border:1px solid var(--line);border-radius:12px;padding:9px;font-size:12px}.dispatch-free details{padding:5px 0}.dispatch-free summary{cursor:pointer}.dispatch-free p{font-size:11px;margin:4px 0}
+.dispatch-form{display:grid;gap:8px}.dispatch-form label{display:grid;gap:3px;font-size:12px}.dispatch-form input,.dispatch-form select{width:100%;min-width:0;box-sizing:border-box;font-size:15px;padding:9px}.dispatch-times{display:grid;grid-template-columns:1fr 1fr;gap:7px}.dispatch-form small{font-size:11px;color:var(--muted)}
+.dispatch-people{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}.dispatch-choice{display:grid;grid-template-columns:minmax(0,1fr) 22px;align-items:center;gap:4px;border:1px solid var(--line);border-radius:9px;padding:7px;font-size:12px;min-width:0}.dispatch-choice input{width:19px;height:19px;justify-self:end}.dispatch-choice small{display:block}.dispatch-choice button{grid-column:1/-1;font-size:10px;padding:3px}.dispatch-choice:has(:checked){border-color:var(--gold)}.dispatch-leaders{display:grid;gap:5px}.dispatch-selected{font-size:13px;margin:10px 0}.dispatch-roster p{margin:5px 0;font-size:13px}.dispatch-roster{border:1px solid var(--line);border-radius:10px;padding:9px;margin-top:10px}.dispatch-roster button{width:100%;font-size:12px;margin-top:8px}.dispatch-numbers article{border-bottom:1px solid var(--line);padding:8px;font-size:13px;display:flex;justify-content:space-between;gap:8px}.dispatch-numbers small{display:block}.dispatch-status{font-size:12px;white-space:pre-line}
+</style>
+<script>
+let dispatchBoard=null,dispatchLoad=0;
+const dispatchSection=document.createElement('section');dispatchSection.id='dispatchActionsView';dispatchSection.className='view';document.querySelector('main').append(dispatchSection);
+const dispatchOriginalRender=renderCurrentView;
+renderCurrentView=async function(){
+ const active=currentViewId()==='dispatchActionsView';document.body.classList.toggle('dispatch-actions-open',active);
+ if(!active)return dispatchOriginalRender();
+ document.body.classList.remove('management-open','owner-cabinet-open','dashboard-compact','owner-brigade-control-open','staff-directory-open');
+ const overview=qs('#dispatcherOrderOverview');if(overview)overview.hidden=true;
+ return loadDispatchBoard();
+};
+function dispatchShortDay(day){const d=new Date(day+'T12:00:00Z');return d.toLocaleDateString('ru-RU',{timeZone:'UTC',weekday:'short',day:'2-digit',month:'2-digit'})}
+function dispatchToken(){return globalThis.crypto?.randomUUID?.().replaceAll('-','')||Date.now().toString(36)+Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2)}
+function dispatchPerson(p){return [String(p.full_name||'').split(/\s+/)[0],p.metro].filter(Boolean).join(' ')}
+function dispatchMini(o){return `<button type="button" class="dispatch-mini" data-plan-id="${o.id}"><header><b>№${o.number}</b><span>${esc(o.organization||(o.source==='gbu'?'ГБУ ⬛️':''))}${o.source==='gbu'&&o.organization?' ⬛️':''}</span>›</header><p><b>ум: ${esc(o.deceased_name)}</b></p><p class="dispatch-gold">${esc(o.category_label)} · ${o.team_size} чел.</p><p>◷ ${esc(o.issue_time)} · 📸 ${esc(o.arrival_time||'—')}</p>${o.brigadier?`<p>${esc(dispatchPerson(o.brigadier))}</p>`:''}<footer class="${o.composition_complete?'dispatch-done':''}">${o.composition_complete?'Состав назначен ✓':'Назначить состав ›'}</footer></button>`}
+async function loadDispatchBoard(){
+ const ticket=++dispatchLoad,day=state.selectedDate,root=qs('#dispatchActionsView');
+ if(!dispatchBoard||dispatchBoard.work_date!==day)root.textContent='Загрузка…';
+ try{const data=await api('/api/dispatch-board?work_date='+day);if(ticket!==dispatchLoad||state.selectedDate!==day||currentViewId()!=='dispatchActionsView')return;dispatchBoard=data;
+ const assigned=data.items.filter(o=>o.composition_complete).length,posted=data.numbers.filter(n=>n.posted).length;
+ root.innerHTML=`<div class="dispatch-tools"><button type="button" data-plan-payroll>₽ Зарплата ГБУ</button><button type="button" data-plan-agents>⬛️ Агенты ГБУ</button></div><h2>Действия · ${esc(dispatchShortDay(day))}</h2><div class="dispatch-columns">${['private','gbu'].map(source=>`<div class="dispatch-column"><h3>${source==='gbu'?'ГБУ ⬛️':'Частные'} · ${data.counts[source]}</h3><button type="button" data-plan-add="${source}">+ Добавить заказ</button>${data.items.filter(o=>o.source===source).map(dispatchMini).join('')||'<p class="muted">Заказов нет</p>'}</div>`).join('')}</div><p class="dispatch-selected">Составы назначены: ${assigned}/${data.items.length}</p><button type="button" data-plan-numbers>Номера в группе · ${posted}/${data.items.length} ›</button><button type="button" class="primary dispatch-send" data-plan-send ${!data.items.length||assigned!==data.items.length?'disabled':''}>Отправить заказы ›</button><p class="dispatch-status" data-plan-status role="status"></p><div class="dispatch-free"><b>Свободные · ${data.free.reduce((s,g)=>s+g.people.length,0)}</b>${data.free.map(g=>`<details><summary>${esc(g.label)} · ${g.people.length}</summary>${g.people.map(p=>`<p>${esc(p.name)} ${esc(p.metro)} ${esc(p.height)}</p>`).join('')||'<p>Нет свободных</p>'}</details>`).join('')}</div>`;
+ qs('[data-plan-payroll]',root).onclick=()=>openGbuPayroll();qs('[data-plan-agents]',root).onclick=()=>openGbuAgents();
+ qsa('[data-plan-add]',root).forEach(b=>b.onclick=()=>openDispatchEditor(null,b.dataset.planAdd));
+ qsa('[data-plan-id]',root).forEach(b=>b.onclick=()=>openDispatchEditor(data.items.find(x=>x.id===Number(b.dataset.planId))));
+ qs('[data-plan-numbers]',root).onclick=()=>openNumberCards(day);
+ qs('[data-plan-send]',root).onclick=async e=>{const button=e.currentTarget;button.disabled=true;const status=qs('[data-plan-status]',root);status.textContent='Отправка заказов и списков свободных…';
+  try{const result=await api('/api/dispatch-board/send?work_date='+day,{method:'POST',body:JSON.stringify({revision:data.revision})});status.textContent=result.failed.length?'Отправлено '+result.sent+' из '+result.total+'\n'+result.failed.join('\n'):'Заказы и списки свободных отправлены';}catch(error){status.textContent=error.message}finally{if(root.contains(button))button.disabled=false}
+ };
+ }catch(error){if(ticket===dispatchLoad)root.textContent=error.message}
+}
+async function openDispatchEditor(order,source='private'){
+ source=order?.source||source;const day=order?.work_date||state.selectedDate,key=dispatchToken(),route=order?.route_fields||{};
+ const input=(name,label,value='',extra='')=>`<label>${label}<input name="${name}" value="${esc(value)}" ${extra}></label>`;
+ showModal(order?`${source==='gbu'?'ГБУ ⬛️':'Частный'} №${order.number}`:'Новый заказ · '+(source==='gbu'?'ГБУ ⬛️':'Частный'),`<form class="dispatch-form" id="dispatchEditor"><small>${esc(dispatchShortDay(day))}</small>${input('agent_name','Имя агента',order?.agent_name||'','maxlength="200"')}${input('agent_phone','Номер агента',order?.agent_phone||'','type="tel" maxlength="50"')}${input('organization','От кого заказ',order?.organization||'','maxlength="200"')}<label>Категория заказа<select name="category" required><option value="">Выберите категорию</option>${Object.entries(source==='gbu'?{standard:'Стандарт',elite:'Элит'}:{standard:'Стандарт',vip:'Вип',elite:'Элит'}).map(([v,label])=>`<option value="${v}" ${v===order?.category?'selected':''}>${label}</option>`).join('')}</select></label>${input('deceased_name','Фамилия умершего',order?.deceased_name||'','required maxlength="100"')}<div class="dispatch-times">${input('issue_time','Время выдачи',order?.issue_time||'','type="time" required')}<label>📸 Подача авто<input data-plan-arrival readonly value="${esc(order?.arrival_time||'')}"></label></div><small>За 30 минут до выдачи. При переходе через полночь — предыдущий день.</small><b>Маршрут</b>${input('morgue','1. Морг',route.morgue||(!Object.keys(route).length?order?.route||'':''),'maxlength="500"')}${input('church','2. Храм',route.church||'','maxlength="500"')}${input('cemetery','3. Кладбище / кремация',route.cemetery||'','maxlength="500"')}<label>Количество человек<select name="team_size" required></select></label>${order?`<p>${order.composition_complete?'Состав назначен ✓':'Состав не назначен'}</p><button type="button" data-plan-crew ${order.approved?'disabled':''}>Выбрать бригадира и состав ›</button>${order.brigadier?'<button type="button" data-plan-clear>Снять состав</button>':''}`:'<small>Состав можно назначить после сохранения заказа.</small>'}<p data-plan-error role="status"></p><button type="submit" class="primary" ${order?.approved?'disabled':''}>Сохранить заказ</button></form>`);
+ const form=qs('#dispatchEditor'),live=()=>qs('#dispatchEditor')===form&&!qs('#modal').classList.contains('hidden');let chooseCrewAfterSave=false;
+ const sizes=()=>{const allowed=source==='gbu'||form.elements.category.value!=='standard'?[4,6]:[3,4,5,6];const old=Number(form.elements.team_size.value)||order?.team_size;form.elements.team_size.innerHTML='<option value="">Выберите количество</option>'+allowed.map(n=>`<option value="${n}" ${n===old?'selected':''}>${n}</option>`).join('')};sizes();form.elements.category.onchange=sizes;
+ form.elements.issue_time.oninput=()=>{const parts=form.elements.issue_time.value.split(':').map(Number);if(parts.length===2){const minutes=(parts[0]*60+parts[1]-30+1440)%1440;qs('[data-plan-arrival]',form).value=String(Math.floor(minutes/60)).padStart(2,'0')+':'+String(minutes%60).padStart(2,'0')}};
+ const crew=qs('[data-plan-crew]',form);if(crew)crew.onclick=()=>{chooseCrewAfterSave=true;form.requestSubmit()};
+ const clear=qs('[data-plan-clear]',form);if(clear){clear.disabled=order.approved;clear.onclick=async()=>{clear.disabled=true;try{await api('/api/dispatch-board/orders/'+order.id+'/crew',{method:'DELETE',body:JSON.stringify({revision:order.revision})});closeModal();await loadDispatchBoard()}catch(e){qs('[data-plan-error]',form).textContent=e.message;clear.disabled=false}}}
+ form.onsubmit=async e=>{e.preventDefault();const button=qs('[type=submit]',form);if(button.disabled)return;button.disabled=true;
+ const fields=Object.fromEntries(new FormData(form));const payload={...fields,team_size:Number(fields.team_size),source,work_date:day,request_key:key,revision:order?.revision||null};
+ try{const r=await api('/api/dispatch-board/orders'+(order?'/'+order.id:''),{method:order?'PUT':'POST',body:JSON.stringify(payload)});if(!live())return;closeModal();await loadDispatchBoard();if(chooseCrewAfterSave){const fresh=dispatchBoard?.items.find(o=>o.id===(order?.id||r.id));if(fresh)await openDispatchCrew(fresh)}else toast('Заказ сохранён')}catch(error){if(live()){qs('[data-plan-error]',form).textContent=error.message;button.disabled=false;chooseCrewAfterSave=false}}
+ };
+}
+async function openDispatchCrew(order){
+ showModal('Выберите бригадира','<div id="dispatchCrew">Загрузка…</div>');const root=qs('#dispatchCrew'),live=()=>qs('#dispatchCrew')===root&&!qs('#modal').classList.contains('hidden');
+ try{const data=await api('/api/dispatch-board/orders/'+order.id+'/people');if(!live())return;
+ let leader=order.brigadier?.id||null,selected=new Set(order.members.map(p=>p.id)),second=new Set();let step=1;
+ const people=data.items,old=new Set([order.brigadier?.id,...order.members.map(p=>p.id)]);
+ const name=p=>dispatchPerson(p),busy=p=>p.workload>0;
+ function row(p,isLeader){const checked=isLeader?leader===p.id:selected.has(p.id);const blocked=p.workload>=2&&!old.has(p.id);return `<label class="dispatch-choice" data-plan-person="${p.id}" data-plan-search="${esc(name(p).toLowerCase().replaceAll('ё','е'))}"><span>${esc(name(p))}<small>${p.height_cm||'—'}${busy(p)?' · уже на заказе':''}</small></span><input type="${isLeader?'radio':'checkbox'}" name="${isLeader?'leader':'member'}" value="${p.id}" ${checked?'checked':''} ${blocked?'disabled':''}>${busy(p)&&!blocked&&!old.has(p.id)?`<button type="button" data-plan-second="${p.id}" aria-pressed="${second.has(p.id)}">2-й заказ${second.has(p.id)?' ✓':''}</button>`:''}</label>`}
+ function draw(){if(!live())return;const p=people.find(p=>p.id===leader),need=order.team_size-1;
+ const sorted=people.filter(p=>p.id!==leader).sort((a,b)=>{const diff=x=>p?.height_cm&&x.height_cm?Math.abs(x.height_cm-p.height_cm):1000;return Number(diff(a)>3)-Number(diff(b)>3)||diff(a)-diff(b)||name(a).localeCompare(name(b),'ru')});
+ root.innerHTML=`<p>Шаг ${step} из 2 · ${order.source==='gbu'?'ГБУ ⬛️':'Частный'} №${order.number}</p>${step===2?`<p><b>Бригадир: ${esc(name(p))} · ${p.height_cm||'—'}</b> <button type="button" data-plan-back>Изменить</button></p>`:''}<input class="search" data-plan-find placeholder="Поиск по имени и метро"><div class="${step===1?'dispatch-leaders':'dispatch-people'}">${(step===1?people.filter(p=>p.group_code==='brigadier').sort((a,b)=>name(a).localeCompare(name(b),'ru')):sorted).map(p=>row(p,step===1)).join('')}</div>${step===2?'<small>Сначала сотрудники с разницей в росте до 3 см, затем остальные.</small>':''}<p class="dispatch-selected" data-plan-selected></p><p data-plan-error role="status"></p><button type="button" class="primary" data-plan-next>${step===1?'Далее: сотрудники ›':'Назначить состав'}</button>`;
+ const next=qs('[data-plan-next]',root);function update(){qs('[data-plan-selected]',root).textContent=step===1?'Выберите одного бригадира':'Выбрано '+(selected.size+1)+' из '+order.team_size;next.disabled=step===1?!leader:selected.size!==need;
+ qsa('input[type=checkbox]',root).forEach(box=>box.disabled=!box.checked&&(selected.size>=need||people.find(p=>p.id===Number(box.value)).workload>=2&&!old.has(Number(box.value))))}update();
+ qs('[data-plan-find]',root).oninput=e=>{const tokens=e.target.value.toLowerCase().replaceAll('ё','е').trim().split(/\s+/);qsa('[data-plan-search]',root).forEach(row=>row.hidden=!tokens.every(t=>row.dataset.planSearch.includes(t)))};
+ qsa('input[type=radio],input[type=checkbox]',root).forEach(box=>box.onchange=()=>{const id=Number(box.value);if(step===1){leader=id;selected.delete(id)}else box.checked?selected.add(id):selected.delete(id);update()});
+ qsa('[data-plan-second]',root).forEach(button=>button.onclick=e=>{e.preventDefault();const id=Number(button.dataset.planSecond);second.has(id)?second.delete(id):second.add(id);button.setAttribute('aria-pressed',String(second.has(id)));button.textContent='2-й заказ'+(second.has(id)?' ✓':'')});
+ const back=qs('[data-plan-back]',root);if(back)back.onclick=()=>{step=1;draw()};
+ next.onclick=async()=>{if(next.disabled)return;if(step===1){step=2;draw();return}const ids=[leader,...selected];if(ids.some(id=>busy(people.find(p=>p.id===id))&&!old.has(id)&&!second.has(id))){qs('[data-plan-error]',root).textContent='Подтвердите «2-й заказ» для занятых сотрудников';return}next.disabled=true;
+ try{await api('/api/dispatch-board/orders/'+order.id+'/crew',{method:'POST',body:JSON.stringify({revision:order.revision,brigadier_id:leader,member_ids:[...selected],second_order_employee_ids:[...second]})});if(!live())return;closeModal();await loadDispatchBoard()}catch(error){if(live()){qs('[data-plan-error]',root).textContent=error.message;next.disabled=false}}};
+ }draw();
+ }catch(error){if(live())root.textContent=error.message}
+}
+const dispatchOriginalNumbers=openNumberCards;
+openNumberCards=async function(workDay){
+ if(state.bootstrap?.cabinet_kind!=='owner')return dispatchOriginalNumbers(workDay);
+ const day=typeof workDay==='string'?workDay:state.selectedDate;
+ showModal('Номера в группе','<div id="dispatchNumbers">Загрузка…</div>');const root=qs('#dispatchNumbers');
+ try{const data=await api('/api/dispatch-board?work_date='+day);if(qs('#dispatchNumbers')!==root)return;
+ if(!data.items.length)return dispatchOriginalNumbers(day);
+ const count=data.numbers.filter(n=>n.posted).length;
+ root.className='dispatch-numbers';root.innerHTML=`<h3>Выставили: ${count}/${data.numbers.length}</h3><p>Не выставили: ${data.numbers.length-count}</p>${[false,true].map(posted=>`<h4>${posted?'Выставили':'Не выставили'}</h4>${data.numbers.filter(n=>n.posted===posted).map(n=>`<article><span>${esc(n.brigadier?dispatchPerson(n.brigadier):'Бригадир не назначен')}<small>${n.source==='gbu'?'ГБУ ⬛️':'Частный'} №${n.number} · ум: ${esc(n.surname)}</small></span><span>${posted?'✓':'⏳'}</span></article>`).join('')}`).join('')}<button type="button" data-plan-original>Все выставленные номера и действия ›</button>`;
+ qs('[data-plan-original]',root).onclick=()=>dispatchOriginalNumbers(day);
+ }catch(error){if(qs('#dispatchNumbers')===root)root.textContent=error.message}
+};
+async function dispatchAttachControl(dialog,card){
+ if(card.source!=='gbu'||state.bootstrap?.cabinet_kind!=='owner')return;
+ try{const data=await api('/api/dispatch-board/card/'+card.id);if(!dialog.open||!data.order)return;const order=data.order;
+ const legacy=dialog.querySelector('[data-gbu-order-roster]');if(legacy){legacy.onclick=()=>dialog.querySelector('.dispatch-roster')?.scrollIntoView({block:'nearest'});legacy.textContent=order.category_label+' · '+order.team_size+' чел.'}
+ dialog.querySelectorAll('.bc-crew-disclosure').forEach(e=>e.remove());
+ const block=document.createElement('section');block.className='dispatch-roster';
+ block.innerHTML=`<b>Назначенный состав</b>${[order.brigadier,...order.members].filter(Boolean).map((p,i)=>`<p>${i===0?'<b>':''}${esc(dispatchPerson(p))} · ${p.height_cm||'—'}${i===0?'</b>':''}</p>`).join('')}<p data-plan-approval-status>${order.approved?'Состав подтверждён · в зарплате ✓':'Ожидает подтверждения'}</p><button type="button" class="primary" ${order.approved||!order.composition_complete?'disabled':''}>Подтвердить состав и начислить ✓</button>`;
+ dialog.querySelector('.bc-viewer-info').append(block);const button=block.querySelector('button');button.onclick=async()=>{if(button.disabled)return;button.disabled=true;
+ try{await api('/api/dispatch-board/orders/'+order.id+'/approve',{method:'POST',body:JSON.stringify({revision:order.revision})});qs('[data-plan-approval-status]',block).textContent='Состав подтверждён · в зарплате ✓';button.textContent='Начислено ✓'}catch(error){qs('[data-plan-approval-status]',block).textContent=error.message;button.disabled=false}};
+ }catch(error){if(dialog.open){const note=document.createElement('p');note.textContent='Не удалось загрузить назначенный состав: '+error.message;dialog.querySelector('.bc-viewer-info')?.append(note)}}
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML = _dispatch_planning_html(INLINE_INDEX_HTML)
 
 
 def _isolated_preview_screen_html():
