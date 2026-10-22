@@ -13513,6 +13513,21 @@ class DispatchRevision(BaseModel):
     revision: StrictStr
 
 
+class DispatchGbuImportItem(GbuDraft):
+    category: Literal['standard', 'elite'] = 'standard'
+    deceased_name: StrictStr = Field(min_length=1, max_length=100)
+    agent_name: StrictStr = Field(default='', max_length=200)
+    agent_phone: StrictStr = Field(default='', max_length=50)
+    organization: StrictStr = Field(default='ГБУ', max_length=200)
+    route: StrictStr = Field(default='', max_length=2000)
+
+
+class DispatchGbuImportInput(BaseModel):
+    work_date: date
+    request_key: StrictStr = Field(pattern=r'^[a-zA-Z0-9_-]{16,64}$')
+    items: list[DispatchGbuImportItem] = Field(min_length=1, max_length=1000)
+
+
 def dispatch_guard(db, user):
     if not _is_cabinet_owner(db, user.id):
         raise HTTPException(403, 'Новый раздел пока доступен только владельцу')
@@ -13720,6 +13735,50 @@ def dispatch_create(data: DispatchPlanInput, db: Session = Depends(get_db), user
         'route_fields':{k:getattr(data,k) for k in ('morgue','church','cemetery')}}, ensure_ascii=False)))
     db.commit()
     return {'ok':True, 'id':order.id}
+
+
+@app.post('/api/dispatch-board/gbu-import')
+def dispatch_import_gbu(data: DispatchGbuImportInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    dispatch_guard(db, user)
+    dispatch_day_lock(db, data.work_date)
+    batch_hash=dispatch_hash(data.model_dump(exclude={'request_key'}))
+    keys=[dispatch_hash({'gbu_import':data.request_key,'row':i}) for i in range(len(data.items))]
+    existing=list(db.scalars(select(DispatchPlan).where(DispatchPlan.request_key.in_(keys))))
+    if existing:
+        if len(existing)!=len(keys) or any(json.loads(p.payload).get('import_hash')!=batch_hash for p in existing):
+            raise HTTPException(409, 'Этот импорт уже сохранён с другими данными. Откройте импорт заново.')
+        plans={p.request_key:p for p in existing}
+        mapping,_=dispatch_slot_layout(db,data.work_date,dispatch_rows(db,data.work_date))
+        if any(p.order_id not in mapping for p in existing):
+            raise HTTPException(409, 'Заказы этого импорта были отменены. Обновите список заказов.')
+        return {'ok':True,'items':[{'id':plans[key].order_id,'number':mapping[plans[key].order_id]} for key in keys]}
+    # Validate the entire photograph before creating any orders.
+    for index,item in enumerate(data.items,1):
+        if item.work_date!=data.work_date or not item.deceased_name.strip():
+            raise HTTPException(422, f'Заказ №{index}: проверьте дату и фамилию умершего')
+        dispatch_validate_category('gbu',item.category,item.team_size)
+    rows=dispatch_rows(db,data.work_date)
+    mapping,empty=dispatch_slot_layout(db,data.work_date,rows)
+    slots=sorted(empty['gbu'])
+    highest=max([5,*slots,*[mapping[o.id] for o in rows if o.source=='gbu']])
+    while len(slots)<len(data.items):
+        highest+=1;slots.append(highest)
+    if slots[len(data.items)-1]>1000:
+        raise HTTPException(409, 'Достигнут лимит карточек на день')
+    created=[]
+    for index,item in enumerate(data.items):
+        arrival=(datetime.combine(data.work_date,item.issue_time)-timedelta(minutes=30)).time()
+        order=Order(public_id=_public_id(),source='gbu',work_date=data.work_date,
+            issue_time=item.issue_time,arrival_time=arrival,deceased_name=item.deceased_name.strip(),
+            route=item.route.strip(),category=item.category,team_size=item.team_size,
+            organization=item.organization.strip() or 'ГБУ',notes=item.notes,kickback_rub=0,
+            agent_name=item.agent_name.strip(),agent_phone=item.agent_phone.strip(),other_agent_phone='',status='new')
+        db.add(order);db.flush()
+        db.add(DispatchPlan(order_id=order.id,request_key=keys[index],payload=json.dumps({
+            'import_hash':batch_hash,'slot_number':slots[index],'route_fields':{}},ensure_ascii=False)))
+        created.append({'id':order.id,'number':slots[index]})
+    db.commit()
+    return {'ok':True,'items':created}
 
 
 @app.put('/api/dispatch-board/orders/{order_id}')
@@ -13957,6 +14016,9 @@ body.dispatch-actions-open .topbar,body.dispatch-actions-open #dispatcherOrderOv
 .dispatch-tools{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:stretch;gap:7px;margin:8px 0}.dispatch-tools button{width:100%;min-height:32px;font-size:11px;padding:6px 7px}
 .dispatch-overview{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:center;gap:7px;margin:4px 0 10px}.dispatch-overview button{width:100%;min-height:32px;font-size:11px;padding:6px 7px}.dispatch-requested{text-align:left;font-size:11px;line-height:1.25}.dispatch-requested b{color:var(--gold)}
 .dispatch-ready{display:block;margin-bottom:4px}.dispatch-ready b{color:var(--green,#398771)}
+#dispatchGbuImport [data-k=work_date]{display:none}#dispatchGbuImport .field:has([data-k=work_date]){display:none}
+#dispatchGbuImport>input,#dispatchGbuImport>button,#dispatchGbuImport [data-import-save]{width:100%;box-sizing:border-box;margin:5px 0}
+#dispatchGbuImport [data-import-number]{display:block;color:var(--gold);margin-bottom:8px}
 .dispatch-evening{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:center;gap:5px;border:1px solid var(--line);border-radius:12px;padding:6px;margin:8px 0}
 #dispatchActionsView .dispatch-evening h2{font-size:13px;margin:0;line-height:1.2}
 .dispatch-evening>button{width:100%;min-height:30px;font-size:11px;padding:4px}
@@ -14023,8 +14085,9 @@ async function loadDispatchBoard(){
  if(!dispatchBoard||dispatchBoard.work_date!==day)root.textContent='Загрузка…';
  try{const data=await api('/api/dispatch-board?work_date='+day);if(ticket!==dispatchLoad||state.selectedDate!==day||currentViewId()!=='dispatchActionsView')return;dispatchBoard=data;
  const assigned=data.items.filter(o=>o.composition_complete).length,posted=data.numbers.filter(n=>n.posted).length;
-root.innerHTML=`${dispatchEveningHtml(data)}<div class="dispatch-tools"><button type="button" data-plan-payroll>₽ Зарплата ГБУ</button><button type="button" data-plan-agents>⬛️ Агенты ГБУ</button></div><div class="dispatch-overview"><span class="dispatch-requested"><span class="dispatch-ready">Готово сотрудников: <b data-plan-ready>${Number(data.ready_staff)||0}</b></span>Запрошено сотрудников: <b data-plan-requested>${Number(data.requested_staff)||0}</b></span></div><div class="dispatch-columns">${['private','gbu'].map(source=>`<div class="dispatch-column"><h3><span>${source==='gbu'?'ГБУ ⬛️':'Частные'} · ${data.counts[source]}</span><span class="dispatch-source-requested" title="Запрошено сотрудников" aria-label="Запрошено сотрудников: ${Number(data.requested_staff_by_source?.[source])||0}">👥 <b data-plan-requested-source="${source}">${Number(data.requested_staff_by_source?.[source])||0}</b></span></h3><button type="button" data-plan-add="${source}">+ Добавить заказ</button>${dispatchColumnCards(data,source)}</div>`).join('')}</div><p class="dispatch-selected">Составы назначены: ${assigned}/${data.items.length}</p><button type="button" class="primary dispatch-send" data-plan-send ${!data.items.length||assigned!==data.items.length?'disabled':''}>Отправить заказы ›</button><p class="dispatch-status" data-plan-status role="status"></p><div class="dispatch-free"><b>Свободные · ${data.free.reduce((s,g)=>s+g.people.length,0)}</b>${data.free.map(g=>`<details><summary>${esc(g.label)} · ${g.people.length}</summary>${g.people.map(p=>`<p>${esc(p.name)} ${esc(p.metro)} ${esc(p.height)}</p>`).join('')||'<p>Нет свободных</p>'}</details>`).join('')}</div>`;
+root.innerHTML=`${dispatchEveningHtml(data)}<div class="dispatch-tools"><button type="button" data-plan-payroll>₽ Зарплата ГБУ</button><button type="button" data-plan-agents>⬛️ Агенты ГБУ</button></div><div class="dispatch-overview"><span class="dispatch-requested"><span class="dispatch-ready">Готово сотрудников: <b data-plan-ready>${Number(data.ready_staff)||0}</b></span>Запрошено сотрудников: <b data-plan-requested>${Number(data.requested_staff)||0}</b></span><button type="button" data-plan-import>📷 Импорт заказов ГБУ</button></div><div class="dispatch-columns">${['private','gbu'].map(source=>`<div class="dispatch-column"><h3><span>${source==='gbu'?'ГБУ ⬛️':'Частные'} · ${data.counts[source]}</span><span class="dispatch-source-requested" title="Запрошено сотрудников" aria-label="Запрошено сотрудников: ${Number(data.requested_staff_by_source?.[source])||0}">👥 <b data-plan-requested-source="${source}">${Number(data.requested_staff_by_source?.[source])||0}</b></span></h3><button type="button" data-plan-add="${source}">+ Добавить заказ</button>${dispatchColumnCards(data,source)}</div>`).join('')}</div><p class="dispatch-selected">Составы назначены: ${assigned}/${data.items.length}</p><button type="button" class="primary dispatch-send" data-plan-send ${!data.items.length||assigned!==data.items.length?'disabled':''}>Отправить заказы ›</button><p class="dispatch-status" data-plan-status role="status"></p><div class="dispatch-free"><b>Свободные · ${data.free.reduce((s,g)=>s+g.people.length,0)}</b>${data.free.map(g=>`<details><summary>${esc(g.label)} · ${g.people.length}</summary>${g.people.map(p=>`<p>${esc(p.name)} ${esc(p.metro)} ${esc(p.height)}</p>`).join('')||'<p>Нет свободных</p>'}</details>`).join('')}</div>`;
  qs('[data-plan-payroll]',root).onclick=()=>openGbuPayroll();qs('[data-plan-agents]',root).onclick=()=>openGbuAgents();
+ qs('[data-plan-import]',root).onclick=()=>openDispatchGbuImport();
  qsa('[data-plan-add]',root).forEach(b=>b.onclick=async()=>{if(b.disabled)return;b.disabled=true;b.dispatchRequestKey=b.dispatchRequestKey||dispatchToken();try{await api('/api/dispatch-board/blank',{method:'POST',body:JSON.stringify({work_date:day,source:b.dataset.planAdd,request_key:b.dispatchRequestKey})});await loadDispatchBoard()}catch(error){if(root.contains(b)){qs('[data-plan-status]',root).textContent=error.message;b.disabled=false}}});
  qsa('[data-plan-blank]',root).forEach(b=>b.onclick=()=>openDispatchEditor(null,b.dataset.planSource,Number(b.dataset.planBlank)));
  qsa('[data-plan-id]',root).forEach(b=>b.onclick=()=>openDispatchEditor(data.items.find(x=>x.id===Number(b.dataset.planId))));
@@ -14033,6 +14096,45 @@ root.innerHTML=`${dispatchEveningHtml(data)}<div class="dispatch-tools"><button 
   try{const result=await api('/api/dispatch-board/send?work_date='+day,{method:'POST',body:JSON.stringify({revision:data.revision})});status.textContent=result.failed.length?'Отправлено '+result.sent+' из '+result.total+'\n'+result.failed.join('\n'):'Заказы и списки свободных отправлены';}catch(error){status.textContent=error.message}finally{if(root.contains(button))button.disabled=false}
  };
  }catch(error){if(ticket===dispatchLoad)root.textContent=error.message}
+}
+function dispatchImportNumbers(board,count){
+ const slots=[...(board?.empty_slots?.gbu||[1,2,3,4,5])].sort((a,b)=>a-b);
+ let highest=Math.max(5,...slots,...(board?.items||[]).filter(o=>o.source==='gbu').map(o=>o.number));
+ while(slots.length<count)slots.push(++highest);
+ return slots.slice(0,count);
+}
+async function openDispatchGbuImport(){
+ const day=state.selectedDate,board=dispatchBoard?.work_date===day?dispatchBoard:null;
+ showModal('Импорт заказов ГБУ',`<div id="dispatchGbuImport"><p>${esc(dispatchShortDay(day))}</p><p class="muted">Выберите или вставьте фото таблицы. Проверьте все распознанные заказы и сохраните их вместе.</p><input type="file" data-import-file accept="image/*"><button type="button" data-import-ocr>Распознать фото</button><p data-import-status role="status"></p><div data-import-result></div></div>`);
+ const root=qs('#dispatchGbuImport'),modal=qs('#modal'),live=()=>qs('#dispatchGbuImport')===root&&!modal.classList.contains('hidden');
+ let file=null,busy=false,requestKey=dispatchToken();
+ function lock(value){busy=value;qsa('input,select,textarea,button',root).forEach(el=>el.disabled=value);qs('[data-import-ocr]',root).textContent=value?'Обработка…':'Распознать фото'}
+ function renumber(){const rows=qsa('.gbu-draft',root),numbers=dispatchImportNumbers(board,rows.length);rows.forEach((row,i)=>qs('[data-import-number]',row).textContent='Заказ ГБУ №'+numbers[i]);return numbers}
+ function rowHtml(d,i){
+  const html=gbuDraftHtml({...d,work_date:day},i).replace('<div class="form-grid">','<b data-import-number></b><div class="form-grid">');
+  return html.replace('<input value="Стандарт" disabled>',`<select data-k="category"><option value="standard" ${d.category!=='elite'?'selected':''}>Стандарт</option><option value="elite" ${d.category==='elite'?'selected':''}>Элит</option></select>`);
+ }
+ function draw(result){
+  requestKey=dispatchToken();const area=qs('[data-import-result]',root),drafts=result.drafts||[];
+  area.innerHTML=`${result.warning?`<p class="muted">${esc(result.warning)}</p>`:''}<details><summary>Распознанный текст</summary><pre style="white-space:pre-wrap">${esc(result.raw_text||'')}</pre></details><h4>Распознано заказов: ${drafts.length}</h4><div data-import-rows>${drafts.map(rowHtml).join('')}</div><button type="button" data-import-add>＋ Добавить строку</button><button type="button" class="primary" data-import-save>Сохранить все заказы ГБУ</button>`;
+  renumber();qs('[data-import-add]',root).onclick=()=>{const rows=qs('[data-import-rows]',root);rows.insertAdjacentHTML('beforeend',rowHtml({category:'standard',team_size:4},qsa('.gbu-draft',rows).length));renumber()};
+  qs('[data-import-save]',root).onclick=async()=>{
+   if(busy)return;const numbers=renumber(),rows=qsa('.gbu-draft',root);
+   const items=rows.map(row=>{const get=k=>qs(`[data-k="${k}"]`,row)?.value||'';return {work_date:day,category:get('category'),team_size:Number(get('team_size')),agent_name:get('agent_name'),agent_phone:get('agent_phone'),deceased_name:get('deceased_name').trim(),issue_time:get('issue_time'),arrival_time:get('arrival_time')||null,route:get('route'),organization:'ГБУ'}});
+   const invalid=items.map((item,i)=>!item.deceased_name||!/^\d{2}:\d{2}$/.test(item.issue_time)?numbers[i]:null).filter(n=>n!==null);
+   if(!items.length||invalid.length){qs('[data-import-status]',root).textContent=!items.length?'Добавьте хотя бы один заказ':'Заполните фамилию и время выдачи в заказах №'+invalid.join(', №');return}
+   lock(true);qs('[data-import-status]',root).textContent='Сохраняю все заказы…';
+   try{const saved=await api('/api/dispatch-board/gbu-import',{method:'POST',body:JSON.stringify({work_date:day,request_key:requestKey,items})});if(!live())return;closeModal();toast('Добавлено заказов ГБУ: '+saved.items.length);if(state.selectedDate===day)await loadBootstrap(day)}catch(error){if(live())qs('[data-import-status]',root).textContent=error.message}finally{if(live())lock(false)}
+  };
+ }
+ async function recognize(){
+  if(busy||!live())return;if(!file){qs('[data-import-status]',root).textContent='Выберите или вставьте фото';return}
+  lock(true);qs('[data-import-status]',root).textContent='Распознаю все строки таблицы…';qs('[data-import-result]',root).replaceChildren();
+  const fd=new FormData();fd.append('file',file);fd.append('work_date',day);
+  try{const result=await api('/api/gbu/ocr',{method:'POST',body:fd});if(!live())return;draw(result);qs('[data-import-status]',root).textContent=(result.drafts||[]).length?'Проверьте заказы перед сохранением':'Строки не найдены. Попробуйте более чёткое фото или добавьте строки вручную.'}catch(error){if(live())qs('[data-import-status]',root).textContent=error.message}finally{if(live())lock(false)}
+ }
+ qs('[data-import-file]',root).onchange=event=>{file=event.target.files?.[0]||null;if(file)recognize()};qs('[data-import-ocr]',root).onclick=recognize;
+ modal.onpaste=event=>{if(!live()||busy)return;const item=[...(event.clipboardData?.items||[])].find(x=>x.type.startsWith('image/'));if(item){event.preventDefault();file=item.getAsFile();recognize()}};
 }
 async function openDispatchEditor(order,source='private',slotNumber=null){
  source=order?.source||source;const day=order?.work_date||state.selectedDate,key=dispatchToken(),route=order?.route_fields||{};
