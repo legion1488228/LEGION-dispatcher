@@ -1563,6 +1563,8 @@ def list_orders(
         q = q.where(Order.status == status)
     q = q.order_by(Order.issue_time, Order.id)
     rows = db.execute(q).scalars().all()
+    if _is_cabinet_owner(db, user.id):
+        rows.sort(key=dispatch_gbu_elite_priority)
     return [_order_dict(o, db) for o in rows]
 
 
@@ -3425,21 +3427,133 @@ def bot_order_tea_report(public_id: str, data: BrigadierTeaReport, db: Session =
 
 # ---------- GBU import ----------
 
+def dispatch_elite_table_cells(content):
+    """Read the elite grid by cells, excluding service columns before OCR."""
+    import io
+    import subprocess
+    from PIL import Image, ImageOps
+
+    image = ImageOps.exif_transpose(Image.open(io.BytesIO(content))).convert('RGB')
+    width, height = image.size
+    if width * height > 40000000:
+        raise ValueError('Слишком большое фото. Обрежьте его до таблицы.')
+    # Inspect a bounded copy; crops for OCR retain the original resolution.
+    scale = min(1.0, 1800 / width)
+    scan = image.resize((max(1, round(width * scale)), max(1, round(height * scale))))
+    sw, sh = scan.size
+    pixels = scan.load()
+
+    def centers(points, gap=3):
+        groups = []
+        for point in points:
+            if not groups or point - groups[-1][-1] > gap:
+                groups.append([point])
+            else:
+                groups[-1].append(point)
+        return [round(sum(group) / len(group)) for group in groups]
+
+    lines = centers([y for y in range(sh)
+        if sum(max(pixels[x, y]) < 170 for x in range(sw)) >= sw * .8])
+    header = None
+    for top, bottom in zip(lines, lines[1:]):
+        if bottom - top < 8:
+            continue
+        ys = range(top + 2, bottom - 1)
+        columns = centers([x for x in range(sw)
+            if sum(max(pixels[x, y]) < 170 for y in ys) >= len(ys) * .7])
+        # Layout: optional row index, number, invoice, quantity, arrival,
+        # route, deceased, agent, notes. The last six cells are stable.
+        if len(columns) in (9, 10):
+            header = (bottom, columns)
+            break
+    if header is None:
+        raise ValueError('Не найдена сетка элитной таблицы. Вставьте фото с заголовками и всеми столбцами.')
+    header_bottom, columns = header
+    row_edges = [line for line in lines if line >= header_bottom]
+    if len(row_edges) < 2:
+        raise ValueError('В таблице не найдены строки заказов.')
+    if len(row_edges) > 101:
+        raise ValueError('На одном фото можно распознать не больше 100 элитных заказов.')
+    rows = []
+    for top, bottom in zip(row_edges, row_edges[1:]):
+        if bottom - top < 7:
+            continue
+        cells = []
+        # Quantity through agent only: invoice/index/notes are never OCRed.
+        for left, right in list(zip(columns, columns[1:]))[-6:-1]:
+            crop = image.crop((round((left + 2) / scale), round((top + 2) / scale),
+                round((right - 1) / scale), round((bottom - 1) / scale)))
+            if crop.width < 1 or crop.height < 1:
+                raise ValueError('Не удалось выделить ячейки таблицы.')
+            gray = ImageOps.grayscale(crop)
+            histogram = gray.histogram()
+            background = max(range(256), key=histogram.__getitem__)
+            # Green rows have little contrast. Remove the cell background
+            # before scaling so thin text survives Tesseract binarization.
+            gray = gray.point(lambda value: 0 if value < max(1, background - 20) else 255)
+            factor = max(2, min(6, 150 / gray.height))
+            gray = gray.resize((round(gray.width * factor), round(gray.height * factor)))
+            gray = ImageOps.expand(gray, border=8, fill='white')
+            encoded = io.BytesIO()
+            gray.save(encoded, format='PNG')
+            result = subprocess.run(['tesseract', 'stdin', 'stdout', '-l', 'rus+eng', '--psm', '6'],
+                input=encoded.getvalue(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=25, check=True)
+            cells.append(result.stdout.decode('utf-8').strip())
+        if any(cells):
+            rows.append(cells)
+    return rows
+
+
+def dispatch_elite_drafts(rows, work_date):
+    drafts = []
+    for quantity, arrival_text, route, deceased, agent in rows:
+        # Never infer headcount from the row colour or a service code.
+        count_match = re.search(r'(?<!\d)([46])(?!\d)', quantity)
+        if not count_match:
+            raise ValueError(f'Строка {len(drafts)+1}: не распознано количество 4 или 6 человек. Проверьте качество фото.')
+        clock = re.search(r'(?<!\d)([0-2]?\d)\s*[:.]\s*([0-5]\d)(?!\d)', arrival_text)
+        arrival = None
+        if clock and int(clock[1]) < 24:
+            arrival = time(int(clock[1]), int(clock[2]))
+        issue = (datetime.combine(date.fromisoformat(work_date), arrival) + timedelta(minutes=30)).time() if arrival else None
+        drafts.append(dict(work_date=work_date, category='elite',
+            team_size=int(count_match[1]),
+            arrival_time=arrival.strftime('%H:%M') if arrival else '',
+            issue_time=issue.strftime('%H:%M') if issue else '',
+            route=' '.join(route.split()), deceased_name=' '.join(deceased.split()),
+            agent_name=' '.join(agent.split()), agent_phone='', organization='ГБУ'))
+    return drafts
+
+
 @app.post("/api/gbu/ocr")
 async def gbu_ocr(
     file: UploadFile = File(...),
     work_date: str = Form(...),
     db: Session = Depends(get_db),
     user: TelegramUser = Depends(require_admin),
+    import_category: str = Form('auto'),
 ):
     try:
         datetime.strptime(work_date, "%Y-%m-%d")
     except ValueError as exc:
         raise HTTPException(422, "Укажите дату заказов ГБУ") from exc
 
+    if import_category not in ('auto', 'standard', 'elite'):
+        raise HTTPException(422, 'Выберите Стандарт или Элит')
+    if import_category != 'auto':
+        dispatch_guard(db, user)
     try:
         content = await file.read()
-        raw, drafts = parse_gbu_table_image(content, work_date, lang="rus+eng")
+        if import_category == 'elite':
+            cells = dispatch_elite_table_cells(content)
+            raw = '\n'.join(' | '.join(row) for row in cells)
+            drafts = dispatch_elite_drafts(cells, work_date)
+        else:
+            raw, drafts = parse_gbu_table_image(content, work_date, lang="rus+eng")
+            if import_category == 'standard':
+                for draft in drafts:
+                    draft['category'] = 'standard'
     except Exception as exc:
         raise HTTPException(422, f"Не удалось распознать таблицу ГБУ: {exc}") from exc
 
@@ -3467,7 +3581,7 @@ async def gbu_ocr(
     return {
         "raw_text": raw,
         "drafts": drafts,
-        "warning": "Таблица прочитана по отдельным ячейкам: первые 2 столбца и правый служебный код игнорируются; время = быть, выдача = +30 минут; белый состав = 4, зелёный = 6. Проверьте черновики перед сохранением.",
+        "warning": ("Элит: количество взято из отдельной ячейки; время прибытия из таблицы, выдача через 30 минут. Счёт, служебные номера и примечание исключены. Проверьте ФИО и маршрут." if import_category == 'elite' else "Таблица прочитана по отдельным ячейкам: первые 2 столбца и правый служебный код игнорируются; время = быть, выдача = +30 минут; белый состав = 4, зелёный = 6. Проверьте черновики перед сохранением."),
     }
 
 
@@ -9280,6 +9394,8 @@ def owner_brigade_control(work_date: date, db: Session = Depends(get_db),
             'second_photos': sum(bool(item['second_received']) for item in entries),
             'completed': sum(item['completed'] for item in entries)}
     totals['all'] = {field: totals['private'][field] + totals['gbu'][field] for field in totals['private']}
+    if _is_cabinet_owner(db, user.id):
+        items.sort(key=dispatch_gbu_elite_priority)
     return JSONResponse({'work_date': work_date.isoformat(), 'items': items, 'totals': totals,
         'order_completion': (dispatch_control_completion(db, work_date) if _is_cabinet_owner(db,user.id) else None) or order_completion_data(db, work_date),
         'updated_at': datetime.now(MOSCOW).isoformat()},
@@ -13555,6 +13671,15 @@ def dispatch_rows(db, day):
     return list(db.scalars(select(Order).where(Order.work_date == day, Order.status != 'cancelled').order_by(Order.id)))
 
 
+def dispatch_gbu_elite_priority(item):
+    if isinstance(item, dict):
+        source = item.get('source')
+        category = item.get('category') or (item.get('order_spec') or {}).get('category')
+    else:
+        source, category = item.source, item.category
+    return 0 if source == 'gbu' and category == 'elite' else 1
+
+
 def dispatch_assignments(db, order):
     return list(db.scalars(select(Assignment).where(Assignment.order_id == order.id).options(selectinload(Assignment.employee))))
 
@@ -13650,6 +13775,10 @@ def dispatch_add_blank(data: DispatchBlankInput, db: Session = Depends(get_db), 
 def dispatch_board_data(db, day):
     rows = dispatch_rows(db, day)
     mapping,empty=dispatch_slot_layout(db,day,rows)
+    # Presentation order is independent of the persistent daily numbers.
+    gbu_rows = iter(sorted((order for order in rows if order.source == 'gbu'),
+        key=lambda order: (dispatch_gbu_elite_priority(order), mapping[order.id])))
+    rows = [next(gbu_rows) if order.source == 'gbu' else order for order in rows]
     numbers = {'private': 0, 'gbu': 0}
     items = []
     for order in rows:
@@ -14057,6 +14186,8 @@ body.dispatch-actions-open .topbar,body.dispatch-actions-open #dispatcherOrderOv
 #dispatchGbuImport .dispatch-import-tools,#dispatchGbuImport .dispatch-import-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;align-items:stretch}
 #dispatchGbuImport .dispatch-import-file,#dispatchGbuImport button{display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:100%;min-width:0;min-height:34px;margin:0;padding:6px;font-size:12px;line-height:1.2;border:1px solid var(--line);border-radius:9px;background:var(--panel2);color:var(--text)}
 #dispatchGbuImport .dispatch-import-file input{display:none}
+#dispatchGbuImport .dispatch-import-modes{margin-bottom:6px}
+#dispatchGbuImport [data-import-mode][aria-pressed="true"]{border-color:var(--gold);color:var(--text);font-weight:700;background:var(--panel)}
 #dispatchGbuImport .dispatch-import-paste{margin-top:6px;padding:10px;border:1px dashed var(--line);border-radius:9px;font-size:12px;line-height:1.4;color:var(--muted);white-space:normal;overflow-wrap:anywhere;min-height:34px;box-sizing:border-box;-webkit-user-select:text;user-select:text}
 #dispatchGbuImport .dispatch-import-paste:focus{outline:2px solid var(--gold);outline-offset:1px}
 #dispatchGbuImport .dispatch-import-actions{position:sticky;bottom:-10px;padding:7px 0;background:var(--panel);z-index:2}
@@ -14138,7 +14269,8 @@ function dispatchMini(o){return `<button type="button" class="dispatch-mini" dat
 function dispatchColumnCards(data,source){
  const entries=data.items.filter(o=>o.source===source).map(o=>({number:o.number,order:o}));
  entries.push(...(data.empty_slots?.[source]||[]).map(number=>({number})));
- return entries.sort((a,b)=>a.number-b.number).map(entry=>entry.order?dispatchMini(entry.order):`<button type="button" class="dispatch-mini dispatch-blank" data-plan-blank="${entry.number}" data-plan-source="${source}"><header><b>№${entry.number}</b><span></span>📝</header><p>Заполнить заказ</p></button>`).join('');
+ const priority=entry=>source==='gbu'?(entry.order?(entry.order.category==='elite'?0:1):2):0;
+ return entries.sort((a,b)=>priority(a)-priority(b)||a.number-b.number).map(entry=>entry.order?dispatchMini(entry.order):`<button type="button" class="dispatch-mini dispatch-blank" data-plan-blank="${entry.number}" data-plan-source="${source}"><header><b>№${entry.number}</b><span></span>📝</header><p>Заполнить заказ</p></button>`).join('');
 }
 async function loadDispatchBoard(){
  const ticket=++dispatchLoad,day=state.selectedDate,root=qs('#dispatchActionsView');
@@ -14171,9 +14303,9 @@ function dispatchImportAgentName(value){
 }
 async function openDispatchGbuImport(){
  const day=state.selectedDate,board=dispatchBoard?.work_date===day?dispatchBoard:null;
- showModal('Импорт заказов ГБУ',`<div id="dispatchGbuImport"><p class="dispatch-import-date">${esc(dispatchShortDay(day))}</p><div class="dispatch-import-tools"><label class="dispatch-import-file">📷 Выбрать фото<input type="file" data-import-file accept="image/*"></label><button type="button" data-import-ocr>Распознать фото</button></div><div class="dispatch-import-paste" data-import-paste contenteditable="true" role="textbox" aria-label="Вставить скопированное фото" spellcheck="false">Нажмите и удерживайте здесь → Вставить. На компьютере: Ctrl+V / ⌘V.</div><p data-import-status role="status"></p><div data-import-result></div></div>`);
+ showModal('Импорт заказов ГБУ',`<div id="dispatchGbuImport"><p class="dispatch-import-date">${esc(dispatchShortDay(day))}</p><div class="dispatch-import-tools dispatch-import-modes" role="group" aria-label="Категория фото"><button type="button" data-import-mode="standard" aria-pressed="true">Вставить Стандарт</button><button type="button" data-import-mode="elite" aria-pressed="false">Вставить Элит</button></div><div class="dispatch-import-tools"><label class="dispatch-import-file">📷 Выбрать фото<input type="file" data-import-file accept="image/*"></label><button type="button" data-import-ocr>Распознать фото</button></div><div class="dispatch-import-paste" data-import-paste contenteditable="true" role="textbox" aria-label="Вставить скопированное фото" spellcheck="false">Нажмите и удерживайте здесь → Вставить. На компьютере: Ctrl+V / ⌘V.</div><p data-import-status role="status"></p><div data-import-result></div></div>`);
  const root=qs('#dispatchGbuImport'),modal=qs('#modal'),live=()=>qs('#dispatchGbuImport')===root&&!modal.classList.contains('hidden');
- let file=null,busy=false,requestKey=dispatchToken();
+ let file=null,busy=false,importCategory='standard',requestKey=dispatchToken();
  function lock(value){busy=value;qsa('input,select,textarea,button',root).forEach(el=>el.disabled=value);qs('[data-import-paste]',root).setAttribute('contenteditable',String(!value));qs('[data-import-ocr]',root).textContent=value?'Обработка…':'Распознать фото'}
  function renumber(){const rows=qsa('.gbu-draft',root),numbers=dispatchImportNumbers(board,rows.length);rows.forEach((row,i)=>qs('[data-import-number]',row).textContent='Заказ ГБУ №'+numbers[i]);return numbers}
  function rowHtml(d,i){
@@ -14199,10 +14331,18 @@ return `<article class="gbu-draft dispatch-import-card" data-i="${i}"><header><b
  async function recognize(){
   if(busy||!live())return;if(!file){qs('[data-import-status]',root).textContent='Выберите или вставьте фото';return}
   lock(true);qs('[data-import-status]',root).textContent='Распознаю все строки таблицы…';qs('[data-import-result]',root).replaceChildren();
-  const fd=new FormData();fd.append('file',file);fd.append('work_date',day);
+  const fd=new FormData();fd.append('file',file);fd.append('work_date',day);fd.append('import_category',importCategory);
   try{const result=await api('/api/gbu/ocr',{method:'POST',body:fd});if(!live())return;draw(result);qs('[data-import-status]',root).textContent=(result.drafts||[]).length?'Проверьте заказы перед сохранением':'Строки не найдены. Попробуйте более чёткое фото или добавьте строки вручную.'}catch(error){if(live())qs('[data-import-status]',root).textContent=error.message}finally{if(live())lock(false)}
  }
  qs('[data-import-file]',root).onchange=event=>{file=event.target.files?.[0]||null;if(file)recognize()};qs('[data-import-ocr]',root).onclick=recognize;
+ qsa('[data-import-mode]',root).forEach(button=>button.onclick=()=>{
+  if(busy)return;
+  if(importCategory!==button.dataset.importMode){file=null;qs('[data-import-file]',root).value=''}
+  importCategory=button.dataset.importMode;
+  qsa('[data-import-mode]',root).forEach(item=>item.setAttribute('aria-pressed',String(item===button)));
+  qs('[data-import-status]',root).textContent=(importCategory==='elite'?'Элит':'Стандарт')+': вставьте фото в область ниже или нажмите «Выбрать фото».';
+  qs('[data-import-paste]',root).focus?.();
+ });
  root.oninput=event=>{if(event.target.closest('[data-import-paste]')){qs('[data-import-paste]',root).textContent='Нажмите и удерживайте здесь → Вставить. На компьютере: Ctrl+V / ⌘V.';return}if(!event.target.matches('[data-k=issue_time]'))return;const row=event.target.closest('.gbu-draft'),parts=event.target.value.split(':').map(Number);if(parts.length!==2||parts.some(x=>!Number.isFinite(x)))return;const minutes=(parts[0]*60+parts[1]-30+1440)%1440;qs('[data-k=arrival_time]',row).value=String(Math.floor(minutes/60)).padStart(2,'0')+':'+String(minutes%60).padStart(2,'0')};
  modal.onpaste=event=>{
   if(!live())return;
