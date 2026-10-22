@@ -14057,6 +14057,8 @@ body.dispatch-actions-open .topbar,body.dispatch-actions-open #dispatcherOrderOv
 #dispatchGbuImport .dispatch-import-tools,#dispatchGbuImport .dispatch-import-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;align-items:stretch}
 #dispatchGbuImport .dispatch-import-file,#dispatchGbuImport button{display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:100%;min-width:0;min-height:34px;margin:0;padding:6px;font-size:12px;line-height:1.2;border:1px solid var(--line);border-radius:9px;background:var(--panel2);color:var(--text)}
 #dispatchGbuImport .dispatch-import-file input{display:none}
+#dispatchGbuImport .dispatch-import-paste{margin-top:6px;padding:10px;border:1px dashed var(--line);border-radius:9px;font-size:12px;line-height:1.4;color:var(--muted);white-space:normal;overflow-wrap:anywhere;min-height:34px;box-sizing:border-box;-webkit-user-select:text;user-select:text}
+#dispatchGbuImport .dispatch-import-paste:focus{outline:2px solid var(--gold);outline-offset:1px}
 #dispatchGbuImport .dispatch-import-actions{position:sticky;bottom:-10px;padding:7px 0;background:var(--panel);z-index:2}
 #dispatchGbuImport button.primary{background:var(--gold);color:var(--bg);font-weight:700}
 #dispatchGbuImport [data-import-status]{font-size:11px;line-height:1.3;margin:6px 0;overflow-wrap:anywhere}
@@ -14169,10 +14171,10 @@ function dispatchImportAgentName(value){
 }
 async function openDispatchGbuImport(){
  const day=state.selectedDate,board=dispatchBoard?.work_date===day?dispatchBoard:null;
- showModal('Импорт заказов ГБУ',`<div id="dispatchGbuImport"><p class="dispatch-import-date">${esc(dispatchShortDay(day))}</p><div class="dispatch-import-tools"><label class="dispatch-import-file">📷 Выбрать фото<input type="file" data-import-file accept="image/*"></label><button type="button" data-import-ocr>Распознать фото</button></div><p data-import-status role="status"></p><div data-import-result></div></div>`);
+ showModal('Импорт заказов ГБУ',`<div id="dispatchGbuImport"><p class="dispatch-import-date">${esc(dispatchShortDay(day))}</p><div class="dispatch-import-tools"><label class="dispatch-import-file">📷 Выбрать фото<input type="file" data-import-file accept="image/*"></label><button type="button" data-import-ocr>Распознать фото</button></div><div class="dispatch-import-paste" data-import-paste contenteditable="true" role="textbox" aria-label="Вставить скопированное фото" spellcheck="false">Нажмите и удерживайте здесь → Вставить. На компьютере: Ctrl+V / ⌘V.</div><p data-import-status role="status"></p><div data-import-result></div></div>`);
  const root=qs('#dispatchGbuImport'),modal=qs('#modal'),live=()=>qs('#dispatchGbuImport')===root&&!modal.classList.contains('hidden');
  let file=null,busy=false,requestKey=dispatchToken();
- function lock(value){busy=value;qsa('input,select,textarea,button',root).forEach(el=>el.disabled=value);qs('[data-import-ocr]',root).textContent=value?'Обработка…':'Распознать фото'}
+ function lock(value){busy=value;qsa('input,select,textarea,button',root).forEach(el=>el.disabled=value);qs('[data-import-paste]',root).setAttribute('contenteditable',String(!value));qs('[data-import-ocr]',root).textContent=value?'Обработка…':'Распознать фото'}
  function renumber(){const rows=qsa('.gbu-draft',root),numbers=dispatchImportNumbers(board,rows.length);rows.forEach((row,i)=>qs('[data-import-number]',row).textContent='Заказ ГБУ №'+numbers[i]);return numbers}
  function rowHtml(d,i){
   const field=(key,label,value='',extra='',kind='')=>`<label class="dispatch-import-field ${kind}"><span>${label}</span><input data-k="${key}" value="${esc(value||'')}" ${extra}></label>`;
@@ -14201,8 +14203,17 @@ return `<article class="gbu-draft dispatch-import-card" data-i="${i}"><header><b
   try{const result=await api('/api/gbu/ocr',{method:'POST',body:fd});if(!live())return;draw(result);qs('[data-import-status]',root).textContent=(result.drafts||[]).length?'Проверьте заказы перед сохранением':'Строки не найдены. Попробуйте более чёткое фото или добавьте строки вручную.'}catch(error){if(live())qs('[data-import-status]',root).textContent=error.message}finally{if(live())lock(false)}
  }
  qs('[data-import-file]',root).onchange=event=>{file=event.target.files?.[0]||null;if(file)recognize()};qs('[data-import-ocr]',root).onclick=recognize;
- root.oninput=event=>{if(!event.target.matches('[data-k=issue_time]'))return;const row=event.target.closest('.gbu-draft'),parts=event.target.value.split(':').map(Number);if(parts.length!==2||parts.some(x=>!Number.isFinite(x)))return;const minutes=(parts[0]*60+parts[1]-30+1440)%1440;qs('[data-k=arrival_time]',row).value=String(Math.floor(minutes/60)).padStart(2,'0')+':'+String(minutes%60).padStart(2,'0')};
- modal.onpaste=event=>{if(!live()||busy)return;const item=[...(event.clipboardData?.items||[])].find(x=>x.type.startsWith('image/'));if(item){event.preventDefault();file=item.getAsFile();recognize()}};
+ root.oninput=event=>{if(event.target.closest('[data-import-paste]')){qs('[data-import-paste]',root).textContent='Нажмите и удерживайте здесь → Вставить. На компьютере: Ctrl+V / ⌘V.';return}if(!event.target.matches('[data-k=issue_time]'))return;const row=event.target.closest('.gbu-draft'),parts=event.target.value.split(':').map(Number);if(parts.length!==2||parts.some(x=>!Number.isFinite(x)))return;const minutes=(parts[0]*60+parts[1]-30+1440)%1440;qs('[data-k=arrival_time]',row).value=String(Math.floor(minutes/60)).padStart(2,'0')+':'+String(minutes%60).padStart(2,'0')};
+ modal.onpaste=event=>{
+  if(!live())return;
+  const destination=event.target?.closest?.('[data-import-paste]');
+  if(destination)event.preventDefault();
+  if(busy)return;
+  const item=[...(event.clipboardData?.items||[])].find(x=>x.type.startsWith('image/'));
+  const image=item?.getAsFile()||[...(event.clipboardData?.files||[])].find(x=>x.type.startsWith('image/'));
+  if(image){event.preventDefault();file=image;recognize()}
+  else if(destination)qs('[data-import-status]',root).textContent='В буфере нет фото. Скопируйте само изображение или нажмите «Выбрать фото».';
+ };
 }
 async function openDispatchEditor(order,source='private',slotNumber=null){
  source=order?.source||source;const day=order?.work_date||state.selectedDate,key=dispatchToken(),route=order?.route_fields||{};
