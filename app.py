@@ -3427,10 +3427,63 @@ def bot_order_tea_report(public_id: str, data: BrigadierTeaReport, db: Session =
 
 # ---------- GBU import ----------
 
+def dispatch_elite_read_cell(crop, kind):
+    """Compare real OCR readings; never invent a surname to fit a dictionary."""
+    import csv
+    import io
+    import subprocess
+    from difflib import SequenceMatcher
+    from PIL import Image, ImageOps
+
+    gray = ImageOps.grayscale(crop)
+    histogram = gray.histogram()
+    background = max(range(256), key=histogram.__getitem__)
+    factor = max(2, min(6, 150 / gray.height))
+    size = (round(gray.width * factor), round(gray.height * factor))
+    numeric = kind in ('quantity', 'arrival_time')
+    if numeric:
+        variants = [gray.point(lambda value: 0 if value < max(1, background - 20) else 255).resize(size)]
+    else:
+        # Keep antialiased character strokes in the main reading. A hard
+        # threshold was destroying small Cyrillic letters on coloured rows.
+        variants = [ImageOps.autocontrast(gray.resize(size, Image.Resampling.LANCZOS), cutoff=2),
+            ImageOps.autocontrast(crop.getchannel('G').resize(size, Image.Resampling.LANCZOS), cutoff=2),
+            gray.point(lambda value: 0 if value < max(1, background - 15) else 255).resize(size)]
+    readings = []
+    for variant in variants:
+        encoded = io.BytesIO()
+        ImageOps.expand(variant, border=12, fill='white').save(encoded, format='PNG')
+        result = subprocess.run(['tesseract', 'stdin', 'stdout', '-l', 'rus+eng' if numeric else 'rus',
+            '--psm', '6', '-c', 'tessedit_create_tsv=1'], input=encoded.getvalue(), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=25, check=True)
+        words = [word for word in csv.DictReader(io.StringIO(result.stdout.decode('utf-8')), delimiter='\t')
+            if word.get('level') == '5' and word.get('text', '').strip()]
+        lines = {}
+        for word in words:
+            key = (word['block_num'], word['par_num'], word['line_num'])
+            lines.setdefault(key, []).append(word['text'].strip())
+        text_value = '\n'.join(' '.join(line) for line in lines.values())
+        weight = sum(len(word['text']) for word in words)
+        confidence = sum(max(0, float(word['conf'])) * len(word['text']) for word in words) / weight if weight else 0
+        score = confidence
+        if kind == 'route':
+            normalized = dispatch_import_route_fields({'route': text_value})
+            score += 8 * bool(normalized['cemetery']) + min(len(text_value.split()), 10)
+        elif kind in ('deceased_name', 'agent_name'):
+            score -= 15 * max(0, 3 - len(text_value.split()))
+        readings.append({'text': text_value, 'confidence': round(confidence, 1), 'score': score})
+    best = max(readings, key=lambda reading: reading['score'])
+    normalize = lambda value: ' '.join(value.casefold().replace('ё', 'е').split())
+    disagreement = any(SequenceMatcher(None, normalize(best['text']), normalize(reading['text'])).ratio() < .94
+        for reading in readings if reading['text'])
+    return {'text': best['text'], 'confidence': best['confidence'],
+        'needs_review': not numeric and (crop.height < 45 or best['confidence'] < 82 or disagreement)}
+
+
 def dispatch_elite_table_cells(content):
     """Read the elite grid by cells, excluding service columns before OCR."""
     import io
-    import subprocess
+    import base64
     from PIL import Image, ImageOps
 
     image = ImageOps.exif_transpose(Image.open(io.BytesIO(content))).convert('RGB')
@@ -3478,36 +3531,36 @@ def dispatch_elite_table_cells(content):
     for top, bottom in zip(row_edges, row_edges[1:]):
         if bottom - top < 7:
             continue
-        cells = []
+        cells, review_fields, source_cells, confidence = [], [], {}, {}
         # Quantity through agent only: invoice/index/notes are never OCRed.
-        for left, right in list(zip(columns, columns[1:]))[-6:-1]:
+        kinds = ('quantity', 'arrival_time', 'route', 'deceased_name', 'agent_name')
+        for kind, (left, right) in zip(kinds, list(zip(columns, columns[1:]))[-6:-1]):
             crop = image.crop((round((left + 2) / scale), round((top + 2) / scale),
                 round((right - 1) / scale), round((bottom - 1) / scale)))
             if crop.width < 1 or crop.height < 1:
                 raise ValueError('Не удалось выделить ячейки таблицы.')
-            gray = ImageOps.grayscale(crop)
-            histogram = gray.histogram()
-            background = max(range(256), key=histogram.__getitem__)
-            # Green rows have little contrast. Remove the cell background
-            # before scaling so thin text survives Tesseract binarization.
-            gray = gray.point(lambda value: 0 if value < max(1, background - 20) else 255)
-            factor = max(2, min(6, 150 / gray.height))
-            gray = gray.resize((round(gray.width * factor), round(gray.height * factor)))
-            gray = ImageOps.expand(gray, border=8, fill='white')
-            encoded = io.BytesIO()
-            gray.save(encoded, format='PNG')
-            result = subprocess.run(['tesseract', 'stdin', 'stdout', '-l', 'rus+eng', '--psm', '6'],
-                input=encoded.getvalue(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                timeout=25, check=True)
-            cells.append(result.stdout.decode('utf-8').strip())
+            reading = dispatch_elite_read_cell(crop, kind)
+            cells.append(reading['text'])
+            confidence[kind] = reading['confidence']
+            if reading['needs_review']:
+                review_fields.append(kind)
+            if kind in ('route', 'deceased_name', 'agent_name'):
+                preview = crop.copy()
+                preview.thumbnail((800, 180))
+                encoded = io.BytesIO()
+                preview.save(encoded, format='PNG')
+                source_cells[kind] = 'data:image/png;base64,' + base64.b64encode(encoded.getvalue()).decode('ascii')
         if any(cells):
-            rows.append(cells)
+            rows.append({'cells': cells, 'ocr_review_fields': review_fields,
+                'source_cells': source_cells, 'ocr_confidence': confidence})
     return rows
 
 
 def dispatch_elite_drafts(rows, work_date):
     drafts = []
-    for quantity, arrival_text, route, deceased, agent in rows:
+    for row in rows:
+        metadata = row if isinstance(row, dict) else {}
+        quantity, arrival_text, route, deceased, agent = metadata.get('cells', row)
         # Never infer headcount from the row colour or a service code.
         count_match = re.search(r'(?<!\d)([46])(?!\d)', quantity)
         if not count_match:
@@ -3521,8 +3574,9 @@ def dispatch_elite_drafts(rows, work_date):
             team_size=int(count_match[1]),
             arrival_time=arrival.strftime('%H:%M') if arrival else '',
             issue_time=issue.strftime('%H:%M') if issue else '',
-            route=' '.join(route.split()), deceased_name=' '.join(deceased.split()),
-            agent_name=' '.join(agent.split()), agent_phone='', organization='ГБУ'))
+            route=route.strip(), deceased_name=' '.join(deceased.split()),
+            agent_name=' '.join(agent.split()), agent_phone='', organization='ГБУ',
+            **{key: metadata[key] for key in ('source_cells', 'ocr_review_fields', 'ocr_confidence') if key in metadata}))
     return drafts
 
 
@@ -3547,7 +3601,7 @@ async def gbu_ocr(
         content = await file.read()
         if import_category == 'elite':
             cells = dispatch_elite_table_cells(content)
-            raw = '\n'.join(' | '.join(row) for row in cells)
+            raw = '\n'.join(' | '.join(row['cells']) for row in cells)
             drafts = dispatch_elite_drafts(cells, work_date)
         else:
             raw, drafts = parse_gbu_table_image(content, work_date, lang="rus+eng")
@@ -3564,7 +3618,13 @@ async def gbu_ocr(
     for draft in drafts:
         draft.update(dispatch_import_route_fields(draft))
         match = best_agent_match(draft.get("agent_name", ""), contact_pairs)
-        if match and match[2] >= 0.78:
+        # Common first/patronymic names are insufficient to identify an agent
+        # when the surname itself was uncertain in an elite photograph.
+        elite_name = re.findall(r'[а-яё]+', draft.get('agent_name', '').casefold())
+        matched_name = re.findall(r'[а-яё]+', str(match[0]).casefold()) if match else []
+        elite_match = (import_category != 'elite' or (match and match[2] >= .92 and elite_name and matched_name
+            and elite_name[0] == matched_name[0]))
+        if match and match[2] >= 0.78 and elite_match:
             draft["agent_name"] = match[0]
             draft["agent_phone"] = match[1]
             draft["agent_match_confidence"] = round(min(match[2], 1.0), 2)
@@ -3575,7 +3635,7 @@ async def gbu_ocr(
         kind="gbu_ocr",
         created_by_tg_id=user.id,
         raw_text=raw,
-        result_json=json.dumps(drafts, ensure_ascii=False, default=str),
+        result_json=json.dumps([{key: value for key, value in draft.items() if key != 'source_cells'} for draft in drafts], ensure_ascii=False, default=str),
     ))
     db.commit()
     return {
@@ -13871,6 +13931,7 @@ def dispatch_create(data: DispatchPlanInput, db: Session = Depends(get_db), user
 
 
 def dispatch_import_route_fields(draft):
+    from difflib import SequenceMatcher
     keys=('morgue','church','cemetery')
     # Explicitly reviewed fields, including deliberately cleared values, win.
     if all(key in draft for key in keys):
@@ -13878,6 +13939,14 @@ def dispatch_import_route_fields(draft):
     raw=str(draft.get('route') or '').strip()
     raw=re.sub(r'\b(?:кпладбище|кладбише|кладбнще)\b',
         lambda match:'КЛАДБИЩЕ' if match.group().isupper() else 'кладбище',raw,flags=re.I)
+    def route_term(match):
+        word = match.group()
+        # Correct only a generic place type, never a cemetery/proper name.
+        similar = SequenceMatcher(None, word.casefold(), 'кладбище').ratio()
+        if word.casefold().startswith(('кл', 'кпл')) and len(word) >= 7 and (similar >= .72 or (similar >= .62 and word.casefold().endswith(('ще', 'ше')))):
+            return 'КЛАДБИЩЕ' if word.isupper() else 'кладбище'
+        return word
+    raw=re.sub(r'[А-ЯЁа-яё]+',route_term,raw)
     parts={key:[] for key in keys}
     for segment in re.split(r'[;\n]+',raw):
         segment=segment.strip(' ,');
@@ -13893,7 +13962,15 @@ def dispatch_import_route_fields(draft):
         else:
             # Preserve unclassified text for review rather than dropping it.
             parts['morgue'].append(re.sub(r'^морг\s*:\s*','',segment,flags=re.I))
-    return {key:str(draft[key] or '').strip() if key in draft else '; '.join(parts[key]) for key in keys}
+    def unique(values):
+        result, seen = [], set()
+        for value in values:
+            cleaned = value.strip(' ,;:')
+            marker = ' '.join(cleaned.casefold().replace('ё','е').split())
+            if marker and marker not in seen:
+                result.append(cleaned); seen.add(marker)
+        return '; '.join(result)
+    return {key:str(draft[key] or '').strip() if key in draft else unique(parts[key]) for key in keys}
 
 
 @app.post('/api/dispatch-board/gbu-import')
@@ -14190,6 +14267,11 @@ body.dispatch-actions-open .topbar,body.dispatch-actions-open #dispatcherOrderOv
 #dispatchGbuImport [data-import-mode][aria-pressed="true"]{border-color:var(--gold);color:var(--text);font-weight:700;background:var(--panel)}
 #dispatchGbuImport .dispatch-import-paste{margin-top:6px;padding:10px;border:1px dashed var(--line);border-radius:9px;font-size:12px;line-height:1.4;color:var(--muted);white-space:normal;overflow-wrap:anywhere;min-height:34px;box-sizing:border-box;-webkit-user-select:text;user-select:text}
 #dispatchGbuImport .dispatch-import-paste:focus{outline:2px solid var(--gold);outline-offset:1px}
+#dispatchGbuImport .dispatch-import-uncertain input{border-color:var(--gold);outline:1px solid var(--gold)}
+#dispatchGbuImport .dispatch-import-review{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--gold);margin:7px 0}
+#dispatchGbuImport .dispatch-import-review input{width:18px;height:18px;min-height:18px;flex-shrink:0}
+#dispatchGbuImport .dispatch-import-preview{margin:6px 0;font-size:11px}
+#dispatchGbuImport .dispatch-import-preview img{display:block;width:100%;height:auto;max-height:220px;object-fit:contain;object-position:left;background:white;border-radius:4px;margin:3px 0 8px}
 #dispatchGbuImport .dispatch-import-actions{position:sticky;bottom:-10px;padding:7px 0;background:var(--panel);z-index:2}
 #dispatchGbuImport button.primary{background:var(--gold);color:var(--bg);font-weight:700}
 #dispatchGbuImport [data-import-status]{font-size:11px;line-height:1.3;margin:6px 0;overflow-wrap:anywhere}
@@ -14318,12 +14400,22 @@ return `<article class="gbu-draft dispatch-import-card" data-i="${i}"><header><b
  function draw(result){
   requestKey=dispatchToken();const area=qs('[data-import-result]',root),drafts=result.drafts||[];
   area.innerHTML=`<details class="dispatch-import-help"><summary>Текст и правила распознавания</summary><p>${esc(result.warning||'')}</p><pre>${esc(result.raw_text||'')}</pre></details><h4>Распознано заказов: ${drafts.length}</h4><div data-import-rows>${drafts.map(rowHtml).join('')}</div><div class="dispatch-import-actions"><button type="button" data-import-add>＋ Добавить заказ</button><button type="button" class="primary" data-import-save>Сохранить все</button></div>`;
+  drafts.forEach((draft,index)=>{
+   const row=qsa('.gbu-draft',root)[index],review=draft.ocr_review_fields||[];
+   const names={deceased_name:'ФИО умершего',route:'Маршрут',agent_name:'Агент'};
+   review.forEach(key=>(key==='route'?['morgue','church','cemetery']:[key]).forEach(field=>qs(`[data-k="${field}"]`,row)?.closest('label')?.classList.add('dispatch-import-uncertain')));
+   const images=Object.entries(draft.source_cells||{}).filter(([key,value])=>names[key]&&typeof value==='string'&&/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(value));
+   if(images.length)row.insertAdjacentHTML('beforeend',`<details class="dispatch-import-preview"><summary>Сверить с исходным фото</summary>${images.map(([key,value])=>`<b>${names[key]}</b><img src="${value}" alt="Исходная ячейка: ${names[key]}">`).join('')}</details>`);
+   if(review.length)row.insertAdjacentHTML('beforeend',`<label class="dispatch-import-review"><input type="checkbox" data-import-reviewed>Проверил по фото: ${review.map(key=>names[key]||key).map(esc).join(', ')}</label>`);
+  });
   renumber();qs('[data-import-add]',root).onclick=()=>{const rows=qs('[data-import-rows]',root);rows.insertAdjacentHTML('beforeend',rowHtml({category:'standard',team_size:4},qsa('.gbu-draft',rows).length));renumber()};
   qs('[data-import-save]',root).onclick=async()=>{
    if(busy)return;const numbers=renumber(),rows=qsa('.gbu-draft',root);
    const items=rows.map(row=>{const get=k=>qs(`[data-k="${k}"]`,row)?.value||'';const agent=qs('[data-k=agent_name]',row);return {work_date:day,category:get('category'),team_size:Number(get('team_size')),agent_name:agent.value===agent.dataset.agentDisplay?agent.dataset.agentOriginal:get('agent_name'),agent_phone:get('agent_phone'),deceased_name:get('deceased_name').trim(),issue_time:get('issue_time'),arrival_time:get('arrival_time')||null,morgue:get('morgue'),church:get('church'),cemetery:get('cemetery'),route:qs('[data-import-raw-route]',row)?.textContent||'',organization:'ГБУ'}});
    const invalid=items.map((item,i)=>!item.deceased_name||!/^\d{2}:\d{2}$/.test(item.issue_time)?numbers[i]:null).filter(n=>n!==null);
    if(!items.length||invalid.length){qs('[data-import-status]',root).textContent=!items.length?'Добавьте хотя бы один заказ':'Заполните фамилию и время выдачи в заказах №'+invalid.join(', №');return}
+   const unchecked=rows.map((row,index)=>qs('[data-import-reviewed]',row)&&!qs('[data-import-reviewed]',row).checked?numbers[index]:null).filter(number=>number!==null);
+   if(unchecked.length){qs('[data-import-status]',root).textContent='Сверьте выделенные поля с исходным фото и отметьте проверку в заказах №'+unchecked.join(', №');return}
    lock(true);qs('[data-import-status]',root).textContent='Сохраняю все заказы…';
    try{const saved=await api('/api/dispatch-board/gbu-import',{method:'POST',body:JSON.stringify({work_date:day,request_key:requestKey,items})});if(!live())return;closeModal();toast('Добавлено заказов ГБУ: '+saved.items.length);if(state.selectedDate===day)await loadBootstrap(day)}catch(error){if(live())qs('[data-import-status]',root).textContent=error.message}finally{if(live())lock(false)}
   };
