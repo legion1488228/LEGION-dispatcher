@@ -3427,6 +3427,62 @@ def bot_order_tea_report(public_id: str, data: BrigadierTeaReport, db: Session =
 
 # ---------- GBU import ----------
 
+def dispatch_ocr_agent_match(value, contacts, alternatives=()):
+    """Match surname, given name and patronymic separately with an ambiguity margin."""
+    from difflib import SequenceMatcher
+    def tokens(text):
+        text=str(text or '').casefold().translate(str.maketrans('abcehkmoptxy','авсенкмортху')).replace('ё','е')
+        words=re.findall(r'[а-я]+',text)
+        if len(words)==3 and re.search(r'(?:ович|евич|овна|евна|ична|инична)$',words[1]):
+            words=[words[2],words[0],words[1]]
+        return words
+    readings=[tokens(text) for text in [value,*alternatives]]
+    ranked={}
+    for name,phone in contacts:
+        reference=tokens(name)
+        if len(reference)!=3: continue
+        for reading in readings:
+            if len(reading)!=3: continue
+            surname,given,patronymic=[SequenceMatcher(None,a,b).ratio() for a,b in zip(reading,reference)]
+            score=.45*surname+.25*given+.30*patronymic
+            if surname>=.60 and given>=.90 and patronymic>=.82 and score>=.78:
+                key=(name,phone)
+                ranked[key]=max(score,ranked.get(key,0))
+    choices=sorted(ranked.items(),key=lambda item:item[1],reverse=True)
+    if not choices or (len(choices)>1 and choices[0][1]-choices[1][1]<.08): return None
+    (name,phone),score=choices[0]
+    return name,phone,score
+
+
+def dispatch_ocr_route_reference(db, raw):
+    """Reuse a uniquely matching route the owner has already corrected."""
+    from difflib import SequenceMatcher
+    normalize=lambda value:' '.join(str(value or '').casefold().replace('ё','е').split())
+    target=normalize(raw)
+    if not target: return None
+    choices={}
+    plans=db.scalars(select(DispatchPlan).join(Order,Order.id==DispatchPlan.order_id).where(
+        Order.source=='gbu',Order.status!='cancelled').order_by(Order.id.desc()).limit(500))
+    for plan in plans:
+        try: meta=json.loads(plan.payload)
+        except (ValueError,TypeError): continue
+        original=normalize(meta.get('import_raw_route'))
+        fields=meta.get('route_fields')
+        if not original or not isinstance(fields,dict) or not any(fields.values()): continue
+        parsed=dispatch_import_route_fields({'route':meta['import_raw_route']})
+        corrected={key:str(fields.get(key) or '').strip() for key in ('morgue','church','cemetery')}
+        if all(normalize(parsed[key])==normalize(corrected[key]) for key in corrected): continue
+        # Do not confuse the same cemetery served by different hospitals.
+        if re.findall(r'\d+',target)!=re.findall(r'\d+',original): continue
+        score=SequenceMatcher(None,target,original).ratio()
+        if score<.90: continue
+        key=tuple(corrected.values())
+        choices[key]=max(score,choices.get(key,0))
+    ranked=sorted(choices.items(),key=lambda item:item[1],reverse=True)
+    if not ranked or (len(ranked)>1 and ranked[0][1]-ranked[1][1]<.08): return None
+    return dict(zip(('morgue','church','cemetery'),ranked[0][0]))
+
+
 def dispatch_elite_read_cell(crop, kind):
     """Compare real OCR readings; never invent a surname to fit a dictionary."""
     import csv
@@ -3476,7 +3532,7 @@ def dispatch_elite_read_cell(crop, kind):
     normalize = lambda value: ' '.join(value.casefold().replace('ё', 'е').split())
     disagreement = any(SequenceMatcher(None, normalize(best['text']), normalize(reading['text'])).ratio() < .94
         for reading in readings if reading['text'])
-    return {'text': best['text'], 'confidence': best['confidence'],
+    return {'text': best['text'], 'confidence': best['confidence'], 'alternatives':list(dict.fromkeys(reading['text'] for reading in readings if reading['text'])),
         'needs_review': not numeric and (crop.height < 45 or best['confidence'] < 82 or disagreement)}
 
 
@@ -3531,7 +3587,7 @@ def dispatch_elite_table_cells(content):
     for top, bottom in zip(row_edges, row_edges[1:]):
         if bottom - top < 7:
             continue
-        cells, review_fields, source_cells, confidence = [], [], {}, {}
+        cells, review_fields, source_cells, confidence, candidates = [], [], {}, {}, {}
         # Quantity through agent only: invoice/index/notes are never OCRed.
         kinds = ('quantity', 'arrival_time', 'route', 'deceased_name', 'agent_name')
         for kind, (left, right) in zip(kinds, list(zip(columns, columns[1:]))[-6:-1]):
@@ -3542,6 +3598,7 @@ def dispatch_elite_table_cells(content):
             reading = dispatch_elite_read_cell(crop, kind)
             cells.append(reading['text'])
             confidence[kind] = reading['confidence']
+            candidates[kind] = reading.get('alternatives',[])
             if reading['needs_review']:
                 review_fields.append(kind)
             if kind in ('route', 'deceased_name', 'agent_name'):
@@ -3552,7 +3609,7 @@ def dispatch_elite_table_cells(content):
                 source_cells[kind] = 'data:image/png;base64,' + base64.b64encode(encoded.getvalue()).decode('ascii')
         if any(cells):
             rows.append({'cells': cells, 'ocr_review_fields': review_fields,
-                'source_cells': source_cells, 'ocr_confidence': confidence})
+                'source_cells': source_cells, 'ocr_confidence': confidence, 'ocr_candidates': candidates})
     return rows
 
 
@@ -3576,7 +3633,7 @@ def dispatch_elite_drafts(rows, work_date):
             issue_time=issue.strftime('%H:%M') if issue else '',
             route=route.strip(), deceased_name=' '.join(deceased.split()),
             agent_name=' '.join(agent.split()), agent_phone='', organization='ГБУ',
-            **{key: metadata[key] for key in ('source_cells', 'ocr_review_fields', 'ocr_confidence') if key in metadata}))
+            **{key: metadata[key] for key in ('source_cells', 'ocr_review_fields', 'ocr_confidence', 'ocr_candidates') if key in metadata}))
     return drafts
 
 
@@ -3617,14 +3674,14 @@ async def gbu_ocr(
     contact_pairs = [(str(name), str(phone)) for name, phone in contacts]
     for draft in drafts:
         draft.update(dispatch_import_route_fields(draft))
-        match = best_agent_match(draft.get("agent_name", ""), contact_pairs)
-        # Common first/patronymic names are insufficient to identify an agent
-        # when the surname itself was uncertain in an elite photograph.
-        elite_name = re.findall(r'[а-яё]+', draft.get('agent_name', '').casefold())
-        matched_name = re.findall(r'[а-яё]+', str(match[0]).casefold()) if match else []
-        elite_match = (import_category != 'elite' or (match and match[2] >= .92 and elite_name and matched_name
-            and elite_name[0] == matched_name[0]))
-        if match and match[2] >= 0.78 and elite_match:
+        if import_category=='elite':
+            reviewed_route=dispatch_ocr_route_reference(db,draft.get('route'))
+            if reviewed_route: draft.update(reviewed_route)
+            match=dispatch_ocr_agent_match(draft.get('agent_name',''),contact_pairs,
+                draft.get('ocr_candidates',{}).get('agent_name',[]))
+        else:
+            match=best_agent_match(draft.get('agent_name',''),contact_pairs)
+        if match and match[2] >= 0.78:
             draft["agent_name"] = match[0]
             draft["agent_phone"] = match[1]
             draft["agent_match_confidence"] = round(min(match[2], 1.0), 2)
@@ -13880,6 +13937,15 @@ def dispatch_board(work_date: date, db: Session = Depends(get_db), user: Telegra
     return JSONResponse(dispatch_board_data(db, work_date), headers={'Cache-Control':'private, no-store'})
 
 
+@app.get('/api/dispatch-board/agent-match')
+def dispatch_agent_lookup(name: str, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    dispatch_guard(db,user)
+    if len(name)>200: raise HTTPException(422,'Слишком длинное имя агента')
+    contacts=db.execute(select(GbuAgentContact.full_name,GbuAgentContact.phone).where(GbuAgentContact.active.is_(True))).all()
+    match=dispatch_ocr_agent_match(name,[(str(full_name),str(phone)) for full_name,phone in contacts])
+    return {'match':{'full_name':match[0],'phone':match[1]} if match else None}
+
+
 def dispatch_validate_category(source, category, size):
     if source == 'gbu' and category not in {'standard', 'elite'}:
         raise HTTPException(422, 'В ГБУ только Стандарт и Элит')
@@ -14254,18 +14320,22 @@ body.dispatch-actions-open .topbar,body.dispatch-actions-open #dispatcherOrderOv
 .dispatch-tools{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:stretch;gap:7px;margin:8px 0}.dispatch-tools button{width:100%;min-height:32px;font-size:11px;padding:6px 7px}
 .dispatch-overview{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:center;gap:7px;margin:4px 0 10px}.dispatch-overview button{width:100%;min-height:32px;font-size:11px;padding:6px 7px}.dispatch-requested{text-align:left;font-size:11px;line-height:1.25}.dispatch-requested b{color:var(--gold)}
 .dispatch-ready{display:block;margin-bottom:4px}.dispatch-ready b{color:var(--green,#398771)}
-#modal:has(#dispatchGbuImport){top:10px;max-height:calc(100vh - 20px);max-height:calc(100dvh - 20px);padding:10px;box-sizing:border-box;overflow-x:hidden;overscroll-behavior:contain}
+#modal:has(#dispatchGbuImport){left:8px;right:8px;top:10px;width:auto;min-width:0;max-width:calc(100vw - 16px);max-height:calc(100vh - 20px);max-height:calc(100dvh - 20px);padding:10px;box-sizing:border-box;overflow-x:hidden;overscroll-behavior:contain}
+#dispatchGbuImport,#modal:has(#dispatchGbuImport)>.modal-body{min-width:0;width:100%;max-width:100%;box-sizing:border-box}
+body:has(#modal:not(.hidden) #dispatchGbuImport){overflow:hidden}
 #modal:has(#dispatchGbuImport)>.modal-head{top:-10px;gap:5px;min-height:34px;margin:0;padding:5px 0;background:var(--panel)}
 #modal:has(#dispatchGbuImport)>.modal-head::before{display:none}
 #modal:has(#dispatchGbuImport)>.modal-head h3{font-size:18px;line-height:1.2;margin:0}
 #modal:has(#dispatchGbuImport)>.modal-head .close-btn{width:32px;height:32px;min-height:32px;padding:0;flex-shrink:0}
 #dispatchGbuImport .dispatch-import-date{font-size:11px;margin:0 0 6px;color:var(--muted)}
 #dispatchGbuImport .dispatch-import-tools,#dispatchGbuImport .dispatch-import-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;align-items:stretch}
-#dispatchGbuImport .dispatch-import-file,#dispatchGbuImport button{display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:100%;min-width:0;min-height:34px;margin:0;padding:6px;font-size:12px;line-height:1.2;border:1px solid var(--line);border-radius:9px;background:var(--panel2);color:var(--text)}
+#dispatchGbuImport .dispatch-import-file,#dispatchGbuImport button{display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:100%;max-width:100%;min-width:0;min-height:40px;margin:0;padding:7px;font-size:12px;line-height:1.2;white-space:normal;overflow-wrap:anywhere;border:1px solid var(--line);border-radius:9px;background:var(--panel2);color:var(--text)}
 #dispatchGbuImport .dispatch-import-file input{display:none}
 #dispatchGbuImport .dispatch-import-modes{margin-bottom:6px}
 #dispatchGbuImport [data-import-mode][aria-pressed="true"]{border-color:var(--gold);color:var(--text);font-weight:700;background:var(--panel)}
-#dispatchGbuImport .dispatch-import-paste{margin-top:6px;padding:10px;border:1px dashed var(--line);border-radius:9px;font-size:12px;line-height:1.4;color:var(--muted);white-space:normal;overflow-wrap:anywhere;min-height:34px;box-sizing:border-box;-webkit-user-select:text;user-select:text}
+#dispatchGbuImport .dispatch-import-fallback{font-size:12px;color:var(--muted);margin-top:8px;min-width:0}
+#dispatchGbuImport .dispatch-import-fallback summary{padding:6px 0;cursor:pointer}
+#dispatchGbuImport .dispatch-import-paste{margin-top:6px;padding:10px;border:1px dashed var(--line);border-radius:9px;font-size:16px;line-height:1.4;color:var(--muted);white-space:normal;overflow-wrap:anywhere;min-height:44px;min-width:0;max-width:100%;box-sizing:border-box;-webkit-user-select:text;user-select:text}
 #dispatchGbuImport .dispatch-import-paste:focus{outline:2px solid var(--gold);outline-offset:1px}
 #dispatchGbuImport .dispatch-import-uncertain input{border-color:var(--gold);outline:1px solid var(--gold)}
 #dispatchGbuImport .dispatch-import-review{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--gold);margin:7px 0}
@@ -14301,9 +14371,9 @@ body.dispatch-actions-open .topbar,body.dispatch-actions-open #dispatcherOrderOv
 .dispatch-evening .metric>span{font-size:10px;line-height:1.15;color:var(--muted)}
 .dispatch-columns{position:relative;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.dispatch-columns::before{content:"";position:absolute;top:0;bottom:0;left:50%;border-left:1px solid var(--line);pointer-events:none}.dispatch-column{min-width:0}
 .dispatch-column h3{display:flex;align-items:center;justify-content:space-between;gap:4px;font-size:15px;color:var(--gold);margin:5px 0}.dispatch-source-requested{white-space:nowrap;font-size:12px}.dispatch-column>button{width:100%;padding:7px 2px;font-size:11px;margin-bottom:6px}
-.dispatch-mini{display:block;text-align:left;width:100%;border:1px solid var(--line);background:var(--panel,var(--bg));border-radius:11px;padding:7px!important;margin-bottom:6px;font-size:11px;line-height:1.35;min-height:0;overflow-wrap:anywhere;color:var(--text)}
-.dispatch-mini header{display:flex;gap:6px;align-items:center}.dispatch-mini header span{flex:1;font-size:10px}.dispatch-mini b{font-size:12px}.dispatch-mini p{margin:4px 0}.dispatch-gold{color:var(--gold)}.dispatch-mini footer{font-size:10px;color:var(--muted)}.dispatch-done{color:var(--green,#398771)!important}
-.dispatch-blank{min-height:58px;border-style:dashed}.dispatch-blank p{color:var(--muted);font-size:11px}
+.dispatch-mini{display:grid;grid-template-rows:16px 28px 14px 14px 14px 14px;gap:3px;box-sizing:border-box;text-align:left;width:100%;height:138px;min-height:138px;max-height:138px;border:1px solid var(--line);background:var(--panel,var(--bg));border-radius:11px;padding:7px!important;margin-bottom:6px;font-size:11px;line-height:14px;overflow:hidden;color:var(--text)}
+.dispatch-mini header{display:flex;gap:6px;align-items:center;min-width:0}.dispatch-mini header span{flex:1;min-width:0;font-size:10px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.dispatch-mini b{font-size:12px}.dispatch-mini p{margin:0;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.dispatch-mini .dispatch-order-name{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;white-space:normal;max-height:28px;overflow-wrap:anywhere}.dispatch-gold{color:var(--gold)}.dispatch-mini footer{font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dispatch-done{color:var(--green,#398771)!important}
+.dispatch-blank{grid-template-rows:16px 1fr;border-style:dashed}.dispatch-blank p{align-self:center;color:var(--muted);font-size:11px}
 .dispatch-send{width:100%;margin:8px 0;padding:10px}.dispatch-free{border:1px solid var(--line);border-radius:12px;padding:9px;font-size:12px}.dispatch-free details{padding:5px 0}.dispatch-free summary{cursor:pointer}.dispatch-free p{font-size:11px;margin:4px 0}
 .dispatch-form{display:grid;gap:8px}.dispatch-form label{display:grid;gap:3px;font-size:12px}.dispatch-form input,.dispatch-form select{width:100%;min-width:0;box-sizing:border-box;font-size:15px;padding:9px}.dispatch-times{display:grid;grid-template-columns:1fr 1fr;gap:7px}.dispatch-form small{font-size:11px;color:var(--muted)}
 body:has(#modal:not(.hidden) #dispatchEditor){overflow:hidden}
@@ -14347,7 +14417,7 @@ function dispatchShortDay(day){const d=new Date(day+'T12:00:00Z');return d.toLoc
 function dispatchToken(){return globalThis.crypto?.randomUUID?.().replaceAll('-','')||Date.now().toString(36)+Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2)}
 function dispatchEveningHtml(data){return controlEveningPreparationHtml(data).replace('id="orderPreparation"','class="dispatch-evening"').replace('id="numberCardsBtn"','data-plan-numbers')}
 function dispatchPerson(p){return [String(p.full_name||'').split(/\s+/)[0],p.metro].filter(Boolean).join(' ')}
-function dispatchMini(o){return `<button type="button" class="dispatch-mini" data-plan-id="${o.id}"><header><b>№${o.number}</b><span>${esc(o.organization||(o.source==='gbu'?'ГБУ ⬛️':''))}${o.source==='gbu'&&o.organization?' ⬛️':''}</span>›</header><p><b>ум: ${esc(o.deceased_name)}</b></p><p class="dispatch-gold">${esc(o.category_label)} · ${o.team_size} чел.</p><p>◷ ${esc(o.issue_time)} · 📸 ${esc(o.arrival_time||'—')}</p>${o.brigadier?`<p>${esc(dispatchPerson(o.brigadier))}</p>`:''}<footer class="${o.composition_complete?'dispatch-done':''}">${o.composition_complete?'Состав назначен ✓':'Назначить состав ›'}</footer></button>`}
+function dispatchMini(o){return `<button type="button" class="dispatch-mini" data-plan-id="${o.id}" aria-label="Заказ №${o.number} · ${esc(o.deceased_name)}"><header><b>№${o.number}</b><span>${esc(o.organization||(o.source==='gbu'?'ГБУ ⬛️':''))}${o.source==='gbu'&&o.organization?' ⬛️':''}</span>›</header><p class="dispatch-order-name" title="${esc(o.deceased_name)}"><b>ум: ${esc(o.deceased_name)}</b></p><p class="dispatch-gold">${esc(o.category_label)} · ${o.team_size} чел.</p><p>◷ ${esc(o.issue_time)} · 📸 ${esc(o.arrival_time||'—')}</p><p class="dispatch-card-brigadier">${o.brigadier?esc(dispatchPerson(o.brigadier)):'&nbsp;'}</p><footer class="${o.composition_complete?'dispatch-done':''}">${o.composition_complete?'Состав назначен ✓':'Назначить состав ›'}</footer></button>`}
 function dispatchColumnCards(data,source){
  const entries=data.items.filter(o=>o.source===source).map(o=>({number:o.number,order:o}));
  entries.push(...(data.empty_slots?.[source]||[]).map(number=>({number})));
@@ -14385,10 +14455,17 @@ function dispatchImportAgentName(value){
 }
 async function openDispatchGbuImport(){
  const day=state.selectedDate,board=dispatchBoard?.work_date===day?dispatchBoard:null;
- showModal('Импорт заказов ГБУ',`<div id="dispatchGbuImport"><p class="dispatch-import-date">${esc(dispatchShortDay(day))}</p><div class="dispatch-import-tools dispatch-import-modes" role="group" aria-label="Категория фото"><button type="button" data-import-mode="standard" aria-pressed="true">Вставить Стандарт</button><button type="button" data-import-mode="elite" aria-pressed="false">Вставить Элит</button></div><div class="dispatch-import-tools"><label class="dispatch-import-file">📷 Выбрать фото<input type="file" data-import-file accept="image/*"></label><button type="button" data-import-ocr>Распознать фото</button></div><div class="dispatch-import-paste" data-import-paste contenteditable="true" role="textbox" aria-label="Вставить скопированное фото" spellcheck="false">Нажмите и удерживайте здесь → Вставить. На компьютере: Ctrl+V / ⌘V.</div><p data-import-status role="status"></p><div data-import-result></div></div>`);
+ showModal('Импорт заказов ГБУ',`<div id="dispatchGbuImport"><p class="dispatch-import-date">${esc(dispatchShortDay(day))}</p><div class="dispatch-import-tools dispatch-import-modes" role="group" aria-label="Категория фото"><button type="button" data-import-mode="standard" aria-pressed="true">Вставить Стандарт</button><button type="button" data-import-mode="elite" aria-pressed="false">Вставить Элит</button></div><div class="dispatch-import-tools"><label class="dispatch-import-file">📷 Выбрать фото<input type="file" data-import-file accept="image/*"></label><button type="button" data-import-ocr>Распознать фото</button></div><details class="dispatch-import-fallback" data-import-fallback><summary>Вставить через меню телефона</summary><div class="dispatch-import-paste" data-import-paste contenteditable="true" inputmode="none" role="textbox" aria-label="Вставить скопированное фото" spellcheck="false">Удерживайте здесь → Вставить</div></details><p data-import-status role="status"></p><div data-import-result></div></div>`);
  const root=qs('#dispatchGbuImport'),modal=qs('#modal'),live=()=>qs('#dispatchGbuImport')===root&&!modal.classList.contains('hidden');
- let file=null,busy=false,importCategory='standard',requestKey=dispatchToken();
- function lock(value){busy=value;qsa('input,select,textarea,button',root).forEach(el=>el.disabled=value);qs('[data-import-paste]',root).setAttribute('contenteditable',String(!value));qs('[data-import-ocr]',root).textContent=value?'Обработка…':'Распознать фото'}
+ let file=null,busy=false,readingClipboard=false,clipboardAttempt=0,importCategory='standard',requestKey=dispatchToken();
+ function lock(value){busy=value;qsa('input,select,textarea,button',root).forEach(el=>el.disabled=value||readingClipboard);qs('[data-import-paste]',root).setAttribute('contenteditable',String(!value));qs('[data-import-ocr]',root).textContent=value?'Обработка…':readingClipboard?'Ожидание фото…':'Распознать фото'}
+ function pasteFallback(message){
+  if(!live())return;
+  qs('[data-import-status]',root).textContent=message;
+  qs('[data-import-fallback]',root).open=true;
+  const destination=qs('[data-import-paste]',root);
+  destination.focus?.({preventScroll:true});
+ }
  function renumber(){const rows=qsa('.gbu-draft',root),numbers=dispatchImportNumbers(board,rows.length);rows.forEach((row,i)=>qs('[data-import-number]',row).textContent='Заказ ГБУ №'+numbers[i]);return numbers}
  function rowHtml(d,i){
   const field=(key,label,value='',extra='',kind='')=>`<label class="dispatch-import-field ${kind}"><span>${label}</span><input data-k="${key}" value="${esc(value||'')}" ${extra}></label>`;
@@ -14421,21 +14498,40 @@ return `<article class="gbu-draft dispatch-import-card" data-i="${i}"><header><b
   };
  }
  async function recognize(){
-  if(busy||!live())return;if(!file){qs('[data-import-status]',root).textContent='Выберите или вставьте фото';return}
+  if(busy||readingClipboard||!live())return;if(!file){qs('[data-import-status]',root).textContent='Выберите или вставьте фото';return}
   lock(true);qs('[data-import-status]',root).textContent='Распознаю все строки таблицы…';qs('[data-import-result]',root).replaceChildren();
-  const fd=new FormData();fd.append('file',file);fd.append('work_date',day);fd.append('import_category',importCategory);
+  const fd=new FormData();fd.append('file',file,file.name||'clipboard.png');fd.append('work_date',day);fd.append('import_category',importCategory);
   try{const result=await api('/api/gbu/ocr',{method:'POST',body:fd});if(!live())return;draw(result);qs('[data-import-status]',root).textContent=(result.drafts||[]).length?'Проверьте заказы перед сохранением':'Строки не найдены. Попробуйте более чёткое фото или добавьте строки вручную.'}catch(error){if(live())qs('[data-import-status]',root).textContent=error.message}finally{if(live())lock(false)}
  }
  qs('[data-import-file]',root).onchange=event=>{file=event.target.files?.[0]||null;if(file)recognize()};qs('[data-import-ocr]',root).onclick=recognize;
- qsa('[data-import-mode]',root).forEach(button=>button.onclick=()=>{
-  if(busy)return;
+ qsa('[data-import-mode]',root).forEach(button=>button.onclick=async()=>{
+  if(busy||readingClipboard)return;
   if(importCategory!==button.dataset.importMode){file=null;qs('[data-import-file]',root).value=''}
   importCategory=button.dataset.importMode;
   qsa('[data-import-mode]',root).forEach(item=>item.setAttribute('aria-pressed',String(item===button)));
-  qs('[data-import-status]',root).textContent=(importCategory==='elite'?'Элит':'Стандарт')+': вставьте фото в область ниже или нажмите «Выбрать фото».';
-  qs('[data-import-paste]',root).focus?.();
+  const clipboard=globalThis.navigator?.clipboard;
+  if(typeof clipboard?.read!=='function'){
+   pasteFallback('Вставка кнопкой недоступна. Удерживайте область ниже → «Вставить» или нажмите «Выбрать фото».');return;
+  }
+  const attempt=++clipboardAttempt;
+  readingClipboard=true;lock(false);
+  qs('[data-import-status]',root).textContent='Получаю скопированное фото. Если появится системное меню, нажмите «Вставить».';
+  try{
+   // Invoke read directly in the click gesture; do not await permissions or focus an editor first.
+   const items=await clipboard.read();
+   if(!live()||attempt!==clipboardAttempt)return;
+   const item=items.find(item=>item.types?.includes('image/png'))||items.find(item=>item.types?.some(type=>type.startsWith('image/')));
+   const type=item?.types.find(type=>type==='image/png')||item?.types.find(type=>type.startsWith('image/'));
+   if(!item||!type){qs('[data-import-status]',root).textContent='В буфере нет фото. Скопируйте само изображение или нажмите «Выбрать фото».';return}
+   const image=await item.getType(type);
+   if(!live()||attempt!==clipboardAttempt)return;
+   if(!image?.size){qs('[data-import-status]',root).textContent='Скопированное фото пустое. Скопируйте изображение ещё раз.';return}
+   file=image;readingClipboard=false;lock(false);await recognize();
+  }catch(error){
+   if(live()&&attempt===clipboardAttempt)pasteFallback('Не удалось получить фото из буфера. Удерживайте область ниже → «Вставить» или нажмите «Выбрать фото».');
+  }finally{if(live()&&attempt===clipboardAttempt){readingClipboard=false;lock(busy)}}
  });
- root.oninput=event=>{if(event.target.closest('[data-import-paste]')){qs('[data-import-paste]',root).textContent='Нажмите и удерживайте здесь → Вставить. На компьютере: Ctrl+V / ⌘V.';return}if(!event.target.matches('[data-k=issue_time]'))return;const row=event.target.closest('.gbu-draft'),parts=event.target.value.split(':').map(Number);if(parts.length!==2||parts.some(x=>!Number.isFinite(x)))return;const minutes=(parts[0]*60+parts[1]-30+1440)%1440;qs('[data-k=arrival_time]',row).value=String(Math.floor(minutes/60)).padStart(2,'0')+':'+String(minutes%60).padStart(2,'0')};
+ root.oninput=event=>{if(event.target.closest('[data-import-paste]')){qs('[data-import-paste]',root).textContent='Удерживайте здесь → Вставить';return}if(!event.target.matches('[data-k=issue_time]'))return;const row=event.target.closest('.gbu-draft'),parts=event.target.value.split(':').map(Number);if(parts.length!==2||parts.some(x=>!Number.isFinite(x)))return;const minutes=(parts[0]*60+parts[1]-30+1440)%1440;qs('[data-k=arrival_time]',row).value=String(Math.floor(minutes/60)).padStart(2,'0')+':'+String(minutes%60).padStart(2,'0')};
  modal.onpaste=event=>{
   if(!live())return;
   const destination=event.target?.closest?.('[data-import-paste]');
@@ -14443,7 +14539,7 @@ return `<article class="gbu-draft dispatch-import-card" data-i="${i}"><header><b
   if(busy)return;
   const item=[...(event.clipboardData?.items||[])].find(x=>x.type.startsWith('image/'));
   const image=item?.getAsFile()||[...(event.clipboardData?.files||[])].find(x=>x.type.startsWith('image/'));
-  if(image){event.preventDefault();file=image;recognize()}
+  if(image){event.preventDefault();++clipboardAttempt;readingClipboard=false;lock(false);file=image;recognize()}
   else if(destination)qs('[data-import-status]',root).textContent='В буфере нет фото. Скопируйте само изображение или нажмите «Выбрать фото».';
  };
 }
@@ -14452,6 +14548,16 @@ async function openDispatchEditor(order,source='private',slotNumber=null){
  const input=(name,label,value='',extra='')=>`<label class="${['morgue','church','cemetery'].includes(name)?'dispatch-route-field':''}">${label}<input name="${name}" value="${esc(value)}" ${extra}></label>`;
  showModal(order?`${source==='gbu'?'ГБУ ⬛️':'Частный'} №${order.number}`:'Новый заказ · '+(source==='gbu'?'ГБУ ⬛️':'Частный'),`<form class="dispatch-form" id="dispatchEditor"><small class="dispatch-form-day">${esc(dispatchShortDay(day))}</small>${input('agent_name','Имя агента',order?.agent_name||'','maxlength="200"')}${input('agent_phone','Номер агента',order?.agent_phone||'','type="tel" maxlength="50"')}${input('organization','От кого заказ',order?.organization||'','maxlength="200"')}${input('deceased_name','Фамилия умершего',order?.deceased_name||'','required maxlength="100"')}<label>Категория заказа<select name="category" required><option value="">Выберите категорию</option>${Object.entries(source==='gbu'?{standard:'Стандарт',elite:'Элит'}:{standard:'Стандарт',vip:'Вип',elite:'Элит'}).map(([v,label])=>`<option value="${v}" ${v===order?.category?'selected':''}>${label}</option>`).join('')}</select></label><label>Количество человек<select name="team_size" required></select></label><div class="dispatch-times">${input('issue_time','Время выдачи',order?.issue_time||'','type="time" required')}<label>📸 Подача авто<input data-plan-arrival readonly value="${esc(order?.arrival_time||'')}"></label></div><small class="dispatch-arrival-hint">Подача автоматически за 30 минут до выдачи.</small><b class="dispatch-route-title">Маршрут</b>${input('morgue','1. Морг',route.morgue||(!Object.keys(route).length?order?.route||'':''),'maxlength="500"')}${input('church','2. Храм',route.church||'','maxlength="500"')}${input('cemetery','3. Кладбище / кремация',route.cemetery||'','maxlength="500"')}${order?`<p class="dispatch-crew-status">${order.composition_complete?'Состав назначен ✓':'Состав не назначен'}</p><button type="button" data-plan-crew ${order.approved?'disabled':''}>Выбрать бригадира и состав ›</button>${order.brigadier?'<button type="button" data-plan-clear>Снять состав</button>':''}`:'<small class="dispatch-crew-hint">Состав можно назначить после сохранения.</small>'}<p data-plan-error role="status"></p><button type="submit" class="primary" ${order?.approved?'disabled':''}>Сохранить заказ</button></form>`);
  const form=qs('#dispatchEditor'),live=()=>qs('#dispatchEditor')===form&&!qs('#modal').classList.contains('hidden');let chooseCrewAfterSave=false;
+ if(source==='gbu'&&!order?.approved){
+  const lookupAgent=async()=>{
+   const entered=form.elements.agent_name.value,phone=form.elements.agent_phone.value;
+   if(!entered.trim()||phone.trim())return;
+   try{const result=await api('/api/dispatch-board/agent-match?name='+encodeURIComponent(entered));
+    if(live()&&form.elements.agent_name.value===entered&&form.elements.agent_phone.value===phone&&result.match){form.elements.agent_name.value=result.match.full_name;form.elements.agent_phone.value=result.match.phone}
+   }catch(error){/* Agent lookup must not interrupt manual order editing. */}
+  };
+  form.elements.agent_name.onchange=lookupAgent;lookupAgent();
+ }
  const sizes=()=>{const allowed=source==='gbu'||form.elements.category.value!=='standard'?[4,6]:[3,4,5,6];const old=Number(form.elements.team_size.value)||order?.team_size;form.elements.team_size.innerHTML='<option value="">Выберите количество</option>'+allowed.map(n=>`<option value="${n}" ${n===old?'selected':''}>${n}</option>`).join('')};sizes();form.elements.category.onchange=sizes;
  form.elements.issue_time.oninput=()=>{const parts=form.elements.issue_time.value.split(':').map(Number);if(parts.length===2){const minutes=(parts[0]*60+parts[1]-30+1440)%1440;qs('[data-plan-arrival]',form).value=String(Math.floor(minutes/60)).padStart(2,'0')+':'+String(minutes%60).padStart(2,'0')}};
  const crew=qs('[data-plan-crew]',form);if(crew)crew.onclick=()=>{chooseCrewAfterSave=true;form.requestSubmit()};
