@@ -14437,6 +14437,25 @@ body:has(#modal:not(.hidden) #dispatchGbuImport){overflow:hidden}
 .dispatch-mini footer{display:flex;align-items:center;justify-content:space-between;gap:4px;min-width:0;font-size:10px;color:var(--muted)}
 .dispatch-mini footer button{min-width:0;min-height:24px;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dispatch-mini footer [data-plan-delete]{flex:0 0 26px;text-align:center;font-size:15px;border:1px solid var(--line);border-radius:6px}
+.dispatch-mini.dispatch-detailed{grid-template-rows:minmax(0,1fr) 20px;gap:2px;padding:6px!important}
+.dispatch-detailed .dispatch-card-main{grid-template-rows:12px 10px 10px 11px 12px 11px minmax(0,1fr);gap:1px;font-size:9px;line-height:10px}
+.dispatch-detailed header{gap:4px;font-size:10px;line-height:12px}
+.dispatch-detailed header>b{font-size:11px}
+.dispatch-detailed header span{font-size:9px}
+.dispatch-detailed .dispatch-card-agent,.dispatch-detailed .dispatch-card-phone{font-size:9px;line-height:10px}
+.dispatch-detailed .dispatch-card-meta{font-size:8.5px;line-height:11px;gap:3px}
+.dispatch-detailed .dispatch-card-quantity{flex-shrink:0}
+.dispatch-detailed .dispatch-order-name{display:block;max-height:none;line-height:12px}
+.dispatch-detailed .dispatch-order-name>b{font-size:10px;line-height:12px}
+.dispatch-detailed .dispatch-card-times{display:flex;align-items:center;justify-content:space-between;gap:3px;font-size:8.5px;line-height:11px;white-space:nowrap}
+.dispatch-detailed .dispatch-card-route{display:grid;grid-template-rows:repeat(3,minmax(0,1fr));gap:0;min-height:0;overflow:hidden;text-align:left}
+.dispatch-detailed .dispatch-card-route p{font-size:8.5px;line-height:10px;white-space:normal;overflow-wrap:anywhere;text-overflow:clip}
+.dispatch-detailed footer{font-size:8.5px;gap:3px}
+.dispatch-detailed footer button{min-height:20px}
+.dispatch-detailed footer [data-plan-crew-id]{display:flex;flex:1;align-items:center;justify-content:space-between;gap:3px}
+.dispatch-detailed footer [data-plan-crew-id]>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.dispatch-detailed footer .dispatch-card-progress{font-size:9px!important}
+.dispatch-detailed footer [data-plan-delete]{flex-basis:22px;font-size:13px}
 .dispatch-done{color:var(--green,#398771)!important}
 .dispatch-blank{grid-template-rows:16px 1fr;border-style:dashed}.dispatch-blank p{align-self:center;color:var(--muted);font-size:11px}
 .dispatch-send{width:100%;margin:8px 0;padding:10px}.dispatch-free{border:1px solid var(--line);border-radius:12px;padding:9px;font-size:12px}.dispatch-free details{padding:5px 0}.dispatch-free summary{cursor:pointer}.dispatch-free p{font-size:11px;margin:4px 0}
@@ -14506,9 +14525,17 @@ function dispatchEveningHtml(data){return controlEveningPreparationHtml(data).re
 function dispatchPerson(p){return [String(p.full_name||'').split(/\s+/)[0],p.metro].filter(Boolean).join(' ')}
 function dispatchMini(o){
  if(o.is_draft)return `<article class="dispatch-mini dispatch-draft" data-plan-card="${o.id}"><button type="button" class="dispatch-card-main" data-plan-id="${o.id}"><header><b>№${o.number}</b><span>${o.source==='gbu'?'ГБУ⬛️':'Черновик'}</span>›</header><p class="dispatch-order-name"><b>${esc(o.organization)}</b><small>${esc(o.deceased_name||'Информацию можно добавить позже')}</small></p><div class="dispatch-card-meta"><span>${esc(o.category_label||'Категория не выбрана')}${o.team_size?' '+Number(o.team_size):''}</span></div><p>${o.issue_time?'◷ '+esc(o.issue_time):'Время не указано'}</p></button><footer><button type="button" data-plan-id="${o.id}">Дополнить заказ ›</button><button type="button" data-plan-delete="${o.id}" aria-label="Удалить заказ №${o.number}">🗑</button></footer></article>`;
- const words=String(o.deceased_name||'').trim().split(/\s+/),surname=words.shift()||'',given=words.join(' ');
+ const surname=String(o.deceased_name||'').trim().split(/\s+/)[0]||'—';
  const assigned=Number.isInteger(o.assigned_count)?o.assigned_count:Number(Boolean(o.brigadier))+(o.members||[]).length,complete=assigned===o.team_size&&Boolean(o.brigadier);
- return `<article class="dispatch-mini ${complete?'dispatch-complete':''}" data-plan-card="${o.id}"><button type="button" class="dispatch-card-main" data-plan-id="${o.id}" aria-label="Заказ №${o.number} · ${esc(o.deceased_name)}"><header><b>№${o.number}</b><span>${o.source==='gbu'?'ГБУ⬛️':esc(o.organization||'')}</span>›</header><p class="dispatch-order-name" title="${esc(o.deceased_name)}"><b>ум: ${esc(surname)}</b><small>${given?esc(given):'&nbsp;'}</small></p><div class="dispatch-card-meta"><span class="dispatch-card-category">${esc(o.category_label)} ${o.team_size}</span><span>◷ ${esc(o.issue_time)}</span><b class="dispatch-card-progress ${complete?'dispatch-done':''}" aria-label="Назначено ${assigned} из ${o.team_size} сотрудников">${assigned}/${o.team_size}</b></div><p>📸 ${esc(o.arrival_time||'—')}</p><p class="dispatch-card-brigadier">${o.brigadier?esc(dispatchPerson(o.brigadier)):'&nbsp;'}</p></button><footer><button type="button" data-plan-crew-id="${o.id}" class="${complete?'dispatch-done':''}" ${o.approved?'disabled':''}>${complete?'Состав назначен ✓':assigned?'Дополнить состав ›':'Назначить состав ›'}</button><button type="button" data-plan-delete="${o.id}" aria-label="Удалить заказ №${o.number}" ${o.approved?'disabled':''}>🗑</button></footer></article>`;
+ const rawPhone=String(o.agent_phone||''),digits=rawPhone.replace(/\D/g,'');
+ const phone=/^[78]\d{10}$/.test(digits)?`+7 (${digits.slice(1,4)}) ${digits.slice(4,7)}-${digits.slice(7,9)}-${digits.slice(9)}`:rawPhone;
+ const fields=o.route_fields||{},oldRoute=Object.keys(fields).length?[]:String(o.route||'').split(/[;\n]+/);
+ const route=[['morgue','Морг'],['church','Храм'],['cemetery','Кладбище']].map(([key,label],i)=>{
+  const value=String(fields[key]??oldRoute[i]??'').trim();
+  return '- '+(/^(морг|храм|церковь|кладбище|крематорий|кремация)(?:\s|:|$)/i.test(value)?value:label+' '+(value||'—'));
+ });
+ const quantity=Number(o.team_size)+' '+([3,4].includes(Number(o.team_size))?'человека':'человек');
+ return `<article class="dispatch-mini dispatch-detailed ${complete?'dispatch-complete':''}" data-plan-card="${o.id}"><button type="button" class="dispatch-card-main" data-plan-id="${o.id}" aria-label="Заказ №${o.number} · ${esc(o.deceased_name)}"><header><b>№${o.number}</b><span>${o.source==='gbu'?'ГБУ⬛️':esc(o.organization||'')}</span>›</header><p class="dispatch-card-agent" title="${esc(o.agent_name||'')}">Агент: ${esc(o.agent_name||'—')}</p><p class="dispatch-card-phone">Номер: ${esc(phone||'—')}</p><div class="dispatch-card-meta"><span class="dispatch-card-category">Заказ: ${esc(String(o.category_label||'').toLocaleUpperCase('ru-RU'))}</span><span class="dispatch-card-quantity">${quantity}</span></div><p class="dispatch-order-name"><b>Ум: ${esc(surname)}</b></p><div class="dispatch-card-times"><span>Выдача в ${esc(o.issue_time||'—')}</span><span>Быть в ${esc(o.arrival_time||'—')}</span></div><div class="dispatch-card-route">${route.map(stop=>`<p title="${esc(stop)}">${esc(stop)}</p>`).join('')}</div></button><footer><button type="button" data-plan-crew-id="${o.id}" title="${o.brigadier?esc(dispatchPerson(o.brigadier)):''}" class="${complete?'dispatch-done':''}" ${o.approved?'disabled':''}><span>${complete?'Состав назначен ✓':assigned?'Дополнить состав ›':'Назначить состав ›'}</span><b class="dispatch-card-progress ${complete?'dispatch-done':''}" aria-label="Назначено ${assigned} из ${o.team_size} сотрудников">${assigned}/${o.team_size}</b></button><button type="button" data-plan-delete="${o.id}" aria-label="Удалить заказ №${o.number}" ${o.approved?'disabled':''}>🗑</button></footer></article>`;
 }
 function confirmDispatchDelete(order){
  const day=order.work_date;
