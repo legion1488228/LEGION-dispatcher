@@ -2419,7 +2419,14 @@ def readiness_history(work_date: date, limit: int = 60, db: Session = Depends(ge
 
 @app.get("/api/readiness/summary")
 def readiness_summary(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
-    return readiness_summary_data(db, work_date)
+    result = readiness_summary_data(db, work_date)
+    orders = list(db.scalars(select(Order).where(Order.work_date == work_date, Order.status != 'cancelled')))
+    requested = {source: sum(order.team_size or 0 for order in orders if order.source == source)
+        for source in ('private', 'gbu')}
+    effective = dispatch_pair_demand(db, orders, requested)
+    result['order_demand'] = {'work_date': work_date.isoformat(), 'orders_total': len(orders),
+        'requested_staff': sum(requested.values()), 'requested_staff_effective': sum(effective.values())}
+    return result
 
 
 @app.post("/api/readiness/brigade-contact/{employee_id}")
@@ -15713,6 +15720,145 @@ def _historical_payroll_roster_html(html):
 
 
 INLINE_INDEX_HTML = _historical_payroll_roster_html(INLINE_INDEX_HTML)
+
+
+def _readiness_toolbar_html(html):
+    def replace_once(old, new):
+        nonlocal html
+        if html.count(old) != 1:
+            raise ValueError('Readiness toolbar anchor missing: ' + old[:100])
+        html = html.replace(old, new, 1)
+
+    toolbar = re.search(r'<div class="section-actions readiness-actions">.*?</div>', html, re.S)
+    if toolbar is None:
+        raise ValueError('Readiness toolbar missing')
+    old = toolbar.group(0)
+    buttons = []
+    for button_id in ('readinessRemindersBtn', 'readinessAvralBtn', 'readinessSendBtn'):
+        button = re.search(r'<button\b[^>]*\bid="' + button_id + r'"[^>]*>.*?</button>', old, re.S)
+        if button is None:
+            raise ValueError('Readiness action missing: ' + button_id)
+        text = button.group(0)
+        symbol, label = {'readinessRemindersBtn': ('🔔', 'Напомнить'),
+            'readinessAvralBtn': ('❗', 'Аврал'), 'readinessSendBtn': ('📝', 'Сверка')}[button_id]
+        text = text[:text.index('>')+1] + '<span aria-hidden="true">' + symbol + '</span><span>' + label + '</span></button>'
+        buttons.append(text)
+    replace_once(old, '')
+    replace_once('<div id="employeeReadiness">', '<div id="employeeReadiness"><div id="readinessTopActions" class="section-actions readiness-actions">' + ''.join(buttons) + '</div>')
+    summary = re.search(r'<div\b[^>]*\bid="readinessSummary"[^>]*></div>', html)
+    if summary is None:
+        raise ValueError('Readiness summary missing')
+    demand = '<div id="readinessNextDemand" role="status" aria-live="polite" aria-busy="true"><div class="metric"><b data-readiness-orders>—</b><span>Заказов</span></div><div class="metric"><b data-readiness-staff>—</b><span>Запрошено</span></div></div>'
+    replace_once(summary.group(0), '<div id="readinessOverview">' + demand + summary.group(0) + '</div>')
+    replace_once("qs('#readinessTitle').textContent=day===state.bootstrap.today?'Готовность сотрудников на завтра':'Готовность сотрудников на следующий день';",
+        "qs('#readinessTitle').textContent=day===state.bootstrap.today?'Готовность на завтра':'Готовность на следующий день';")
+
+    replace_once("  qs('#dayCommentBtn').onclick=()=>openDayComment(day);",
+        "  qs('#dayCommentBtn').onclick=()=>openDayComment(day);\n  prepareReadinessDemand(nextReadinessDay(day));")
+    replace_once('async function loadReadiness(){', r'''
+function prepareReadinessDemand(day){
+ const root=qs('#readinessNextDemand');if(!root||root.dataset.workDate===day)return;
+ root.dataset.workDate=day;root.setAttribute('aria-busy','true');
+ root.setAttribute('aria-label','Загрузка заказов и запрошенных сотрудников на '+fmtDate(day));
+ root.title='Заказы и запрошенные сотрудники на '+fmtDate(day);
+ qs('[data-readiness-orders]',root).textContent='—';qs('[data-readiness-staff]',root).textContent='—';
+}
+function renderReadinessDemand(demand,day){
+ const root=qs('#readinessNextDemand');if(!root||root.dataset.workDate!==day||demand?.work_date!==day)return;
+ const count=value=>Number.isSafeInteger(value)&&value>=0?String(value):'—';
+ const total=count(demand.orders_total),staff=count(demand.requested_staff),effective=count(demand.requested_staff_effective);
+ qs('[data-readiness-orders]',root).textContent=total;
+ qs('[data-readiness-staff]',root).textContent=staff+(effective!=='—'&&effective!==staff?' ('+effective+')':'');
+ root.setAttribute('aria-busy','false');
+ root.setAttribute('aria-label',fmtDate(day)+': заказов '+total+', запрошено сотрудников '+staff+(effective!==staff&&effective!=='—'?', с учётом сдвоенных заказов '+effective:''));
+ root.title='На '+fmtDate(day)+': всего заказов '+total+', запрошено сотрудников '+staff+(effective!==staff&&effective!=='—'?' ('+effective+' с учётом сдвоенных заказов)':'');
+}
+async function loadReadiness(){''')
+    replace_once("  if(state.selectedDate!==selectedDay||r.work_date!==day)return;",
+        "  if(state.selectedDate!==selectedDay||r.work_date!==day)return;\n  prepareReadinessDemand(day);renderReadinessDemand(r.order_demand,day);")
+
+    first = html.index('function fitOrdersScreen(){')
+    last = html.index('\nfunction scheduleOrdersScreenFit(){', first)
+    html = html[:first] + r'''function fitOrdersScreen(){
+ const main=qs('main');if(!main)return;
+ const readiness=qs('#readinessView');
+ main.style.removeProperty('transform');main.style.removeProperty('width');
+ main.style.removeProperty('--orders-group-extra');
+ main.style.removeProperty('--readiness-card-extra');
+ readiness?.style.removeProperty('margin-top');
+ if(!document.body.classList.contains('dashboard-compact'))return;
+ const viewport=window.visualViewport;
+ const viewportBottom=viewport?viewport.offsetTop+viewport.height:window.innerHeight;
+ const nav=qs('#roleNavigation')||qs('.bottom-nav');
+ const navTop=nav?.getBoundingClientRect().top;
+ const bottom=navTop>0?Math.min(navTop,viewportBottom):viewportBottom-72;
+ const available=Math.max(1,bottom-main.getBoundingClientRect().top-6);
+ let scale=1;
+ // Preserve the existing compact-screen fit, without stretching text vertically.
+ for(let attempt=0;attempt<8;attempt++){
+  const height=Math.max(main.scrollHeight,main.offsetHeight)*scale;
+  if(height<=available||!height)break;
+  scale*=available/height*.995;
+  main.style.width=`${100/scale}%`;main.style.transform=`scale(${scale})`;
+ }
+ // Keep actions directly under the date ribbon; use spare space for readable
+ // group cards instead of inserting a blank area above the whole page.
+ if(readiness?.classList.contains('active')){
+  const groups=qsa('#readinessGroups .group-block');
+  const used=Math.max(main.scrollHeight,main.offsetHeight)*scale;
+  const gap=Math.max(0,available-used);
+  if(groups.length)main.style.setProperty('--readiness-card-extra',`${gap/(scale*groups.length)}px`);
+ }
+}
+''' + html[last:]
+    return html.replace('</head>', r'''<style id="readiness-top-toolbar-style">
+/* Next-day overview follows the top actions; shared order panels stay hidden. */
+body.dashboard-compact #summary,body.dashboard-compact #selectedDayHeader{display:none!important}
+body.dashboard-compact #employeeReadiness .section-actions.readiness-actions{
+ display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;
+ grid-template-rows:40px;grid-auto-flow:row;width:100%;max-width:none;min-width:0;
+ gap:6px;margin:2px 0 10px;align-items:stretch;justify-content:stretch;
+}
+body.dashboard-compact #employeeReadiness .readiness-actions>button{
+ box-sizing:border-box;display:flex;align-items:center;justify-content:center;
+ width:100%!important;min-width:0!important;min-height:40px;height:40px;
+ margin:0;padding:4px!important;border-radius:10px;white-space:nowrap;line-height:1;gap:5px;
+ font-size:clamp(10px,2.9vw,12px)!important;
+}
+body.dashboard-compact #employeeReadiness .readiness-actions>button>span:first-child{font-size:18px;line-height:1}
+body.dashboard-compact #employeeReadiness .readiness-actions #readinessRemindersBtn{grid-column:1!important;grid-row:1!important}
+body.dashboard-compact #employeeReadiness .readiness-actions #readinessAvralBtn{grid-column:2!important;grid-row:1!important;overflow:visible}
+body.dashboard-compact #employeeReadiness .readiness-actions #readinessSendBtn{grid-column:3!important;grid-row:1!important}
+body.dashboard-compact #employeeReadiness #readinessOverview{
+ display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin:6px 0 8px;
+}
+body.dashboard-compact #employeeReadiness #readinessNextDemand,
+body.dashboard-compact #employeeReadiness #readinessSummary{display:contents!important}
+body.dashboard-compact #employeeReadiness #readinessOverview .metric{
+ min-width:0;min-height:58px!important;margin:0;padding:7px 3px!important;text-align:center!important;
+ display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;border-radius:11px;
+}
+body.dashboard-compact #employeeReadiness #readinessOverview .metric b{font-size:22px!important;line-height:1.1;font-weight:750;font-variant-numeric:tabular-nums}
+body.dashboard-compact #employeeReadiness #readinessOverview .metric span{font-size:10px!important;white-space:normal;overflow:visible;line-height:1.2;margin:0}
+body.dashboard-compact #employeeReadiness #readinessGroups .group-block{
+ box-sizing:border-box;display:flex;flex-direction:column;min-height:calc(74px + var(--readiness-card-extra,0px))!important;margin-bottom:7px;
+}
+body.dashboard-compact #employeeReadiness #readinessGroups .group-stats{flex:1;align-items:stretch}
+body.dashboard-compact #employeeReadiness #readinessGroups .group-stats button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px}
+body.dashboard-compact #employeeReadiness #readinessGroups .group-stats b{font-size:19px!important;margin:0}
+body.dashboard-compact #readinessGroups button[data-rstatus="ready"].has-people{background:rgba(88,199,133,.14);color:var(--green)}
+body.dashboard-compact #readinessGroups button[data-rstatus="no_response"].has-people{background:rgba(227,180,84,.16);color:var(--amber)}
+body.dashboard-compact #readinessView{padding-bottom:0}
+body.dashboard-compact #employeeReadiness #readinessGroups .group-block:last-child{margin-bottom:0}
+@media(max-width:350px){
+ body.dashboard-compact #employeeReadiness .section-actions.readiness-actions{gap:4px}
+ body.dashboard-compact #employeeReadiness #readinessOverview{gap:4px}
+ body.dashboard-compact #employeeReadiness #readinessOverview .metric span{font-size:9px!important}
+}
+</style></head>''', 1)
+
+
+INLINE_INDEX_HTML = _readiness_toolbar_html(INLINE_INDEX_HTML)
 
 
 def _isolated_preview_screen_html():
