@@ -9589,13 +9589,14 @@ function renderOwnerBrigadeControl(){
   if(!data||currentViewId()!=='ownerBrigadeControlView')return;
   const open=new Set(qsa('details[open]',root).map(row=>Number(row.dataset.controlCard)));
   const source=ownerBrigadeControlSource,stage=ownerBrigadeControlStage,totals=data.totals[source];
+  const privatePhotos=data.totals.private,gbuPhotos=data.totals.gbu;
   const captions={all:'Все заказы',private:'Частные заказы',gbu:'Заказы ГБУ'};
   const stages={contact:'Связь бригад',photo:'Фото по заказам',done:'Отчёты по чаю'};
   const items=data.items.filter(item=>source==='all'||item.source===source);
   const waiting='<svg class="cabinet-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12M6 21h12M7 3v4l10 10v4M17 3v4L7 17v4"/></svg>';
   const block=(key,icon,value,label,ready,count=null)=>`<div class="bc-stage bc-stage-${key} ${ready?'is-done':''} ${stage===key?'is-focused':''}" aria-label="${esc(label)}: ${esc(value)}" title="${esc(label)}: ${esc(value)}">${key==='done'?'':`<span class="bc-stage-icon">${cabinetIcon(icon)}</span>`}<b>${esc(value)}</b><span class="bc-stage-state" aria-hidden="true">${count!==null?esc(count):ready?cabinetIcon('check'):waiting}</span></div>`;
-  root.innerHTML=`<div class="bc-heading"><div><h2>Контроль заказов</h2><p>${esc(fmtDate(data.work_date))}</p></div><label class="bc-date">Дата<input type="date" id="brigadeControlDate" value="${esc(data.work_date)}" aria-label="Дата контроля заказов"></label></div>
-    <div class="bc-counters" role="group" aria-label="Этап контроля">${[['contact','На связи','on_contact'],['photo','Фото получены','photos_complete'],['done','Завершено','completed']].map(([key,label,field])=>`<button type="button" data-brigade-stage="${key}" aria-pressed="${stage===key}" class="${key==='photo'&&source==='gbu'?'bc-gbu-photo-counter':''}">${key==='photo'&&source==='gbu'?`<span class="bc-photo-count-line"><span>1 фото</span><b>${totals.first_photos||0}/${totals.orders}</b></span><span class="bc-photo-count-line"><span>2 фото</span><b>${totals.second_photos||0}/${totals.orders}</b></span>`:`<b>${totals[field]}/${totals.orders}</b><span>${label}</span>`}</button>`).join('')}</div>
+  root.innerHTML=`<div class="bc-heading"><div><h2>Контроль заказов</h2><p>${esc(fmtDate(data.work_date))}</p></div><button type="button" class="bc-heading-contact" data-brigade-stage="contact" aria-pressed="${stage==='contact'}"><b>${totals.on_contact}/${totals.orders}</b><span>На связи</span></button><label class="bc-date">Дата<input type="date" id="brigadeControlDate" value="${esc(data.work_date)}" aria-label="Дата контроля заказов"></label></div>
+    <div class="bc-counters" role="group" aria-label="Этап контроля"><button type="button" data-brigade-stage="photo" data-brigade-photo-source="private" aria-pressed="${stage==='photo'&&source==='private'}"><b>${privatePhotos.first_photos??privatePhotos.photos_complete??0}/${privatePhotos.orders}</b><span>Фото · частные</span></button><button type="button" data-brigade-stage="photo" data-brigade-photo-source="gbu" class="bc-gbu-photo-split" aria-label="Фото ГБУ: первое ${gbuPhotos.first_photos||0} из ${gbuPhotos.orders}, второе ${gbuPhotos.second_photos||0} из ${gbuPhotos.orders}" aria-pressed="${stage==='photo'&&source==='gbu'}"><span class="bc-gbu-photo-title">ГБУ⬛️</span><span class="bc-gbu-photo-stats"><span><b>${gbuPhotos.first_photos||0}/${gbuPhotos.orders}</b><small>1 фото</small></span><span><b>${gbuPhotos.second_photos||0}/${gbuPhotos.orders}</b><small>2 фото</small></span></span></button><button type="button" data-brigade-stage="done" aria-pressed="${stage==='done'}"><b>${totals.completed||0}/${totals.orders}</b><span>Закончили</span></button></div>
     <div class="bc-sources" role="group" aria-label="Тип заказа">${[['all','Все'],['private','Частные'],['gbu','ГБУ ⬛️']].map(([key,label])=>`<button type="button" data-brigade-source="${key}" aria-pressed="${source===key}">${label} · ${data.totals[key].orders}</button>`).join('')}</div>
     <div class="bc-list-caption"><span>${stage?stages[stage]:captions[source]} · ${items.length}</span><span>По времени связи</span></div>
     ${totals.cards<totals.orders?`<p class="bc-missing">Номера в группе: ${totals.cards}/${totals.orders}. Остальные карточки появятся после отправки номера.</p>`:''}
@@ -9607,7 +9608,7 @@ function renderOwnerBrigadeControl(){
     <p class="bc-legend">${waiting} Ожидается · ${cabinetIcon('check')} Выполнено</p><p class="bc-legend">Частные — 1 фото · ГБУ — 2 фото. Нажмите карточку, чтобы открыть заказ.</p><p class="bc-updated">Обновлено ${esc(new Date(data.updated_at).toLocaleTimeString('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'}))}</p>`;
   qs('#brigadeControlDate',root).onchange=event=>{if(event.target.value)loadBootstrap(event.target.value).catch(error=>toast(error.message))};
   qsa('[data-brigade-source]',root).forEach(button=>button.onclick=()=>{ownerBrigadeControlSource=button.dataset.brigadeSource;renderOwnerBrigadeControl()});
-  qsa('[data-brigade-stage]',root).forEach(button=>button.onclick=()=>{ownerBrigadeControlStage=ownerBrigadeControlStage===button.dataset.brigadeStage?null:button.dataset.brigadeStage;renderOwnerBrigadeControl()});
+  qsa('[data-brigade-stage]',root).forEach(button=>button.onclick=()=>{const same=ownerBrigadeControlStage===button.dataset.brigadeStage&&(!button.dataset.brigadePhotoSource||ownerBrigadeControlSource===button.dataset.brigadePhotoSource);if(button.dataset.brigadePhotoSource)ownerBrigadeControlSource=button.dataset.brigadePhotoSource;ownerBrigadeControlStage=same?null:button.dataset.brigadeStage;renderOwnerBrigadeControl()});
   bindControlReportPhotos(root);
 }
 async function loadOwnerBrigadeControl(){
@@ -9630,6 +9631,21 @@ body[data-cabinet-kind="assistant"] .role-navigation small{font-size:9px;line-he
 .owner-brigade-control-open #summary,.owner-brigade-control-open #selectedDayHeader,.owner-brigade-control-open main>h3,.owner-brigade-control-open #roleOwnOrders{display:none!important}
 #ownerBrigadeControlContent{padding:8px 0 16px}.bc-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}.bc-heading h2{font-size:21px;margin:0}.bc-heading p{font-size:12px;color:var(--muted);margin:4px 0 0}.bc-date{font-size:11px;color:var(--muted);text-align:right}.bc-date input{display:block;max-width:128px;min-height:32px;padding:4px 6px;border:1px solid var(--line);border-radius:10px;background:var(--panel2);color:var(--text);font-size:12px}
 .bc-counters{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.bc-counters button{min-width:0;min-height:70px;padding:8px 4px;border:1px solid var(--line);border-radius:13px;background:var(--panel);color:var(--text)}.bc-counters b{display:block;font-size:23px}.bc-counters span{display:block;font-size:11px;color:var(--muted);margin-top:3px}.bc-counters button[aria-pressed=true]{border-color:var(--gold);background:#211d15}
+#ownerBrigadeControlContent .bc-counters:has(.bc-gbu-photo-split)>button{min-height:46px}
+#ownerBrigadeControlContent .bc-counters button.bc-gbu-photo-split{display:flex;flex-direction:column;align-items:stretch;justify-content:center;gap:2px;padding:3px}
+#ownerBrigadeControlContent .bc-counters .bc-gbu-photo-split .bc-gbu-photo-title{margin:0;font-size:9px;font-weight:700;line-height:10px;color:var(--text)}
+#ownerBrigadeControlContent .bc-counters .bc-gbu-photo-split .bc-gbu-photo-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;margin:0}
+#ownerBrigadeControlContent .bc-counters .bc-gbu-photo-split .bc-gbu-photo-stats>span{margin:0;min-width:0}
+#ownerBrigadeControlContent .bc-counters .bc-gbu-photo-split .bc-gbu-photo-stats b{font-size:14px;line-height:15px;white-space:nowrap}
+#ownerBrigadeControlContent .bc-counters .bc-gbu-photo-split .bc-gbu-photo-stats small{display:block;font-size:8px;line-height:10px;color:var(--muted)}
+#ownerBrigadeControlContent .bc-heading:has(.bc-heading-contact){grid-template-columns:minmax(0,1fr) 62px 104px;gap:4px}
+#ownerBrigadeControlContent .bc-heading .bc-heading-contact{min-width:0;min-height:32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;margin:0;padding:3px;border:1px solid var(--line);border-radius:7px;background:var(--panel2);color:var(--text)}
+#ownerBrigadeControlContent .bc-heading .bc-heading-contact b{font-size:14px;line-height:15px}
+#ownerBrigadeControlContent .bc-heading .bc-heading-contact span{font-size:9px;line-height:10px;color:var(--muted);white-space:nowrap}
+#ownerBrigadeControlContent .bc-heading .bc-heading-contact[aria-pressed=true]{border-color:var(--gold);background:#211d15}
+#ownerBrigadeControlContent .bc-heading:has(.bc-heading-contact) .bc-date{min-width:0}
+#ownerBrigadeControlContent .bc-heading:has(.bc-heading-contact) .bc-date input{width:100%;min-width:0;box-sizing:border-box}
+@media(max-width:350px){#ownerBrigadeControlContent .bc-heading:has(.bc-heading-contact){grid-template-columns:minmax(0,1fr) 54px 90px}}
 .bc-sources{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;padding:4px;margin-top:10px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}.bc-sources button{min-width:0;min-height:40px;padding:6px 2px;border:0;border-radius:8px;background:transparent;color:var(--muted);font-size:12px}.bc-sources button[aria-pressed=true]{background:#2a251b;color:#f6dfac}
 .bc-list-caption{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--muted);margin:12px 0 6px}.bc-missing{font-size:12px;color:var(--gold)}.bc-order{padding:10px 9px;margin-bottom:7px;border:1px solid var(--line);border-radius:13px;background:var(--panel)}.bc-order summary{list-style:none;cursor:pointer}.bc-order summary::-webkit-details-marker{display:none}.bc-order-title{display:flex;gap:6px;align-items:center}.bc-order-title b{font-size:14px;flex:1;min-width:0;overflow-wrap:anywhere}.bc-order-title>span{font-size:11px;color:var(--gold);background:#211d15;border-radius:5px;padding:2px 5px}.bc-order-title>.cabinet-icon{width:14px;height:14px;transform:rotate(90deg)}.bc-order[open] .bc-order-title>.cabinet-icon{transform:rotate(-90deg)}.bc-person{font-size:12px;color:var(--muted);margin:3px 0 7px}
 .bc-stages{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}.bc-stage{min-width:0;padding:5px 3px;border-radius:6px;background:var(--panel2);text-align:center}.bc-stage b{display:flex;align-items:center;justify-content:center;gap:4px;font-size:12px;white-space:nowrap}.bc-stage .cabinet-icon{width:13px;height:13px;color:var(--muted)}.bc-stage>span{display:block;font-size:11px;color:var(--muted);margin-top:2px}.bc-stage.is-done b{color:var(--green)}.bc-stage.is-focused{background:#302719}
@@ -12818,8 +12834,9 @@ UI_USAGE_CONTROLS = {
     'control.private': ('Частные заказы', 'Контроль', '[data-brigade-source="private"]'),
     'control.gbu': ('Заказы ГБУ', 'Контроль', '[data-brigade-source="gbu"]'),
     'control.contact': ('На связи', 'Контроль', '[data-brigade-stage="contact"]'),
-    'control.photo': ('Фото получены', 'Контроль', '[data-brigade-stage="photo"]'),
-    'control.done': ('Завершено', 'Контроль', '[data-brigade-stage="done"]'),
+    'control.photo': ('Фото · частные', 'Контроль', '[data-brigade-photo-source="private"]'),
+    'control.photo.gbu': ('Фото ГБУ: 1 фото и 2 фото', 'Контроль', '[data-brigade-photo-source="gbu"]'),
+    'control.done': ('Закончили', 'Контроль', '[data-brigade-stage="done"]'),
     'control.spec': ('Категория и количество людей', 'Контроль', '[data-control-card] .bc-kind'),
     'control.card': ('Открыть карточку заказа', 'Контроль', '[data-control-card]>summary'),
     'control.crew': ('Состав ГБУ', 'Контроль', '[data-gbu-order-roster]'),
