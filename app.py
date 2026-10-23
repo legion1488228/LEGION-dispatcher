@@ -1246,6 +1246,28 @@ class GbuPayrollRosterInput(BaseModel):
     second_order_employee_ids: list[StrictInt] = Field(default_factory=list, max_length=6)
 
 
+class GbuArchivedEmployeeInput(BaseModel):
+    full_name: StrictStr = Field(min_length=1, max_length=100)
+    metro: StrictStr = Field(default='', max_length=100)
+    height_cm: StrictInt | None = Field(default=None, ge=100, le=230)
+    group_code: Literal['brigadier', 'main', 'cashless', 'reserve'] = 'main'
+
+
+def gbu_historical_date(work_date):
+    return work_date < datetime.now(MOSCOW).date()
+
+
+def gbu_roster_employee_scope(work_date):
+    if not gbu_historical_date(work_date):
+        return and_(Employee.active.is_(True), _visible_employee())
+    # Archived profiles are usable for past accounting only. Access blocks stay
+    # effective and this query never changes activation or Telegram permissions.
+    return and_(
+        or_(Employee.tg_id.is_(None), Employee.tg_id.notin_(HIDDEN_TG_IDS)),
+        or_(Employee.tg_id.is_(None), Employee.tg_id.notin_(select(OwnerManagedBlock.tg_id))),
+    )
+
+
 def gbu_staff_pay(category, is_brigadier, name='', metro=''):
     if category not in {'standard', 'elite'}:
         raise ValueError('Не указана категория')
@@ -1284,7 +1306,8 @@ def gbu_staff_payroll(month: str, db: Session = Depends(get_db), user: TelegramU
             row=people.setdefault(member['id'],{'id':member['id'],'name':member['name'],'exits':0,'amount':0,'orders':[]})
             row['exits']+=1;row['amount']+=member['amount'];row['orders'].append(dict(item,amount=member['amount'],role=member['role'],category=roster['category']))
     profiles = {employee.id: employee for employee in db.scalars(select(Employee).where(
-        Employee.id.in_(list(people)), _visible_employee()))} if people else {}
+        Employee.id.in_(list(people)),
+        or_(Employee.tg_id.is_(None), Employee.tg_id.notin_(HIDDEN_TG_IDS))))} if people else {}
     for employee_id, row in people.items():
         profile = profiles.get(employee_id)
         if profile:
@@ -1320,8 +1343,10 @@ def save_gbu_staff_roster(data: GbuPayrollRosterInput, db: Session = Depends(get
         raise HTTPException(422,'Второй заказ можно указать только выбранному сотруднику')
     # Sorted permanent employee locks protect the two-order limit even when two
     # different cards are being confirmed concurrently. No schema migration needed.
-    employees=list(db.scalars(select(Employee).where(Employee.id.in_(ids),Employee.active.is_(True),
-        _visible_employee()).order_by(Employee.id).with_for_update()))
+    previous_ids = {m['id'] for m in previous['crew']} if previous else set()
+    employees=list(db.scalars(select(Employee).where(Employee.id.in_(ids),
+        or_(gbu_roster_employee_scope(card.work_date), Employee.id.in_(previous_ids)))
+        .order_by(Employee.id).with_for_update()))
     if len(employees)!=len(ids):
         raise HTTPException(409,'Список сотрудников изменился. Обновите состав')
     context = gbu_order_roster_context(db, card)
@@ -1397,7 +1422,13 @@ def gbu_other_order_assignments(db, card):
 def gbu_order_roster_context(db, card):
     key = f'card:{card.chat_id}:{card.message_id}'
     detail = gbu_control_earning_details(db, card.work_date).get(f'card:{card.id}')
-    employees = list(db.scalars(select(Employee).where(Employee.active.is_(True), _visible_employee())))
+    historical = gbu_historical_date(card.work_date)
+    record = db.get(GbuPayrollRoster, key)
+    saved = json.loads(record.payload) if record else None
+    saved_ids = {m['id'] for m in saved['crew']} if saved else set()
+    employees = list(db.scalars(select(Employee).where(or_(
+        gbu_roster_employee_scope(card.work_date), Employee.id.in_(saved_ids)))))
+    active_ids = set(db.scalars(select(Employee.id).where(Employee.active.is_(True), _visible_employee())))
     leaders = [e for e in employees if e.tg_id == card.tg_id]
     leader_id = leaders[0].id if len(leaders) == 1 else None
     summary = readiness_summary_data(db, card.work_date)
@@ -1407,19 +1438,18 @@ def gbu_order_roster_context(db, card):
         for item in group.get(status, []) if item.get('id', 0) > 0}
     assignments = gbu_other_order_assignments(db, card)
     busy = set(assignments)
-    record = db.get(GbuPayrollRoster, key)
-    saved = json.loads(record.payload) if record else None
-    saved_ids = {m['id'] for m in saved['crew']} if saved else set()
     people = [{**_employee_dict(e), 'busy': e.id in busy,
         'other_order_count': len(assignments.get(e.id, ())),
         'second_order_available': len(assignments.get(e.id, ())) == 1,
         'selected': e.id in saved_ids, 'leader': e.id == leader_id,
+        'archived': e.id not in active_ids,
         'readiness_status': reported.get(e.id)} for e in employees
-        if e.id in reported or e.id == leader_id or e.id in saved_ids or e.id in busy]
+        if e.id in reported or e.id == leader_id or e.id in saved_ids or e.id in busy
+        or (historical and e.id not in active_ids)]
     people.sort(key=lambda e: (not e['leader'], str(e['display_name']).casefold(), e['id']))
     return {'card_id': card.id, 'date': card.work_date.isoformat(), 'surname': card.surname,
         'detail': detail, 'leader': next((e for e in people if e['leader']), None),
-        'employees': people, 'confirmed': saved is not None,
+        'employees': people, 'confirmed': saved is not None, 'historical': historical,
         'revision': hashlib.sha256(record.payload.encode()).hexdigest() if record else None,
         'confirmed_crew': [{'id':m['id'], 'name':m['name'], 'role':m['role'],
             'employee':next((e for e in people if e['id']==m['id']),None)} for m in saved['crew']] if saved else [],
@@ -1438,6 +1468,48 @@ def get_gbu_order_roster(card_id: int, db: Session = Depends(get_db), user: Tele
     return JSONResponse(gbu_order_roster_context(db, card), headers={'Cache-Control':'private, no-store'})
 
 
+@app.post('/api/gbu-staff-payroll/roster/{card_id}/archive-employee')
+def add_gbu_archived_employee(card_id: int, data: GbuArchivedEmployeeInput,
+        db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    if not _dispatcher_access(db, user.id):
+        raise HTTPException(403, 'Доступ только диспетчеру')
+    card = db.scalar(select(NumberCardEvent).where(NumberCardEvent.id == card_id,
+        NumberCardEvent.source == 'gbu', _visible_number_card()).with_for_update())
+    if not card:
+        raise HTTPException(404, 'Заказ ГБУ не найден')
+    if not gbu_historical_date(card.work_date):
+        raise HTTPException(409, 'Архив сотрудников доступен только за прошлые даты')
+    if not effective_order_photo(db, card).get('first_received'):
+        raise HTTPException(409, 'Сначала нужно первое фото заказа')
+    normalize = lambda value: ' '.join(str(value or '').casefold().replace('ё', 'е').split())
+    name, metro = ' '.join(data.full_name.split()), ' '.join(data.metro.split())
+    if not name:
+        raise HTTPException(422, 'Введите имя сотрудника')
+    identity = (normalize(name), normalize(metro), data.height_cm)
+    if db.get_bind().dialect.name == 'postgresql':
+        db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),
+            {'key': 'legion:archived-employee:' + json.dumps(identity, ensure_ascii=False)})
+    matches = [e for e in db.scalars(select(Employee))
+        if (normalize(e.full_name), normalize(e.metro), e.height_cm) == identity]
+    if matches:
+        context = gbu_order_roster_context(db, card)
+        archived = [e for e in context['employees'] if e['archived'] and e['id'] in {m.id for m in matches}]
+        if len(matches) != 1 or len(archived) != 1:
+            raise HTTPException(409, 'Такая запись уже существует. Уточните имя, метро и рост или выберите сотрудника в списке.')
+        return {'ok': True, 'employee': archived[0], 'already_exists': True}
+    employee = Employee(full_name=name, metro=metro, height_cm=data.height_cm,
+        group_code=data.group_code, tg_id=None, phone='', telegram_username='',
+        active=False, is_cashier=False, has_car=False)
+    db.add(employee)
+    db.flush()
+    # Keep a new historical-only record out of subsequent active staff syncs too.
+    db.add(EmployeeDeletion(employee_id=employee.id, tg_id=None, deleted_by_tg_id=user.id))
+    person = dict(_employee_dict(employee), archived=True, selected=False, leader=False,
+        busy=False, other_order_count=0, second_order_available=False, readiness_status=None)
+    db.commit()
+    return {'ok': True, 'employee': person, 'already_exists': False}
+
+
 def _date_folders(db: Session, selected: date):
     today = datetime.now(MOSCOW).date()
     # The date ribbon is bounded by the selected calendar month.
@@ -1454,9 +1526,6 @@ def _date_folders(db: Session, selected: date):
         .group_by(Order.work_date)
     ).all()) if base else {}
 
-    for manual in db.scalars(select(DispatchDayCounts).where(DispatchDayCounts.work_date.in_(list(base)))):
-        original = db.scalars(select(Order).where(Order.work_date == manual.work_date, Order.status != "cancelled")).all()
-        counts[manual.work_date] = (manual.private_count if manual.private_count is not None else sum(o.source == "private" for o in original)) + (manual.gbu_count if manual.gbu_count is not None else sum(o.source == "gbu" for o in original))
     items = []
     for d in sorted(base):
         label = d.strftime("%d.%m")
@@ -1481,12 +1550,14 @@ def _day_summary(db: Session, work_date: date):
     active = [o for o in orders if o.status != "cancelled"]
     readiness = readiness_summary_data(db, work_date)
     completion = order_completion_data(db, work_date)
-    private = completion["sources"]["private"]["expected"]
-    gbu = completion["sources"]["gbu"]["expected"]
-    requested_by_source = _requested_staff_by_source(db, work_date)
+    private = sum(o.source=='private' for o in active)
+    gbu = sum(o.source=='gbu' for o in active)
+    requested_by_source = {source:sum(o.team_size or 0 for o in active if o.source==source) for source in ('private','gbu')}
+    effective_by_source = dispatch_pair_demand(db,active,requested_by_source)
     return {
         "requested_staff": sum(requested_by_source.values()),
         "requested_staff_by_source": requested_by_source,
+        "requested_staff_effective": sum(effective_by_source.values()),
         "requested_staff_without_carryouts": _requested_staff_from_orders(db, work_date, include_carryouts=False),
         "number_cards_count": db.scalar(select(func.count(NumberCardEvent.id)).where(NumberCardEvent.work_date == work_date, _visible_number_card())),
         "order_completion": completion,
@@ -14350,11 +14421,18 @@ def dispatch_people(order_id: int, db: Session = Depends(get_db), user: Telegram
     dispatch_guard(db, user)
     order=db.get(Order,order_id)
     if not order: raise HTTPException(404,'Заказ не найден')
-    rows=list(db.scalars(select(Employee).where(Employee.active.is_(True),_visible_employee())))
+    assignments=dispatch_assignments(db,order)
+    assigned={row.employee_id for row in assignments}
+    leaders={row.employee_id for row in assignments if row.role=='brigadier'}
+    active_ids=set(db.scalars(select(Employee.id).where(Employee.active.is_(True),_visible_employee())))
+    # Current assignments remain removable even after leaving Telegram or being
+    # archived. They are not added back to the pool of available employees.
+    rows=list(db.scalars(select(Employee).where(or_(Employee.id.in_(active_ids),Employee.id.in_(assigned)))))
     loads=dispatch_workloads(db,order.work_date,exclude_order_id=order.id)
     ready=dispatch_ready_ids(db,order.work_date)
-    assigned={row.employee_id for row in dispatch_assignments(db,order)}
-    return {'items':[{**_employee_dict(p,loads.get(p.id,0)), 'ready_for_day':p.id in ready}
+    return {'items':[{**_employee_dict(p,loads.get(p.id,0)), 'ready_for_day':p.id in ready,
+        'archived':p.id not in active_ids, 'assigned':p.id in assigned,
+        'assigned_brigadier':p.id in leaders}
         for p in rows if p.id in ready or p.id in assigned]}
 
 
@@ -14422,10 +14500,18 @@ def dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session = Depe
     ids=[data.brigadier_id]+data.member_ids
     if not 1<=len(ids)<=order.team_size or len(set(ids))!=len(ids) or (not data.allow_partial and len(ids)!=order.team_size):
         raise HTTPException(422,'Проверьте количество сотрудников и отсутствие повторов')
-    people=list(db.scalars(select(Employee).where(Employee.id.in_(ids),Employee.active.is_(True),
-        _visible_employee()).order_by(Employee.id).with_for_update()))
+    current=dispatch_assignments(db,order)
+    previous={a.employee_id for a in current}
+    previous_leaders={a.employee_id for a in current if a.role=='brigadier'}
+    people=list(db.scalars(select(Employee).where(Employee.id.in_(ids),or_(
+        and_(Employee.active.is_(True),_visible_employee()),Employee.id.in_(previous)))
+        .order_by(Employee.id).with_for_update()))
     profiles={p.id:p for p in people}
-    if len(people)!=len(ids) or profiles[data.brigadier_id].group_code!='brigadier' or not profiles[data.brigadier_id].tg_id:
+    eligible_ids=set(db.scalars(select(Employee.id).where(Employee.id.in_(ids),
+        Employee.active.is_(True),_visible_employee())))
+    if len(people)!=len(ids) or (data.brigadier_id not in previous_leaders and (
+            data.brigadier_id not in eligible_ids or profiles[data.brigadier_id].group_code!='brigadier'
+            or not profiles[data.brigadier_id].tg_id)):
         raise HTTPException(409,'Проверьте бригадира, его Telegram ID и сотрудников')
     partner = dispatch_pair_partner(db, order)
     if partner: dispatch_pair_crews(db, order, partner, (data.brigadier_id, set(ids)))
@@ -14434,7 +14520,6 @@ def dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session = Depe
         if other.deceased_name.strip().casefold()==order.deceased_name.strip().casefold() and any(
             a.role=='brigadier' and a.employee_id==data.brigadier_id for a in dispatch_assignments(db,other)):
             raise HTTPException(409,'Два одинаковых заказа бригадира нельзя однозначно связать с номером в группе')
-    previous={a.employee_id for a in dispatch_assignments(db,order)}
     if not (set(ids)-previous) <= dispatch_ready_ids(db,order.work_date):
         raise HTTPException(409,'Выбирайте сотрудников, которые отписались о готовности на эту дату. Обновите список.')
     loads=dispatch_workloads(db,order.work_date,exclude_order_id=order.id)
@@ -14443,10 +14528,16 @@ def dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session = Depe
         if count>=2: raise HTTPException(409,'Сотрудник уже назначен на два заказа')
         if count and person.id not in data.second_order_employee_ids and person.id not in previous:
             raise HTTPException(409,'Подтвердите «2-й заказ» для занятого сотрудника')
-    for row in dispatch_assignments(db,order): db.delete(row)
+    # Retain unaffected assignment rows, including their original audit fields.
+    for row in current:
+        if row.employee_id not in ids:
+            db.delete(row)
+        else:
+            row.role='brigadier' if row.employee_id==data.brigadier_id else 'member'
     db.flush()
     for pid in ids:
-        db.add(Assignment(order_id=order.id,employee_id=pid,role='brigadier' if pid==data.brigadier_id else 'member',created_by_tg_id=user.id))
+        if pid not in previous:
+            db.add(Assignment(order_id=order.id,employee_id=pid,role='brigadier' if pid==data.brigadier_id else 'member',created_by_tg_id=user.id))
     if not plan:
         db.add(DispatchPlan(order_id=order.id,request_key=secrets.token_hex(16),payload='{}'))
     order.status='assigning';db.commit();return {'ok':True}
@@ -15434,6 +15525,194 @@ async function loadEmployees(){
 
 
 INLINE_INDEX_HTML = _staff_directory_loading_html(INLINE_INDEX_HTML)
+
+
+def _simplify_readiness_html(html):
+    """Keep the readiness page free of legacy morning controls and count inputs."""
+    start=html.index('function renderSummary() {')
+    end=html.index('\nasync function openContactBrigades(',start)
+    section=html[start:end]
+    for source,label in [('private','Частные'),('gbu','ГБУ')]:
+        section=section.replace(f'<button class="metric" data-count-field="{source}_count"><b>${{s.{source}_count}} ✍️</b><span>{label}</span></button>',
+            f'<div class="metric"><b>${{s.{source}_count}}</b><span>{label}</span></div>',1)
+    section=section.replace("  qsa('[data-count-field]').forEach(btn=>btn.onclick=()=>editDispatchCount(btn.dataset.countField));\n",'')
+    section=section.replace('requested_staff_without_carryouts','requested_staff_effective').replace('Без выносов:','С учётом сдвоенных заказов:')
+    morning=section.index("  const view=qs('#readinessView');")
+    section=section[:morning]+"  qs('#brigadeWork')?.remove();\n}\n"
+    html=html[:start]+section+html[end:]
+    html=re.sub(r'<button\b[^>]*\bid="readinessHistoryBtn"[^>]*>.*?</button>','',html,count=1,flags=re.S)
+    html=html.replace("    qs('#readinessHistoryBtn').onclick=async event=>{", "    if(qs('#readinessHistoryBtn'))qs('#readinessHistoryBtn').onclick=async event=>{",1)
+    # The free-staff tool had a second binding in a later script. Removing the
+    # button must also remove these accesses or that script stops at a null node.
+    for binding in (
+        "qs('#readinessHistoryBtn').onclick=openFreeStaff;",
+        "qs('#readinessHistoryBtn').title='Выбрать готовых сотрудников без заказа на завтра';",
+    ):
+        if html.count(binding) != 1:
+            raise ValueError('Readiness action binding missing: ' + binding)
+        html=html.replace(binding,'',1)
+    return html.replace('</head>', '''<style id="readiness-simplified-actions">
+#employeeReadiness .section-actions.readiness-actions{grid-template-columns:44px minmax(0,1fr) 44px}
+#employeeReadiness .readiness-actions #readinessRemindersBtn{grid-column:1}
+#employeeReadiness #readinessAvralBtn{grid-column:2}
+#employeeReadiness #readinessSendBtn{grid-column:3}
+</style></head>''',1)
+
+
+INLINE_INDEX_HTML = _simplify_readiness_html(INLINE_INDEX_HTML)
+
+def _historical_payroll_roster_html(html):
+    def replace_once(text, old, new):
+        if text.count(old) != 1:
+            raise ValueError('Historical payroll UI anchor missing: ' + old[:100])
+        return text.replace(old, new, 1)
+
+    start = html.index('function openGbuPayrollReport(title,body){')
+    end = html.index('\n</script>', start)
+    report = html[start:end]
+    first = report.index(' let outsideStart=false;')
+    last = report.index(" dialog.addEventListener('close',", first)
+    report = report[:first] + ''' // Dismiss on a tap in empty report space or on the backdrop.
+ dialog.setAttribute('closedby','closerequest');
+ const blank=target=>!target.closest('button,a,input,textarea,select,label,summary,[role="button"]')&&target.matches('dialog,div,section,header,footer');
+ let reportTap=null,reportDragged=false;
+ dialog.addEventListener('pointerdown',event=>{
+  event.stopPropagation();reportTap={x:event.clientX,y:event.clientY,blank:blank(event.target)};reportDragged=false;
+ });
+ dialog.addEventListener('pointermove',event=>{
+  if(reportTap&&Math.hypot(event.clientX-reportTap.x,event.clientY-reportTap.y)>10)reportDragged=true;
+ });
+ dialog.addEventListener('pointercancel',()=>{reportTap=null;reportDragged=true});
+ dialog.addEventListener('click',event=>{
+  event.stopPropagation();const tap=reportTap;reportTap=null;
+  if(reportDragged||!tap?.blank||!blank(event.target))return;
+  if(Math.hypot(event.clientX-tap.x,event.clientY-tap.y)>10)return;
+  dialog.close();
+ });
+''' + report[last:]
+    html = html[:start] + report + html[end:]
+
+    start = html.index('async function openGbuOrderRoster(cardId,afterSave,editing=false){')
+    end = html.index('\nasync function openGbuPayrollRoster(', start)
+    section = html[start:end]
+    section = replace_once(section, 'editing=false){', 'editing=false,resume=null){')
+    section = replace_once(section, '  const readonly=data.confirmed&&!editing;', '''  if(resume)data.employees.forEach(e=>{e.selected=e.leader||resume.selected.includes(e.id)});
+  const readonly=data.confirmed&&!editing;
+  let showArchived=Boolean(resume?.showArchived||data.employees.some(e=>e.archived&&e.selected));''')
+    section = replace_once(section,
+        'new Set(data.employees.filter(e=>e.selected&&e.busy&&e.second_order_available).map(e=>e.id))',
+        'new Set(resume?.second||data.employees.filter(e=>e.selected&&e.busy&&e.second_order_available).map(e=>e.id))')
+    first = section.index('  const crewGroups=')
+    last = section.index('  root.innerHTML=', first)
+    section = section[:first] + r'''
+  const crewRow=(e,i)=>`<div class="gbu-crew-choice ${e.busy&&!second.has(e.id)?'is-busy':''}" data-crew-name="${esc((readinessEmployeeName(e)+' '+(e.metro||'')).toLowerCase())}"><span><b data-crew-number>${i+1}.</b> ${esc(readinessEmployeeName(e))}${secondAction(e)}${e.archived?'<small>Архив · '+esc(e.group_label||'Сотрудник')+'</small>':!e.busy&&e.readiness_status!=='ready'?'<small>В подтверждённом составе</small>':''}</span><input type="checkbox" aria-label="${esc(readinessEmployeeName(e))}" value="${e.id}" ${e.selected?'checked':''} ${e.busy&&!second.has(e.id)||readonly?'disabled':''}></div>`;
+  const crewGroups=[['brigadier','Бригадиры'],['main','Основной состав'],['cashless','Безнал состав'],['reserve','Резерв']];
+  const crewSections=crewGroups.map(([code,label])=>{
+   const people=data.employees.filter(e=>!e.leader&&!e.archived&&e.group_code===code&&(e.readiness_status==='ready'||e.busy||(data.confirmed&&e.selected)));
+   return `<section class="gbu-crew-group" data-crew-group><h4>${esc(label)} · ${people.length}</h4><div data-crew-list>${people.map(crewRow).join('')}</div>${people.length?'':'<small class="muted">Готовых сотрудников нет</small>'}</section>`;
+  }).join('');
+  const archived=data.employees.filter(e=>e.archived&&!e.leader);
+  const archiveToggle=(data.historical||archived.length)?`<button type="button" class="secondary gbu-crew-archive-toggle" data-crew-archive-toggle aria-expanded="${showArchived}">Архив сотрудников · ${archived.length}</button>`:'';
+  const archiveSection=(data.historical||archived.length)?`<section class="gbu-crew-group gbu-crew-archive" data-crew-group data-crew-archive ${showArchived?'':'hidden'}><h4>Архив сотрудников · ${archived.length}</h4><p class="muted">Для прошлых выходов. Сотрудники остаются в архиве.</p><div data-crew-list>${archived.map(crewRow).join('')}</div>${readonly||!data.historical?'':`<details data-crew-archive-create><summary>＋ Добавить сотрудника в архив</summary><p class="muted">Если записи нет, укажите данные. После добавления проверьте состав и подтвердите его.</p><label>Имя / ФИО<input class="search" data-archive-input data-archive-name maxlength="100" autocomplete="off"></label><label>Метро<input class="search" data-archive-input data-archive-metro maxlength="100" autocomplete="off"></label><label>Рост<input class="search" data-archive-input data-archive-height type="number" min="100" max="230" inputmode="numeric" placeholder="Необязательно"></label><label>Группа<select class="search" data-archive-input data-archive-group><option value="main">Основной состав</option><option value="cashless">Безнал состав</option><option value="reserve">Резерв</option><option value="brigadier">Бригадиры</option></select></label><button type="button" class="secondary" data-crew-archive-add>Добавить в архив</button><p data-archive-error role="alert"></p></details>`}</section>`:'';
+''' + section[last:]
+    section = replace_once(section, '${crewSections}<p data-crew-error', '${archiveToggle}${crewSections}${archiveSection}<p data-crew-error')
+    section = replace_once(section,
+        "box.disabled=readonly||busy||(emp.busy&&!second.has(emp.id))||(!box.checked&&n>=need)",
+        "box.disabled=readonly||busy||(emp.archived&&!data.historical&&!box.checked)||(emp.busy&&!second.has(emp.id))||(!box.checked&&n>=need)")
+    section = replace_once(section, "   button.disabled=busy||readonly||n!==need||!data.photo_received||leaderBlocked;", """   button.disabled=busy||readonly||n!==need||!data.photo_received||leaderBlocked;
+   form.querySelectorAll('[data-archive-input],[data-crew-archive-add]').forEach(input=>input.disabled=busy||readonly);
+   const toggle=form.querySelector('[data-crew-archive-toggle]');if(toggle)toggle.disabled=busy;""")
+    first = section.index('  search.oninput=event=>{')
+    last = section.index('  form.onsubmit=', first)
+    section = section[:first] + r'''
+  function filterCrew(){
+   const term=normalizeCrewSearch(search.value),tokens=term.split(/\s+/).filter(Boolean);let matches=0;
+   form.classList.toggle('is-searching',!!term);
+   form.querySelectorAll('[data-crew-name]').forEach(row=>{
+    const words=normalizeCrewSearch(row.dataset.crewName).split(/\s+/);
+    const inArchive=Boolean(row.closest('[data-crew-archive]'));
+    row.hidden=(inArchive&&!showArchived)||!tokens.every(token=>words.some(word=>word.startsWith(token)));
+    if(!row.hidden)matches++;
+   });
+   form.querySelectorAll('[data-crew-group]').forEach(group=>{
+    const inArchive=group.hasAttribute('data-crew-archive');
+    group.hidden=inArchive?!showArchived:!!term&&![...group.querySelectorAll('[data-crew-name]')].some(row=>!row.hidden);
+   });
+   noMatches.hidden=!term||matches>0;layoutCrewRows();
+  }
+  search.oninput=filterCrew;
+  search.value=resume?.search||'';
+  const archiveToggleButton=form.querySelector('[data-crew-archive-toggle]');
+  if(archiveToggleButton)archiveToggleButton.onclick=()=>{showArchived=!showArchived;archiveToggleButton.setAttribute('aria-expanded',String(showArchived));filterCrew()};
+  const archiveAdd=form.querySelector('[data-crew-archive-add]');
+  if(archiveAdd){
+   archiveAdd.onclick=async()=>{
+    if(busy||readonly)return;
+    const archiveError=form.querySelector('[data-archive-error]');archiveError.textContent='';
+    const name=form.querySelector('[data-archive-name]').value.trim(),heightText=form.querySelector('[data-archive-height]').value;
+    const height=heightText===''?null:Number(heightText);
+    if(!name){archiveError.textContent='Введите имя сотрудника';return}
+    if(height!==null&&(!Number.isInteger(height)||height<100||height>230)){archiveError.textContent='Рост: целое число от 100 до 230';return}
+    busy=true;update();
+    try{
+     const result=await api('/api/gbu-staff-payroll/roster/'+cardId+'/archive-employee',{method:'POST',body:JSON.stringify({full_name:name,metro:form.querySelector('[data-archive-metro]').value.trim(),height_cm:height,group_code:form.querySelector('[data-archive-group]').value})});
+     if(!dialog.open)return;
+     const ids=selected();if(ids.length<need&&!ids.includes(result.employee.id)&&!result.employee.leader)ids.push(result.employee.id);
+     await openGbuOrderRoster(cardId,afterSave,editing,{selected:ids,second:[...second],showArchived:true,search:''});
+    }catch(error){if(dialog.open){archiveError.textContent=error.message;busy=false;update()}}
+   };
+   form.querySelector('[data-crew-archive-create]').addEventListener('keydown',event=>{if(event.key==='Enter'&&event.target.tagName==='INPUT'){event.preventDefault();archiveAdd.click()}});
+  }
+  filterCrew();
+''' + section[last:]
+    html = html[:start] + section + html[end:]
+
+    start = html.index('async function openDispatchCrew(order,edit=false){')
+    end = html.index('\nconst dispatchOriginalNumbers=', start)
+    section = html[start:end]
+    section = replace_once(section,
+        " let leader=order.brigadier?.id||null,selected=new Set(order.members.map(p=>p.id)),second=new Set();let step=leader?2:1;\n const people=data.items,old=new Set([order.brigadier?.id,...order.members.map(p=>p.id)]);",
+        " const people=data.items,old=new Set([...people.filter(p=>p.assigned).map(p=>p.id),order.brigadier?.id,...order.members.map(p=>p.id)].filter(Boolean));\n let leader=people.find(p=>p.assigned_brigadier)?.id||order.brigadier?.id||null,selected=new Set([...old].filter(id=>id!==leader)),second=new Set();let step=leader?2:1;")
+    section = replace_once(section,
+        "const blocked=(p.workload>=2||p.ready_for_day===false)&&!old.has(p.id);",
+        "const blocked=((p.workload>=2||p.ready_for_day===false)&&!old.has(p.id))||(p.archived&&!checked);")
+    section = replace_once(section,
+        "${p.height_cm||'—'}${busy(p)?' · уже на заказе':''}",
+        "${p.height_cm||'—'}${p.archived?' · В архиве':''}${busy(p)?' · уже на заказе':''}")
+    section = replace_once(section,
+        "${busy(p)&&!blocked&&!old.has(p.id)?`<button",
+        "${p.archived&&checked?`<button type=\"button\" data-plan-remove-archived=\"${p.id}\">Убрать из состава</button>`:''}${busy(p)&&!blocked&&!old.has(p.id)?`<button")
+    section = replace_once(section,
+        "return Number(diff(a)>3)-Number(diff(b)>3)",
+        "return Number(!selected.has(a.id))-Number(!selected.has(b.id))||Number(diff(a)>3)-Number(diff(b)>3)")
+    section = replace_once(section,
+        "people.filter(p=>p.group_code==='brigadier')",
+        "people.filter(p=>p.group_code==='brigadier'||p.assigned_brigadier)")
+    section = replace_once(section,
+        "box.disabled=!box.checked&&(selected.size>=need||people.find(p=>p.id===Number(box.value)).workload>=2&&!old.has(Number(box.value)))",
+        "box.disabled=!box.checked&&(people.find(p=>p.id===Number(box.value)).archived||selected.size>=need||people.find(p=>p.id===Number(box.value)).workload>=2&&!old.has(Number(box.value)))")
+    section = replace_once(section,
+        " qsa('[data-plan-second]',root).forEach(button=>button.onclick=",
+        """ qsa('[data-plan-remove-archived]',root).forEach(button=>button.onclick=event=>{
+  event.preventDefault();event.stopPropagation();const id=Number(button.dataset.planRemoveArchived);
+  selected.delete(id);second.delete(id);if(leader===id){leader=null;step=1}draw();
+ });
+ qsa('[data-plan-second]',root).forEach(button=>button.onclick=""")
+    html = html[:start] + section + html[end:]
+    return html.replace('</head>', '''<style id="historical-payroll-roster-style">
+.gbu-crew-archive-toggle{width:100%;margin:10px 0 0;min-height:40px}
+.gbu-crew-archive{border:1px solid var(--gold);border-radius:10px;padding:8px}
+.gbu-crew-archive>p,.gbu-crew-archive details p{font-size:12px;line-height:1.35}
+.gbu-crew-archive details{margin-top:10px;padding-top:8px;border-top:1px solid var(--line)}
+.gbu-crew-archive summary{cursor:pointer;font-weight:700;font-size:13px;min-height:36px}
+.gbu-crew-archive label{display:block;font-size:12px;margin-top:7px}
+.gbu-crew-archive .search{margin:4px 0 0;font-size:16px}
+.gbu-crew-archive [data-crew-archive-add]{width:100%;margin-top:10px;min-height:40px}
+.gbu-crew-archive [data-archive-error]{color:var(--red)}
+</style></head>''', 1)
+
+
+INLINE_INDEX_HTML = _historical_payroll_roster_html(INLINE_INDEX_HTML)
 
 
 def _isolated_preview_screen_html():
