@@ -14464,6 +14464,28 @@ body:has(#modal:not(.hidden) #dispatchEditor){overflow:hidden}
 #modal #dispatchEditor [data-plan-error]{margin:0;font-size:11px;line-height:1.2}
 #modal #dispatchEditor [data-plan-error]:empty{display:none}
 .dispatch-people{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}.dispatch-choice{display:grid;grid-template-columns:minmax(0,1fr) 22px;align-items:center;gap:4px;border:1px solid var(--line);border-radius:9px;padding:7px;font-size:12px;min-width:0}.dispatch-choice input{width:19px;height:19px;justify-self:end}.dispatch-choice small{display:block}.dispatch-choice button{grid-column:1/-1;font-size:10px;padding:3px}.dispatch-choice:has(:checked){border-color:var(--gold)}.dispatch-leaders{display:grid;gap:5px}.dispatch-selected{font-size:13px;margin:10px 0}.dispatch-roster p{margin:5px 0;font-size:13px}.dispatch-roster{border:1px solid var(--line);border-radius:10px;padding:9px;margin-top:10px}.dispatch-roster button{width:100%;font-size:12px;margin-top:8px}.dispatch-numbers article{border-bottom:1px solid var(--line);padding:8px;font-size:13px;display:flex;justify-content:space-between;gap:8px}.dispatch-numbers small{display:block}.dispatch-status{font-size:12px;white-space:pre-line}
+#modal:has(#dispatchNumbers){left:8px;right:8px;top:8px;bottom:calc(72px + var(--safe-bottom));width:auto;max-width:640px;max-height:none;margin:0 auto;padding:8px;display:flex;flex-direction:column;overflow:hidden}
+#modal:has(#dispatchNumbers)>.modal-head{position:relative;top:auto;flex:none;min-height:30px;margin:0 0 5px;padding:0;gap:6px}
+#modal:has(#dispatchNumbers)>.modal-head::before{display:none}
+#modal:has(#dispatchNumbers)>.modal-head h3{margin:0;font-size:18px;line-height:1.2;min-width:0}
+#modal:has(#dispatchNumbers)>.modal-head .close-btn{width:32px;height:32px;min-width:32px;flex-shrink:0;padding:0}
+#dispatchNumbers{flex:1;min-height:0;display:flex;flex-direction:column;gap:5px;overflow:hidden;font-size:12px}
+#dispatchNumbers .dispatch-number-summary{flex:none;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;align-items:center;margin:0}
+#dispatchNumbers .dispatch-number-summary small{grid-column:1/-1;font-size:11px;color:var(--muted)}
+#dispatchNumbers .dispatch-number-summary span{padding:5px;border-radius:8px;background:var(--panel2);font-size:11px;white-space:nowrap}
+#dispatchNumbers .dispatch-number-columns{flex:1;min-height:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;align-items:stretch}
+#dispatchNumbers .dispatch-number-column{min-width:0;min-height:0;display:flex;flex-direction:column}
+#dispatchNumbers .dispatch-number-column+section{border-left:1px solid var(--line);padding-left:6px;margin-left:-6px}
+#dispatchNumbers .dispatch-number-column h4{flex:none;display:flex;justify-content:space-between;align-items:center;gap:4px;margin:0 0 4px;font-size:13px;line-height:18px;color:var(--gold)}
+#dispatchNumbers .dispatch-number-column h4 small{font-size:10px;font-weight:400;white-space:nowrap}
+#dispatchNumbers .dispatch-number-list{flex:1;min-height:0;display:grid;grid-auto-rows:minmax(32px,calc((100% - 27px)/10));align-content:start;gap:3px;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y}
+#dispatchNumbers article.dispatch-number-card{box-sizing:border-box;display:grid;grid-template-rows:minmax(0,1fr) minmax(0,1fr);align-content:center;gap:1px;min-width:0;min-height:0;height:auto;margin:0;padding:3px 4px;border:1px solid var(--line);border-radius:7px;background:var(--panel);font-size:11px;line-height:12px;overflow:hidden}
+#dispatchNumbers .dispatch-number-card header{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:3px;min-width:0;min-height:0;font-size:11px;line-height:12px}
+#dispatchNumbers .dispatch-number-card header strong{min-width:0;font-size:11px;font-weight:700;line-height:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#dispatchNumbers .dispatch-number-card small{align-self:center;min-width:0;min-height:0;font-size:10px;font-weight:400;line-height:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted)}
+#dispatchNumbers .dispatch-number-card.is-posted{border-color:var(--green,#398771)}
+#dispatchNumbers .dispatch-number-card.is-posted header span{color:var(--green,#398771)}
+#dispatchNumbers [data-plan-original]{flex:none;width:100%;min-height:30px;margin-top:0;padding:4px;font-size:11px}
 </style>
 <script>
 let dispatchBoard=null,dispatchLoad=0;
@@ -14682,7 +14704,15 @@ openNumberCards=async function(workDay){
  try{const data=await api('/api/dispatch-board?work_date='+day);if(qs('#dispatchNumbers')!==root)return;
  if(!data.items.length)return dispatchOriginalNumbers(day);
  const count=data.numbers.filter(n=>n.posted).length;
- root.className='dispatch-numbers';root.innerHTML=`<h3>Выставили: ${count}/${data.numbers.length}</h3><p>Не выставили: ${data.numbers.length-count}</p>${[false,true].map(posted=>`<h4>${posted?'Выставили':'Не выставили'}</h4>${data.numbers.filter(n=>n.posted===posted).map(n=>`<article><span>${esc(n.brigadier?dispatchPerson(n.brigadier):'Бригадир не назначен')}<small>${n.source==='gbu'?'ГБУ ⬛️':'Частный'} №${n.number} · ум: ${esc(n.surname)}</small></span><span>${posted?'✓':'⏳'}</span></article>`).join('')}`).join('')}<button type="button" data-plan-original>Все выставленные номера и действия ›</button>`;
+ const bySource=Object.fromEntries(['private','gbu'].map(source=>[source,data.numbers.filter(n=>n.source===source).sort((a,b)=>Number(Boolean(a.posted))-Number(Boolean(b.posted))||a.number-b.number)]));
+ root.className='dispatch-numbers';root.innerHTML=`<div class="dispatch-number-summary"><small>${esc(dispatchShortDay(day))}</small><span>Выставили: <b>${count}/${data.numbers.length}</b></span><span>Не выставили: <b>${data.numbers.length-count}</b></span></div><div class="dispatch-number-columns">${['private','gbu'].map(source=>{
+ const numbers=bySource[source];
+ return `<section class="dispatch-number-column" data-number-source="${source}"><h4>${source==='gbu'?'ГБУ⬛️':'Частные'}<small>✓ ${numbers.filter(n=>n.posted).length}/${numbers.length}</small></h4><div class="dispatch-number-list" tabindex="0" role="region" aria-label="${source==='gbu'?'Номера ГБУ':'Частные номера'}: сначала не выставили, затем выставили. Прокрутка вниз.">${numbers.map(n=>{
+ const surname=String(n.surname||'').trim().split(/\s+/)[0]||'Фамилия не указана';
+ const leader=n.brigadier?dispatchPerson(n.brigadier):'Бригадир не назначен';
+ return `<article class="dispatch-number-card${n.posted?' is-posted':''}" data-number-order="${n.order_id}"><header><b>№${n.number}</b><strong title="${esc(surname)}">${esc(surname)}</strong><span role="img" aria-label="${n.posted?'Номер выставлен':'Номер не выставлен'}">${n.posted?'✓':'⏳'}</span></header><small title="${esc(leader)}">${esc(leader)}</small></article>`;
+ }).join('')||'<p class="muted">Заказов нет</p>'}</div></section>`;
+ }).join('')}</div><button type="button" data-plan-original>Все выставленные номера и действия ›</button>`;
  qs('[data-plan-original]',root).onclick=()=>dispatchOriginalNumbers(day);
  }catch(error){if(qs('#dispatchNumbers')===root)root.textContent=error.message}
 };
