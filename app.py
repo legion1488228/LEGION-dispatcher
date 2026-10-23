@@ -1563,9 +1563,9 @@ def list_orders(
         q = q.where(Order.status == status)
     q = q.order_by(Order.issue_time, Order.id)
     rows = db.execute(q).scalars().all()
-    if not _is_cabinet_owner(db, user.id):
+    if not dispatch_can_access(db, user.id):
         rows = [o for o in rows if o.status != 'draft']
-    if _is_cabinet_owner(db, user.id):
+    if dispatch_can_access(db, user.id):
         rows.sort(key=dispatch_gbu_elite_priority)
     return [_order_dict(o, db) for o in rows]
 
@@ -3829,7 +3829,7 @@ def gbu_agents(
 @app.get("/api/control")
 def control(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
     orders = db.execute(select(Order).where(Order.work_date == work_date, Order.status != "cancelled").order_by(Order.issue_time)).scalars().all()
-    if not _is_cabinet_owner(db, user.id): orders = [o for o in orders if o.status != 'draft']
+    if not dispatch_can_access(db, user.id): orders = [o for o in orders if o.status != 'draft']
     order_items = [_order_dict(x, db) for x in orders]
     readiness = readiness_summary_data(db, work_date)
     loads = _workloads(db, work_date)
@@ -9516,10 +9516,9 @@ def owner_brigade_control(work_date: date, db: Session = Depends(get_db),
             'second_photos': sum(bool(item['second_received']) for item in entries),
             'completed': sum(item['completed'] for item in entries)}
     totals['all'] = {field: totals['private'][field] + totals['gbu'][field] for field in totals['private']}
-    if _is_cabinet_owner(db, user.id):
-        items.sort(key=dispatch_gbu_elite_priority)
+    items.sort(key=dispatch_gbu_elite_priority)
     return JSONResponse({'work_date': work_date.isoformat(), 'items': items, 'totals': totals,
-        'order_completion': (dispatch_control_completion(db, work_date) if _is_cabinet_owner(db,user.id) else None) or order_completion_data(db, work_date),
+        'order_completion': dispatch_control_completion(db, work_date) or order_completion_data(db, work_date),
         'updated_at': datetime.now(MOSCOW).isoformat()},
         headers={'Cache-Control': 'private, no-store'})
 
@@ -13788,9 +13787,13 @@ class DispatchGbuImportInput(BaseModel):
     items: list[DispatchGbuImportItem] = Field(min_length=1, max_length=1000)
 
 
+def dispatch_can_access(db, uid):
+    return _dispatcher_access(db, uid) and cabinet_kind(db, uid) in {'owner', 'assistant'}
+
+
 def dispatch_guard(db, user):
-    if not _is_cabinet_owner(db, user.id):
-        raise HTTPException(403, 'Новый раздел пока доступен только владельцу')
+    if not dispatch_can_access(db, user.id):
+        raise HTTPException(403, 'Заказы доступны владельцу и действующим диспетчерам')
 
 
 def dispatch_hash(value):
@@ -14377,7 +14380,7 @@ async def dispatch_send(work_date: date, data: DispatchRevision, db: Session = D
 
 
 def _dispatch_planning_html(html):
-    html=html.replace('${controlEveningPreparationHtml(data)}<div class="bc-heading">', '${state.bootstrap?.cabinet_kind===\'owner\'?\'\':controlEveningPreparationHtml(data)}<div class="bc-heading">', 1)
+    html=html.replace('${controlEveningPreparationHtml(data)}<div class="bc-heading">', '${[\'owner\',\'assistant\'].includes(state.bootstrap?.cabinet_kind)?\'\':controlEveningPreparationHtml(data)}<div class="bc-heading">', 1)
     html=html.replace("  qs('#numberCardsBtn',root).onclick=()=>openNumberCards(data.work_date);", "  const numbersButton=qs('#numberCardsBtn',root);if(numbersButton)numbersButton.onclick=()=>openNumberCards(data.work_date);", 1)
     # All navigation tabs share the day selected in the date ribbon.
     html=html.replace("  if(['owner','assistant'].includes(kind)){await dispatchResetToday()}\n", '', 1)
@@ -14387,6 +14390,8 @@ def _dispatch_planning_html(html):
     html=html.replace("    await roleActivateView('employeesView');return;", "    await roleActivateView(kind==='owner'?'dispatchActionsView':'employeesView');return;",1)
     html=html.replace("const staff={key:'staff',title:'Сотрудники',icon:()=>cabinetIcon('team')};", "const staff={key:'staff',title:kind==='owner'?'Заказы':'Сотрудники',icon:()=>kind==='owner'?'<span>📝</span>':cabinetIcon('team')};",1)
     html=html.replace("if(kind==='owner')return [{...readiness,title:'Заказы'},staff,", "if(kind==='owner')return [{...readiness,title:'Готовность',icon:()=>cabinetIcon('team')},staff,",1)
+    html=html.replace("if(kind==='assistant')return [{...readiness,title:'Заказы'},staff,cash,earnings,{key:'own',title:'Личный кабинет',icon:()=>cabinetIcon('user')}", "if(kind==='assistant')return [{...readiness,title:'Готовность',icon:()=>cabinetIcon('team')},{key:'planning',title:'Заказы',icon:()=>'<span>📝</span>'},cash,earnings,{key:'own',title:'Кабинет',icon:()=>cabinetIcon('user')}",1)
+    html=html.replace("  if(target==='staff'){", "  if(target==='planning'){await roleActivateView('dispatchActionsView');return}\n  if(target==='staff'){",1)
     html=html.replace(' bindGbuCrewDisclosure(dialog,card);',' bindGbuCrewDisclosure(dialog,card);\n dispatchAttachControl(dialog,card);',1)
     return html.replace('</body>',r'''
 <style id="dispatch-planning-style">
@@ -14742,7 +14747,7 @@ async function openDispatchCrew(order){
 }
 const dispatchOriginalNumbers=openNumberCards;
 openNumberCards=async function(workDay){
- if(state.bootstrap?.cabinet_kind!=='owner')return dispatchOriginalNumbers(workDay);
+ if(!['owner','assistant'].includes(state.bootstrap?.cabinet_kind))return dispatchOriginalNumbers(workDay);
  const day=typeof workDay==='string'?workDay:state.selectedDate;
  showModal('Номера в группе','<div id="dispatchNumbers">Загрузка…</div>');const root=qs('#dispatchNumbers');
  try{const data=await api('/api/dispatch-board?work_date='+day);if(qs('#dispatchNumbers')!==root)return;
@@ -14761,7 +14766,7 @@ openNumberCards=async function(workDay){
  }catch(error){if(qs('#dispatchNumbers')===root)root.textContent=error.message}
 };
 async function dispatchAttachControl(dialog,card){
- if(card.source!=='gbu'||state.bootstrap?.cabinet_kind!=='owner')return;
+ if(card.source!=='gbu'||!['owner','assistant'].includes(state.bootstrap?.cabinet_kind))return;
  try{const data=await api('/api/dispatch-board/card/'+card.id);if(!dialog.open||!data.order)return;const order=data.order;
  const legacy=dialog.querySelector('[data-gbu-order-roster]');if(legacy){legacy.onclick=()=>dialog.querySelector('.dispatch-roster')?.scrollIntoView({block:'nearest'});legacy.textContent=order.category_label+' · '+order.team_size+' чел.'}
  dialog.querySelectorAll('.bc-crew-disclosure').forEach(e=>e.remove());
