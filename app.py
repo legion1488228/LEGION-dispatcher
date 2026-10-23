@@ -8571,8 +8571,9 @@ function applyCabinetMode(){
   document.body.classList.toggle('cabinet-only',only);
   if(!only)return;
   const nav=qs('#ownerCabinetNav');nav.dataset.view='ownerCabinetView';
-  qsa('.bottom-nav button').forEach(x=>x.classList.toggle('active',x===nav));
-  qsa('.view').forEach(x=>x.classList.toggle('active',x.id==='ownerCabinetView'));
+  const view=currentViewId()==='employeesView'&&roleNavigationActive==='staff'?'employeesView':'ownerCabinetView';
+  qsa('.bottom-nav button').forEach(x=>x.classList.toggle('active',x.dataset.view===view));
+  qsa('.view').forEach(x=>x.classList.toggle('active',x.id===view));
   qs('#dateStrip').innerHTML='';qs('#summary').innerHTML='';state.currentOrder=null;
 }
 function cabinetAccessButton(person){
@@ -14700,6 +14701,52 @@ async function dispatchAttachControl(dialog,card){
 
 
 INLINE_INDEX_HTML = _dispatch_planning_html(INLINE_INDEX_HTML)
+
+
+def _staff_directory_loading_html(html):
+    # Keep the current directory and its filters independent of the cabinet API.
+    start = html.index('async function loadEmployees(){')
+    end = html.index('async function loadControl(){', start)
+    section = html[start:end]
+    section = section.replace('async function loadEmployees(){', 'async function renderEmployeeDirectory(response){', 1)
+    section = section.replace("  const response=await api(state.bootstrap?.cabinet_only?'/api/owner/brigadier-cabinet/employees':'/api/employees');\n", '', 1)
+    loader = r'''
+let employeeDirectoryLoading=null,employeeDirectoryIdentity='';
+async function loadEmployees(){
+  const root=qs('#employeesList'),uid=state.bootstrap?.user?.id;
+  if(!root||!uid||currentViewId()!=='employeesView')return;
+  const identity=uid+':'+Boolean(state.bootstrap?.cabinet_only);
+  if(employeeDirectoryLoading?.identity===identity)return employeeDirectoryLoading.promise;
+  if(employeeDirectoryLoading)employeeDirectoryLoading.controller.abort();
+  if(employeeDirectoryIdentity!==identity){root.replaceChildren();employeeDirectoryIdentity=identity}
+  const controller=new AbortController(),operation={identity,controller,promise:null};
+  employeeDirectoryLoading=operation;
+  const active=()=>employeeDirectoryLoading===operation&&qs('#employeesList')===root&&currentViewId()==='employeesView'&&state.bootstrap?.user?.id===uid;
+  const timeout=setTimeout(()=>controller.abort(),15000);
+  root.setAttribute('aria-busy','true');
+  if(!root.children.length)root.innerHTML='<p class="muted" role="status">Загрузка сотрудников…</p>';
+  operation.promise=(async()=>{
+    try{
+      const response=await api(state.bootstrap?.cabinet_only?'/api/owner/brigadier-cabinet/employees':'/api/employees',{signal:controller.signal});
+      if(active())await renderEmployeeDirectory(response);
+    }catch(error){
+      if(active()){
+        const message=controller.signal.aborted?'Список сотрудников не загрузился. Сервер временно недоступен.':error.message;
+        root.innerHTML=`<div class="empty" role="alert"><p>${esc(message)}</p><button type="button" class="secondary" data-employee-retry>Повторить</button></div>`;
+        qs('[data-employee-retry]',root).onclick=()=>loadEmployees();
+      }
+    }finally{
+      clearTimeout(timeout);
+      if(employeeDirectoryLoading===operation){employeeDirectoryLoading=null;root.setAttribute('aria-busy','false')}
+    }
+  })();
+  return operation.promise;
+}
+'''
+    return html[:start]+loader+section+html[end:]
+
+
+INLINE_INDEX_HTML = _staff_directory_loading_html(INLINE_INDEX_HTML)
 
 
 def _isolated_preview_screen_html():
