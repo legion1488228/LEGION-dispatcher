@@ -14525,8 +14525,20 @@ def dispatch_receipt_info(db, item):
     if not item.get('brigadier') or item.get('is_draft'): return {'status':'not_sent'}
     message=dispatch_order_messages(item)[-1]
     row=db.get(DispatchDelivery,dispatch_delivery_key(item['work_date'],message))
-    if not row: return {'status':'not_sent'}
-    saved=json.loads(row.payload)
+    saved=json.loads(row.payload) if row else None
+    if saved is None:
+        # Message formatting can change between releases. Receipt identity must
+        # still follow the order revision and its assigned recipient.
+        history=[json.loads(r.payload) for r in db.scalars(select(DispatchDelivery).where(
+            DispatchDelivery.work_date==item['work_date']))]
+        history=[p for p in history if p.get('kind')=='order' and p.get('confirmable')
+            and p.get('order_id')==item['id'] and p.get('chat_id')==message['chat_id']
+            and p.get('status') in {'sent','sending','unknown'}]
+        current=[p for p in history if p.get('revision')==item['revision']]
+        saved=next((p for p in current if p.get('confirmed_at')),None)
+        if saved is None: saved=next((p for p in current if p.get('status')=='sent'),None)
+        if saved is None and current: saved=current[0]
+        if saved is None: return {'status':'changed' if history else 'not_sent'}
     return {'status':'confirmed' if saved.get('confirmed_at') else
         'sent' if saved.get('status')=='sent' else 'unknown',
         'confirmed_at':saved.get('confirmed_at')}
@@ -14888,7 +14900,7 @@ function dispatchEveningHtml(data){
 }
 function openDispatchReceipts(source){
  const items=(dispatchBoard?.items||[]).filter(order=>order.source===source);
- const label=order=>({confirmed:'✓ Заказ получил',sent:'⌛ Ожидает подтверждения',unknown:'⚠ Доставка не подтверждена',not_sent:'Не отправлен'}[order.receipt?.status||'not_sent']);
+ const label=order=>({confirmed:'✓ Заказ получил',sent:'⌛ Ожидает подтверждения',unknown:'⚠ Доставка не подтверждена',changed:'⚠ Заказ изменён после отправки — требуется повторная отправка',not_sent:'Нет записи об отправке'}[order.receipt?.status||'not_sent']);
  showModal('Получение заказов · '+(source==='gbu'?'ГБУ ⬛️':'Частные'),`<div class="dispatch-receipt-list">${items.map(order=>`<p><b>№${order.number} · ${esc(String(order.deceased_name||'Черновик').split(/\s+/)[0])}</b><br>${esc(order.brigadier?dispatchPerson(order.brigadier):'Бригадир не назначен')}<br><span class="${order.receipt?.status==='confirmed'?'dispatch-done':''}">${label(order)}</span></p>`).join('')||'<p>Заказов нет</p>'}</div>`);
 }
 function dispatchPerson(p){return [String(p.full_name||'').split(/\s+/)[0],p.metro].filter(Boolean).join(' ')}
