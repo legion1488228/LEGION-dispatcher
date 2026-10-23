@@ -13739,6 +13739,12 @@ class DispatchBlankInput(BaseModel):
     request_key: StrictStr = Field(pattern=r'^[a-zA-Z0-9_-]{16,64}$')
 
 
+class DispatchBlankDeleteInput(BaseModel):
+    work_date: date
+    source: Literal['private','gbu']
+    number: StrictInt = Field(ge=1,le=1000)
+
+
 class DispatchPlanInput(BaseModel):
     work_date: date
     source: Literal['private', 'gbu']
@@ -14041,8 +14047,26 @@ def dispatch_slot_layout(db, day, rows):
         state=db.get(DispatchBlankState,(day,source))
         saved=json.loads(state.payload) if state else {}
         limit=max(5,int(saved.get('limit',5)),max(used[source],default=0))
-        empty[source]=[n for n in range(1,limit+1) if n not in used[source]]
+        removed=set(saved.get('removed',[]))
+        empty[source]=[n for n in range(1,limit+1) if n not in used[source] and n not in removed]
     return mapping,empty
+
+
+@app.delete('/api/dispatch-board/blank')
+def dispatch_delete_blank(data: DispatchBlankDeleteInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    dispatch_guard(db,user);dispatch_day_lock(db,data.work_date)
+    row=db.get(DispatchBlankState,(data.work_date,data.source))
+    saved=json.loads(row.payload) if row else {'limit':5,'requests':{}}
+    orders=dispatch_rows(db,data.work_date)
+    mapping,empty=dispatch_slot_layout(db,data.work_date,orders)
+    if any(o.source==data.source and mapping[o.id]==data.number for o in orders):
+        raise HTTPException(409,'Карточка уже заполнена. Обновите страницу')
+    if data.number in saved.get('removed',[]):return {'ok':True}
+    if data.number not in empty[data.source]:raise HTTPException(409,'Карточка уже заполнена или недоступна. Обновите страницу')
+    saved.setdefault('removed',[]).append(data.number)
+    if not row:row=DispatchBlankState(work_date=data.work_date,source=data.source);db.add(row)
+    row.payload=json.dumps(saved,ensure_ascii=False);db.commit()
+    return {'ok':True}
 
 
 @app.post('/api/dispatch-board/blank')
@@ -14805,6 +14829,8 @@ body.dispatch-actions-open .topbar,body.dispatch-actions-open #dispatcherOrderOv
 .dispatch-mini.dispatch-roster-open{position:relative;overflow:visible;z-index:5}
 .dispatch-assigned-tab{position:absolute;top:calc(100% + 2px);left:-1px;right:-1px;padding:8px;border:1px solid var(--gold);border-radius:10px;background:var(--panel,var(--bg));color:var(--text);box-shadow:0 7px 18px #0003;max-height:55vh;overflow-y:auto}
 .dispatch-assigned-tab header{display:flex;justify-content:space-between;gap:4px}.dispatch-assigned-tab header b{font-size:11px}.dispatch-assigned-tab button{font-size:10px;min-height:26px;padding:4px 6px}.dispatch-assigned-tab .dispatch-assigned-person{font-size:11px;padding:6px 0}.dispatch-assigned-tab .dispatch-assigned-person b{font-size:11px}.dispatch-assigned-tab .primary{width:100%;margin-top:8px}
+.dispatch-assigned-tab{padding:6px}.dispatch-assigned-tab header{align-items:center;margin-bottom:2px;color:var(--gold)}.dispatch-assigned-tab header button{border:0;background:transparent;color:var(--gold);min-height:22px;padding:0 4px;font-size:15px}
+.dispatch-assigned-tab .dispatch-assigned-person{display:grid;grid-template-columns:14px minmax(0,1fr) 24px;align-items:center;gap:3px;font-size:10px;line-height:14px;padding:4px 0;border-bottom:1px solid var(--line)}.dispatch-assigned-tab .dispatch-assigned-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:400}.dispatch-assigned-tab .dispatch-assigned-height{text-align:right;font-variant-numeric:tabular-nums}.dispatch-assigned-tab .primary{width:auto;max-width:100%;margin-top:7px;border:1px solid var(--gold);border-radius:7px;background:rgba(185,149,71,.13);color:var(--gold);font-size:10px;font-weight:600;padding:5px 8px;min-height:26px}
 .dispatch-sticky-panel{position:sticky;top:0;z-index:20;padding-bottom:6px;background:var(--bg);box-shadow:0 1px 0 var(--line);margin-bottom:6px}
 .dispatch-overview{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:center;gap:7px;margin:4px 0 10px;padding:8px 0;background:var(--bg);box-shadow:0 1px 0 var(--line)}.dispatch-requested{text-align:left;font-size:11px;line-height:1.25}.dispatch-requested b{color:var(--gold)}
 .dispatch-available{font-size:11px;line-height:1.25}.dispatch-available b{color:var(--green,#398771)}
@@ -14914,7 +14940,7 @@ body:has(#modal:not(.hidden) #dispatchGbuImport){overflow:hidden}
 .dispatch-detailed footer .dispatch-card-progress{font-size:9px!important}
 .dispatch-detailed footer [data-plan-delete]{flex-basis:22px;font-size:13px}
 .dispatch-done{color:var(--green,#398771)!important}
-.dispatch-blank{grid-template-rows:16px 1fr;border-style:dashed}.dispatch-blank p{align-self:center;color:var(--muted);font-size:11px}
+.dispatch-blank{border-style:dashed}.dispatch-blank .dispatch-card-main{grid-template-rows:16px 1fr;height:100%}.dispatch-blank p{align-self:center;color:var(--muted);font-size:11px}.dispatch-blank footer{justify-content:flex-end}.dispatch-blank [data-plan-delete-blank]{width:26px!important;border:1px solid var(--line);border-radius:6px;text-align:center;font-size:15px}
 .dispatch-send{width:100%;margin:8px 0;padding:10px}.dispatch-free{border:1px solid var(--line);border-radius:12px;padding:9px;font-size:12px}.dispatch-free details{padding:5px 0}.dispatch-free summary{cursor:pointer}.dispatch-free p{font-size:11px;margin:4px 0}
 .dispatch-form{display:grid;gap:8px}.dispatch-form label{display:grid;gap:3px;font-size:12px}.dispatch-form input,.dispatch-form select{width:100%;min-width:0;box-sizing:border-box;font-size:15px;padding:9px}.dispatch-times{display:grid;grid-template-columns:1fr 1fr;gap:7px}.dispatch-form small{font-size:11px;color:var(--muted)}
 body:has(#modal:not(.hidden) #dispatchEditor){overflow:hidden}
@@ -15104,7 +15130,16 @@ function dispatchColumnCards(data,source){
  const entries=data.items.filter(o=>o.source===source).map(o=>({number:o.number,order:o}));
  entries.push(...(data.empty_slots?.[source]||[]).map(number=>({number})));
  const priority=entry=>source==='gbu'?(entry.order?(entry.order.category==='elite'?0:1):2):0;
- return entries.sort((a,b)=>priority(a)-priority(b)||a.number-b.number).map(entry=>entry.order?dispatchMini(entry.order):`<button type="button" class="dispatch-mini dispatch-blank" data-plan-blank="${entry.number}" data-plan-source="${source}"><header><b>№${entry.number}</b><span></span>📝</header><p>Заполнить заказ</p></button>`).join('');
+ return entries.sort((a,b)=>priority(a)-priority(b)||a.number-b.number).map(entry=>entry.order?dispatchMini(entry.order):`<article class="dispatch-mini dispatch-blank"><button type="button" class="dispatch-card-main" data-plan-blank="${entry.number}" data-plan-source="${source}"><header><b>№${entry.number}</b><span></span>📝</header><p>Заполнить заказ</p></button><footer><button type="button" data-plan-delete-blank="${entry.number}" data-plan-empty-source="${source}" aria-label="Удалить пустую карточку №${entry.number}">🗑</button></footer></article>`).join('');
+}
+function confirmDispatchBlankDelete(day,source,number){
+ showModal('Удалить пустую карточку?',`<div id="dispatchBlankDelete"><p>Действительно хотите удалить пустую карточку №${number} · ${source==='gbu'?'ГБУ':'Частный'}?</p><p data-blank-error role="status"></p><div class="dispatch-tools"><button type="button" data-blank-cancel>Отмена</button><button type="button" data-blank-confirm>Удалить</button></div></div>`);
+ const root=qs('#dispatchBlankDelete');qs('[data-blank-cancel]',root).onclick=closeModal;
+ qs('[data-blank-confirm]',root).onclick=async()=>{
+  const button=qs('[data-blank-confirm]',root);if(button.disabled)return;button.disabled=true;
+  try{await api('/api/dispatch-board/blank',{method:'DELETE',body:JSON.stringify({work_date:day,source,number})});if(qs('#dispatchBlankDelete')===root)closeModal();if(state.selectedDate===day)await loadDispatchBoard()}
+  catch(error){if(qs('#dispatchBlankDelete')===root){qs('[data-blank-error]',root).textContent=error.message;button.disabled=false}}
+ };
 }
 async function loadDispatchBoard(){
  const ticket=++dispatchLoad,day=state.selectedDate,root=qs('#dispatchActionsView');
@@ -15121,6 +15156,7 @@ root.innerHTML=`${dispatchEveningHtml(data)}<div class="dispatch-tools"><button 
  qsa('[data-plan-pair]',root).forEach(button=>button.onclick=()=>openDispatchPair(data.items.find(item=>item.id===Number(button.dataset.planPair))));
  qsa('[data-plan-add]',root).forEach(b=>b.onclick=async()=>{if(b.disabled)return;b.disabled=true;b.dispatchRequestKey=b.dispatchRequestKey||dispatchToken();try{await api('/api/dispatch-board/blank',{method:'POST',body:JSON.stringify({work_date:day,source:b.dataset.planAdd,request_key:b.dispatchRequestKey})});await loadDispatchBoard()}catch(error){if(root.contains(b)){qs('[data-plan-status]',root).textContent=error.message;b.disabled=false}}});
  qsa('[data-plan-blank]',root).forEach(b=>b.onclick=()=>openDispatchEditor(null,b.dataset.planSource,Number(b.dataset.planBlank)));
+ qsa('[data-plan-delete-blank]',root).forEach(b=>b.onclick=()=>confirmDispatchBlankDelete(day,b.dataset.planEmptySource,Number(b.dataset.planDeleteBlank)));
  qsa('[data-plan-id]',root).forEach(b=>b.onclick=()=>openDispatchEditor(data.items.find(x=>x.id===Number(b.dataset.planId))));
  qsa('[data-plan-crew-id]',root).forEach(b=>{const order=data.items.find(x=>x.id===Number(b.dataset.planCrewId));if(order.composition_complete)b.disabled=false;b.setAttribute('aria-expanded','false');b.onclick=()=>openDispatchCrew(order)});
  if(dispatchCrewExpanded!==null){const expanded=data.items.find(o=>o.id===dispatchCrewExpanded&&o.composition_complete);if(expanded)dispatchShowAssignedCrew(expanded);else dispatchCloseAssignedCrew()}
@@ -15277,7 +15313,7 @@ function dispatchShowAssignedCrew(order){
  button.setAttribute('aria-expanded','true');button.setAttribute('aria-controls','dispatchAssignedCrew'+order.id);
  const tab=document.createElement('section');tab.className='dispatch-assigned-tab';tab.id='dispatchAssignedCrew'+order.id;
  tab.setAttribute('aria-label','Назначенный состав заказа №'+order.number);
- tab.innerHTML=`<header><b>Состав · ${people.length}/${order.team_size}</b><button type="button" data-plan-collapse-crew>Свернуть ↑</button></header>${people.map((p,i)=>`<div class="dispatch-assigned-person"><b>${esc(dispatchPerson(p))}</b><small>${i===0?'Бригадир · ':''}Рост: ${esc(String(p.height_cm||'не указан'))}</small></div>`).join('')}<button type="button" class="primary" data-plan-edit-crew ${order.approved?'disabled':''}>Изменить состав</button>`;
+ tab.innerHTML=`<header><b>Бригадир</b><button type="button" data-plan-collapse-crew aria-label="Свернуть состав" title="Свернуть состав">⌃</button></header>${people.map((p,i)=>`<div class="dispatch-assigned-person" aria-label="${i===0?'Бригадир: ':''}${esc(dispatchPerson(p))}, рост ${esc(String(p.height_cm||'не указан'))}"><span>${i+1}.</span><span class="dispatch-assigned-name" title="${esc(dispatchPerson(p))}">${esc(dispatchPerson(p))}</span><span class="dispatch-assigned-height">${esc(String(p.height_cm||'—'))}</span></div>`).join('')}<button type="button" class="primary" data-plan-edit-crew ${order.approved?'disabled':''}>Изменить состав</button>`;
  card.append(tab);qs('[data-plan-collapse-crew]',tab).onclick=dispatchCloseAssignedCrew;
  qs('[data-plan-edit-crew]',tab).onclick=()=>{dispatchCloseAssignedCrew();return openDispatchCrew(order,true)};
 }
