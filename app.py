@@ -13844,14 +13844,38 @@ def dispatch_pair_partner(db, order):
     return partner if json.loads(other.payload).get('paired_order_id') == order.id else None
 
 
-def dispatch_set_pair_meta(db, order, partner_id):
+def dispatch_pair_colors(db, rows):
+    # Existing pairs without saved colors also receive a common display color.
+    pairs = []
+    for order in sorted(rows, key=lambda item: item.id):
+        partner = dispatch_pair_partner(db, order)
+        if partner and order.id < partner.id:
+            meta = json.loads(db.get(DispatchPlan, order.id).payload)
+            color = meta.get('pair_color')
+            pairs.append((order.id, partner.id, color if type(color) is int and color >= 0 else None))
+    used = {color for _, _, color in pairs if color is not None}
+    result = {}
+    for first, second, color in pairs:
+        if color is None:
+            color = 0
+            while color in used: color += 1
+            used.add(color)
+        result[first] = result[second] = color
+    return result
+
+
+def dispatch_set_pair_meta(db, order, partner_id, color=None):
     plan = db.get(DispatchPlan, order.id)
     if not plan:
         plan = DispatchPlan(order_id=order.id, request_key=secrets.token_hex(16), payload='{}')
         db.add(plan)
     meta = json.loads(plan.payload)
-    if partner_id is None: meta.pop('paired_order_id', None)
-    else: meta['paired_order_id'] = partner_id
+    if partner_id is None:
+        meta.pop('paired_order_id', None)
+        meta.pop('pair_color', None)
+    else:
+        meta['paired_order_id'] = partner_id
+        meta['pair_color'] = color
     plan.payload = json.dumps(meta, ensure_ascii=False)
 
 
@@ -14007,10 +14031,12 @@ def dispatch_board_data(db, day):
     statuses = number_card_statuses(db, [c for c in cards if c])
     requested_staff = _requested_staff_by_source(db, day, include_carryouts=False)
     effective_staff = dispatch_pair_demand(db, rows, requested_staff)
+    pair_colors = dispatch_pair_colors(db, rows)
     by_id = {item['id']:item for item in items}
     for item in items:
         partner = by_id.get(item['paired_order_id'])
         item['paired_order'] = {key:partner[key] for key in ('id','source','number','deceased_name','team_size')} if partner else None
+        item['pair_color'] = pair_colors.get(item['id']) if partner else None
     return {'work_date': str(day), 'items': items, 'counts': numbers, 'free': free['groups'], 'empty_slots':empty,
         'order_completion': dispatch_control_completion(db, day) or order_completion_data(db, day),
         'ready_staff': readiness_summary_data(db, day)['totals']['ready_now'],
@@ -14289,8 +14315,11 @@ def dispatch_pair_order(order_id: int, data: DispatchPairInput, db: Session = De
         if item.status == 'draft' or item.category not in ('standard','vip','elite') or item.team_size <= 0:
             raise HTTPException(409, 'Перед сдвоением заполните категорию, количество, фамилию и время обоих заказов')
     dispatch_pair_crews(db, order, partner)
-    dispatch_set_pair_meta(db, order, partner.id)
-    dispatch_set_pair_meta(db, partner, order.id)
+    used_colors = set(dispatch_pair_colors(db, dispatch_rows(db, order.work_date)).values())
+    color = 0
+    while color in used_colors: color += 1
+    dispatch_set_pair_meta(db, order, partner.id, color)
+    dispatch_set_pair_meta(db, partner, order.id, color)
     db.commit()
     return {'ok':True}
 
@@ -14515,11 +14544,18 @@ body.dispatch-actions-open .topbar,body.dispatch-actions-open #dispatcherOrderOv
 .dispatch-order-total{display:block;margin-top:4px}.dispatch-order-total b{color:var(--gold)}
 .dispatch-order-total{display:flex;align-items:center;justify-content:space-between;gap:4px}
 .dispatch-order-total [data-plan-comment]{min-height:22px;min-width:0;padding:3px 5px;font-size:8px;line-height:1.1;border:1px solid var(--gold);border-radius:6px;background:var(--panel2);color:var(--gold)}
-.dispatch-pair-choices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
-.dispatch-pair-choices button{min-width:0;text-align:left;padding:7px;font-size:11px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--text)}
-.dispatch-pair-choices strong,.dispatch-pair-choices small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dispatch-pair-choices small{font-size:10px;color:var(--muted);margin-top:3px}
-.dispatch-pair-actions{display:flex;gap:6px;margin-top:10px}.dispatch-pair-actions button{flex:1}
+.dispatch-pair-toolbar{padding:6px 0;font-size:11px;line-height:1.3;border-bottom:1px solid var(--gold)}
+.dispatch-pair-toolbar>div{display:flex;align-items:center;justify-content:space-between;gap:6px}
+.dispatch-pair-toolbar button{min-height:28px;padding:4px 7px;font-size:10px;white-space:nowrap;border:1px solid var(--gold);border-radius:6px;background:var(--panel2);color:var(--gold)}
+.dispatch-pair-toolbar p{margin:4px 0 0;font-size:10px;color:var(--gold)}
+.dispatch-pair-selecting .dispatch-mini button{pointer-events:none}
+.dispatch-pair-selecting [data-plan-pair]{visibility:hidden}
+.dispatch-pair-selecting .dispatch-mini footer{opacity:.55}
+.dispatch-pair-selecting .dispatch-blank{pointer-events:none;opacity:.4}
+.dispatch-mini.dispatch-pair-source{outline:2px solid var(--gold);outline-offset:-2px;background:var(--panel2)}
+.dispatch-mini.dispatch-pair-target{outline:1px solid var(--gold);outline-offset:-1px;cursor:pointer}
+.dispatch-mini.dispatch-pair-target:focus{outline-width:2px}
+.dispatch-mini.dispatch-pair-unavailable{opacity:.4}
 .dispatch-ready{display:block;margin-bottom:4px}.dispatch-ready b{color:var(--green,#398771)}
 #modal:has(#dispatchGbuImport){left:8px;right:8px;top:10px;width:auto;min-width:0;max-width:calc(100vw - 16px);max-height:calc(100vh - 20px);max-height:calc(100dvh - 20px);padding:10px;box-sizing:border-box;overflow-x:hidden;overscroll-behavior:contain}
 #dispatchGbuImport,#modal:has(#dispatchGbuImport)>.modal-body{min-width:0;width:100%;max-width:100%;box-sizing:border-box}
@@ -14578,6 +14614,8 @@ body:has(#modal:not(.hidden) #dispatchGbuImport){overflow:hidden}
 [data-plan-headings] .dispatch-column>button{margin-bottom:0}
 .dispatch-mini{display:grid;grid-template-rows:1fr 24px;gap:4px;box-sizing:border-box;text-align:left;width:100%;height:144px;min-height:144px;max-height:144px;border:1px solid var(--line);background:var(--panel,var(--bg));border-radius:11px;padding:7px!important;margin-bottom:6px;font-size:11px;line-height:14px;overflow:hidden;color:var(--text)}
 .dispatch-mini.dispatch-complete{border-color:var(--green,#398771)}
+.dispatch-mini.dispatch-paired{border-color:hsl(var(--pair-hue) 50% 43%);background:linear-gradient(hsl(var(--pair-hue) 58% 49% / .1),hsl(var(--pair-hue) 58% 49% / .1)),var(--panel,var(--bg));box-shadow:inset 3px 0 hsl(var(--pair-hue) 50% 43%)}
+.dispatch-mini.dispatch-paired>[data-plan-pair]{border-color:hsl(var(--pair-hue) 50% 43%);color:hsl(var(--pair-hue) 65% 30%);background:var(--panel,var(--bg))}
 .dispatch-card-main{display:grid;grid-template-rows:16px 28px 16px 14px 14px;gap:2px;width:100%;min-width:0;min-height:0;padding:0;border:0;border-radius:0;background:transparent;text-align:left;color:inherit;font:inherit;overflow:hidden}
 .dispatch-mini header{display:flex;gap:6px;align-items:center;min-width:0}.dispatch-mini header span{flex:1;min-width:0;font-size:10px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.dispatch-mini b{font-size:12px}.dispatch-mini p{margin:0;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.dispatch-mini .dispatch-order-name{display:grid;grid-template-rows:14px 14px;max-height:28px;white-space:nowrap}.dispatch-order-name>b,.dispatch-order-name>small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dispatch-order-name>small{font-size:10px;font-weight:400;line-height:14px}
 .dispatch-card-meta{display:flex;align-items:center;justify-content:space-between;gap:3px;min-width:0;white-space:nowrap;font-size:10px}.dispatch-card-category{color:var(--gold);overflow:hidden;text-overflow:ellipsis;min-width:0}.dispatch-card-progress{font-size:11px!important;flex-shrink:0}.dispatch-gold{color:var(--gold)}
@@ -14658,14 +14696,14 @@ body:has(#modal:not(.hidden) #dispatchEditor){overflow:hidden}
 #dispatchNumbers [data-plan-original]{flex:none;width:100%;min-height:30px;margin-top:0;padding:4px;font-size:11px}
 </style>
 <script>
-let dispatchBoard=null,dispatchLoad=0;
+let dispatchBoard=null,dispatchLoad=0,dispatchPairMode=null;
 const dispatchSection=document.createElement('section');dispatchSection.id='dispatchActionsView';dispatchSection.className='view';document.querySelector('main').append(dispatchSection);
 const dispatchOriginalCurrentView=currentViewId;
 currentViewId=function(){return qs('#dispatchActionsView.active')?'dispatchActionsView':dispatchOriginalCurrentView()};
 const dispatchOriginalRender=renderCurrentView;
 renderCurrentView=async function(){
  const active=currentViewId()==='dispatchActionsView';document.body.classList.toggle('dispatch-actions-open',active);
- if(!active)return dispatchOriginalRender();
+ if(!active){dispatchPairMode=null;dispatchRenderPairMode();return dispatchOriginalRender()}
  document.body.classList.remove('management-open','owner-cabinet-open','dashboard-compact','owner-brigade-control-open','staff-directory-open');
  const overview=qs('#dispatcherOrderOverview');if(overview)overview.hidden=true;
  return loadDispatchBoard();
@@ -14683,6 +14721,12 @@ function dispatchEveningHtml(data){
 function dispatchPerson(p){return [String(p.full_name||'').split(/\s+/)[0],p.metro].filter(Boolean).join(' ')}
 function dispatchStaffCount(gross,effective=gross){const total=Number(gross)||0,net=Number(effective)||0;return String(total)+(net!==total?' ('+net+')':'')}
 function dispatchPairLabel(order){return (order.source==='gbu'?'ГБУ':'Частный')+' №'+order.number}
+function dispatchPairStyle(order){
+ if(!order.paired_order||!Number.isInteger(order.pair_color)||order.pair_color<0)return '';
+ const palette=[145,30,210,275,175,340,55,245];
+ const hue=palette[order.pair_color]??Math.round((order.pair_color*137.508)%360);
+ return ` style="--pair-hue:${hue}" data-pair-color="${order.pair_color}"`;
+}
 function dispatchMini(o){
  if(o.is_draft)return `<article class="dispatch-mini dispatch-draft" data-plan-card="${o.id}"><button type="button" class="dispatch-card-main" data-plan-id="${o.id}"><header><b>№${o.number}</b><span>${o.source==='gbu'?'ГБУ⬛️':'Черновик'}</span>›</header><p class="dispatch-order-name"><b>${esc(o.organization)}</b><small>${esc(o.deceased_name||'Информацию можно добавить позже')}</small></p><div class="dispatch-card-meta"><span>${esc(o.category_label||'Категория не выбрана')}${o.team_size?' '+Number(o.team_size):''}</span></div><p>${o.issue_time?'◷ '+esc(o.issue_time):'Время не указано'}</p></button><footer><button type="button" data-plan-id="${o.id}">Дополнить заказ ›</button><button type="button" data-plan-delete="${o.id}" aria-label="Удалить заказ №${o.number}">🗑</button></footer></article>`;
  const surname=String(o.deceased_name||'').trim().split(/\s+/)[0]||'—';
@@ -14695,30 +14739,70 @@ function dispatchMini(o){
   return '- '+(/^(морг|храм|церковь|кладбище|крематорий|кремация)(?:\s|:|$)/i.test(value)?value:label+' '+(value||'—'));
  });
  const quantity=Number(o.team_size)+' чел';
- return `<article class="dispatch-mini dispatch-detailed ${complete?'dispatch-complete':''}" data-plan-card="${o.id}"><button type="button" class="dispatch-card-main" data-plan-id="${o.id}" aria-label="Заказ №${o.number} · ${esc(o.deceased_name)}"><header><b>№${o.number}</b><span>${o.source==='gbu'?'ГБУ⬛️':esc(o.organization||'')}</span>›</header><p class="dispatch-card-agent" title="${esc(o.agent_name||'')}">Агент: ${esc(o.agent_name||'—')}</p><p class="dispatch-card-phone">Номер: ${esc(phone||'—')}</p><div class="dispatch-card-meta"><span class="dispatch-card-category">Заказ: ${esc(String(o.category_label||'').toLocaleUpperCase('ru-RU'))} · <span class="dispatch-card-quantity">${quantity}</span></span></div><p class="dispatch-order-name"><b>Ум: ${esc(surname)}</b></p><div class="dispatch-card-times"><span>Выдача в ${esc(o.issue_time||'—')}</span><span>Быть в ${esc(o.arrival_time||'—')}</span></div><div class="dispatch-card-route">${route.map(stop=>`<p title="${esc(stop)}">${esc(stop)}</p>`).join('')}</div></button><button type="button" data-plan-pair="${o.id}" title="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Выбрать заказ для сдвоения'}" aria-label="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Сдвоить заказ №'+o.number}" ${o.approved?'disabled':''}>${o.paired_order?'⇄ '+esc(dispatchPairLabel(o.paired_order)):'Сдвоить заказ'}</button><footer><button type="button" data-plan-crew-id="${o.id}" title="${o.brigadier?esc(dispatchPerson(o.brigadier)):''}" class="${complete?'dispatch-done':''}" ${o.approved?'disabled':''}><span>${complete?'Состав назначен ✓':assigned?'Дополнить состав ›':'Назначить состав ›'}</span><b class="dispatch-card-progress ${complete?'dispatch-done':''}" aria-label="Назначено ${assigned} из ${o.team_size} сотрудников">${assigned}/${o.team_size}</b></button><button type="button" data-plan-delete="${o.id}" aria-label="Удалить заказ №${o.number}" ${o.approved?'disabled':''}>🗑</button></footer></article>`;
+ return `<article class="dispatch-mini dispatch-detailed ${complete?'dispatch-complete':''} ${o.paired_order?'dispatch-paired':''}" data-plan-card="${o.id}"${dispatchPairStyle(o)}><button type="button" class="dispatch-card-main" data-plan-id="${o.id}" aria-label="Заказ №${o.number} · ${esc(o.deceased_name)}"><header><b>№${o.number}</b><span>${o.source==='gbu'?'ГБУ⬛️':esc(o.organization||'')}</span>›</header><p class="dispatch-card-agent" title="${esc(o.agent_name||'')}">Агент: ${esc(o.agent_name||'—')}</p><p class="dispatch-card-phone">Номер: ${esc(phone||'—')}</p><div class="dispatch-card-meta"><span class="dispatch-card-category">Заказ: ${esc(String(o.category_label||'').toLocaleUpperCase('ru-RU'))} · <span class="dispatch-card-quantity">${quantity}</span></span></div><p class="dispatch-order-name"><b>Ум: ${esc(surname)}</b></p><div class="dispatch-card-times"><span>Выдача в ${esc(o.issue_time||'—')}</span><span>Быть в ${esc(o.arrival_time||'—')}</span></div><div class="dispatch-card-route">${route.map(stop=>`<p title="${esc(stop)}">${esc(stop)}</p>`).join('')}</div></button><button type="button" data-plan-pair="${o.id}" title="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Выбрать заказ для сдвоения'}" aria-label="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Сдвоить заказ №'+o.number}" ${o.approved?'disabled':''}>${o.paired_order?'⇄ '+esc(dispatchPairLabel(o.paired_order)):'Сдвоить заказ'}</button><footer><button type="button" data-plan-crew-id="${o.id}" title="${o.brigadier?esc(dispatchPerson(o.brigadier)):''}" class="${complete?'dispatch-done':''}" ${o.approved?'disabled':''}><span>${complete?'Состав назначен ✓':assigned?'Дополнить состав ›':'Назначить состав ›'}</span><b class="dispatch-card-progress ${complete?'dispatch-done':''}" aria-label="Назначено ${assigned} из ${o.team_size} сотрудников">${assigned}/${o.team_size}</b></button><button type="button" data-plan-delete="${o.id}" aria-label="Удалить заказ №${o.number}" ${o.approved?'disabled':''}>🗑</button></footer></article>`;
+}
+function cancelDispatchPair(){if(dispatchPairMode?.busy)return;dispatchPairMode=null;dispatchRenderPairMode()}
+function dispatchRenderPairMode(){
+ const root=qs('#dispatchActionsView');if(!root)return;
+ let mode=dispatchPairMode;
+ const source=mode&&mode.day===state.selectedDate&&currentViewId()==='dispatchActionsView'?dispatchBoard?.items.find(item=>item.id===mode.orderId):null;
+ if(mode&&(!source||source.is_draft||source.approved)){dispatchPairMode=null;mode=null}
+ root.classList.toggle('dispatch-pair-selecting',Boolean(mode));
+ let toolbar=qs('[data-plan-pair-toolbar]',root);
+ if(!mode){toolbar?.remove()}else{
+  if(!toolbar){toolbar=document.createElement('div');toolbar.className='dispatch-pair-toolbar';toolbar.setAttribute('data-plan-pair-toolbar','');qs('.dispatch-sticky-panel',root).prepend(toolbar)}
+  const partner=dispatchBoard.items.find(item=>item.id===source.paired_order_id);
+  toolbar.innerHTML=`<div><span>${mode.busy?'Сохранение…':partner?'Сдвоен с '+esc(dispatchPairLabel(partner)):'Выберите карточку для '+esc(dispatchPairLabel(source))}</span><span>${partner?'<button type="button" data-plan-unpair '+(mode.busy?'disabled':'')+'>Разъединить</button> ':''}<button type="button" data-plan-pair-cancel ${mode.busy?'disabled':''}>Отмена</button></span></div><p data-plan-pair-error role="status">${esc(mode.error||(!partner?'Нажмите на всю карточку второго заказа.':''))}</p>`;
+  qs('[data-plan-pair-cancel]',toolbar).onclick=cancelDispatchPair;
+  const remove=qs('[data-plan-unpair]',toolbar);if(remove)remove.onclick=()=>dispatchSavePair(null);
+ }
+ qsa('[data-plan-add],[data-plan-blank],[data-plan-send],[data-plan-payroll],[data-plan-agents],[data-plan-import],[data-plan-comment],[data-plan-numbers]',root).forEach(button=>{
+  if(mode){if(button.dispatchPairDisabled===undefined)button.dispatchPairDisabled=button.disabled;button.disabled=true}
+  else if(button.dispatchPairDisabled!==undefined){button.disabled=button.dispatchPairDisabled;delete button.dispatchPairDisabled}
+ });
+ qsa('article[data-plan-card]',root).forEach(card=>{
+  if(card.dispatchPairCapture){card.removeEventListener('click',card.dispatchPairCapture,true);card.removeEventListener('keydown',card.dispatchPairCapture,true);delete card.dispatchPairCapture}
+  card.classList.remove('dispatch-pair-source','dispatch-pair-target','dispatch-pair-unavailable');
+  for(const attr of ['role','tabindex','aria-disabled','aria-label'])card.removeAttribute(attr);
+  qsa('button',card).forEach(button=>{
+   if(mode){if(button.dispatchPairTab===undefined)button.dispatchPairTab=button.getAttribute('tabindex');button.setAttribute('tabindex','-1')}
+   else if(button.dispatchPairTab!==undefined){if(button.dispatchPairTab===null)button.removeAttribute('tabindex');else button.setAttribute('tabindex',button.dispatchPairTab);delete button.dispatchPairTab}
+  });
+  if(!mode)return;
+  const target=dispatchBoard.items.find(item=>item.id===Number(card.dataset.planCard));
+  const selected=target?.id===source.id;
+  const eligible=target&&!selected&&!source.paired_order_id&&!target.is_draft&&!target.approved&&!target.paired_order_id;
+  card.classList.add(selected?'dispatch-pair-source':eligible?'dispatch-pair-target':'dispatch-pair-unavailable');
+  card.setAttribute('role','button');card.setAttribute('tabindex',eligible&&!mode.busy?'0':'-1');card.setAttribute('aria-disabled',eligible&&!mode.busy?'false':'true');
+  card.setAttribute('aria-label',selected?'Исходный заказ '+dispatchPairLabel(source):eligible?'Сдвоить с '+dispatchPairLabel(target)+' · '+target.deceased_name:'Заказ недоступен для сдвоения');
+  const capture=event=>{
+   if(dispatchPairMode!==mode||(event.type==='keydown'&&!['Enter',' '].includes(event.key)))return;
+   event.preventDefault();event.stopImmediatePropagation();
+   if(eligible&&!mode.busy)void dispatchSavePair(target.id);
+  };
+  card.dispatchPairCapture=capture;card.addEventListener('click',capture,true);card.addEventListener('keydown',capture,true);
+ });
 }
 async function openDispatchPair(order){
- if(order.approved){toast('Состав уже подтверждён');return}
- const day=order.work_date;
- showModal('Сдвоить заказ','<div id="dispatchPair">Загрузка…</div>');
- const root=qs('#dispatchPair'),live=()=>qs('#dispatchPair')===root&&!qs('#modal').classList.contains('hidden');
+ if(dispatchPairMode?.busy)return;
+ if(!order||order.is_draft||order.approved){toast('Заказ недоступен для сдвоения');return}
+ dispatchPairMode={orderId:order.id,day:order.work_date,busy:false,error:''};
+ dispatchRenderPairMode();
+}
+async function dispatchSavePair(targetId){
+ const mode=dispatchPairMode;if(!mode||mode.busy)return;
+ const source=dispatchBoard?.items.find(item=>item.id===mode.orderId);
+ const target=dispatchBoard?.items.find(item=>item.id===(targetId??source?.paired_order_id));
+ if(!source||!target)return;
+ mode.busy=true;mode.error='';dispatchRenderPairMode();
  try{
-  const board=await api('/api/dispatch-board?work_date='+day);if(!live())return;
-  const current=board.items.find(item=>item.id===order.id);
-  if(!current||current.is_draft||current.approved){root.textContent='Заказ недоступен для сдвоения. Обновите страницу.';return}
-  const partner=board.items.find(item=>item.id===current.paired_order_id);
-  const choices=partner?[]:board.items.filter(item=>item.id!==current.id&&!item.is_draft&&!item.approved&&!item.paired_order_id);
-  root.innerHTML=`<p><b>${esc(dispatchPairLabel(current))}</b> · ${esc(current.deceased_name)}</p><p class="muted">Выберите второй заказ на этот день. Для пары нужен общий состав; запрос уменьшится на меньший состав из двух заказов.</p>${partner?`<p>Сдвоен с <b>${esc(dispatchPairLabel(partner))}</b> · ${esc(partner.deceased_name)}</p>`:`<div class="dispatch-pair-choices">${choices.map(item=>`<button type="button" data-plan-pair-choice="${item.id}"><strong>${esc(dispatchPairLabel(item))} · ${esc(item.deceased_name)}</strong><small>${esc(item.category_label)} · ${Number(item.team_size)} чел · ${esc(item.issue_time||'—')}</small></button>`).join('')||'<p class="muted">Заполните ещё один заказ на этот день.</p>'}</div>`}<p data-plan-pair-error role="status"></p><div class="dispatch-pair-actions">${partner?'<button type="button" data-plan-unpair>Разъединить заказы</button>':''}<button type="button" data-plan-pair-cancel>Отмена</button></div>`;
-  const save=async target=>{
-   if(current.approved)return;qsa('button',root).forEach(button=>button.disabled=true);qs('[data-plan-pair-error]',root).textContent='';
-   try{await api('/api/dispatch-board/orders/'+current.id+'/pair',{method:'POST',body:JSON.stringify({revision:current.revision,partner_id:target?.id??null,partner_revision:(target||partner)?.revision??null})});
-    if(live()){closeModal();if(state.selectedDate===day)await loadDispatchBoard()}
-   }catch(error){if(live()){qs('[data-plan-pair-error]',root).textContent=error.message;qsa('button',root).forEach(button=>button.disabled=false)}}
-  };
-  qsa('[data-plan-pair-choice]',root).forEach(button=>button.onclick=()=>save(choices.find(item=>item.id===Number(button.dataset.planPairChoice))));
-  const remove=qs('[data-plan-unpair]',root);if(remove)remove.onclick=()=>save(null);
-  qs('[data-plan-pair-cancel]',root).onclick=closeModal;
- }catch(error){if(live())root.textContent=error.message}
+  await api('/api/dispatch-board/orders/'+source.id+'/pair',{method:'POST',body:JSON.stringify({revision:source.revision,partner_id:targetId,partner_revision:target.revision})});
+  if(dispatchPairMode!==mode)return;
+  dispatchPairMode=null;dispatchRenderPairMode();
+  if(state.selectedDate===mode.day&&currentViewId()==='dispatchActionsView')await loadDispatchBoard();
+ }catch(error){
+  if(dispatchPairMode===mode){mode.busy=false;mode.error=error.message;dispatchRenderPairMode();if(state.selectedDate===mode.day&&currentViewId()==='dispatchActionsView')await loadDispatchBoard()}
+ }
 }
 function confirmDispatchDelete(order){
  const day=order.work_date;
@@ -14740,6 +14824,7 @@ function dispatchColumnCards(data,source){
 }
 async function loadDispatchBoard(){
  const ticket=++dispatchLoad,day=state.selectedDate,root=qs('#dispatchActionsView');
+ if(dispatchPairMode&&dispatchPairMode.day!==day){dispatchPairMode=null;dispatchRenderPairMode()}
  if(!dispatchBoard||dispatchBoard.work_date!==day)root.textContent='Загрузка…';
  try{const data=await api('/api/dispatch-board?work_date='+day);if(ticket!==dispatchLoad||state.selectedDate!==day||currentViewId()!=='dispatchActionsView')return;dispatchBoard=data;
  const assigned=data.items.filter(o=>o.composition_complete).length,posted=data.numbers.filter(n=>n.posted).length;
@@ -14758,7 +14843,8 @@ root.innerHTML=`${dispatchEveningHtml(data)}<div class="dispatch-tools"><button 
  qs('[data-plan-send]',root).onclick=async e=>{const button=e.currentTarget;button.disabled=true;const status=qs('[data-plan-status]',root);status.textContent='Отправка заказов и списков свободных…';
   try{const result=await api('/api/dispatch-board/send?work_date='+day,{method:'POST',body:JSON.stringify({revision:data.revision})});status.textContent=result.failed.length?'Отправлено '+result.sent+' из '+result.total+'\n'+result.failed.join('\n'):'Заказы и списки свободных отправлены';}catch(error){status.textContent=error.message}finally{if(root.contains(button))button.disabled=false}
  };
- }catch(error){if(ticket===dispatchLoad)root.textContent=error.message}
+ dispatchRenderPairMode();
+ }catch(error){if(ticket===dispatchLoad){if(dispatchPairMode){dispatchPairMode.error=error.message;dispatchRenderPairMode()}else root.textContent=error.message}}
 }
 function dispatchImportNumbers(board,count,categories='standard'){
  const existing=(board?.items||[]).filter(order=>order.source==='gbu'),types=Array.isArray(categories)?categories:Array(count).fill(categories);
