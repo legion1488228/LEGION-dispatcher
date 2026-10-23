@@ -14429,12 +14429,13 @@ def dispatch_approve(order_id: int, data: DispatchRevision, db: Session = Depend
 
 def dispatch_message(order, number):
     source='ГБУ ⬛️' if order['source']=='gbu' else 'Частный'
-    lines=[f'<b>{source} №{number} · {escape(order["work_date"])}</b>',
+    lines=[f'<b>Заказ: {source}</b>',
+        f'Агент: {escape(order["agent_name"])} · {escape(order["agent_phone"])}',
         f'<b>ум: {escape(order["deceased_name"])}</b>',
         f'{escape(order["category_label"])} · {order["team_size"]} чел.',
-        f'Выдача: {order["issue_time"]} · 📸 {order["arrival_time"] or "—"}',
-        f'Агент: {escape(order["agent_name"])} · {escape(order["agent_phone"])}',
-        f'{escape(order["organization"])}', 'Маршрут:']
+        f'Выдача: {order["issue_time"]}',
+        f'Быть: {order["arrival_time"] or "—"}',
+        '', 'Маршрут:']
     fields=order.get('route_fields') or {}
     for key,label in [('morgue','Морг'),('church','Храм'),('cemetery','Кладбище / кремация')]:
         lines.append(f'{label}: {escape(fields.get(key) or "—")}')
@@ -14442,7 +14443,7 @@ def dispatch_message(order, number):
     partner = order.get('paired_order')
     if partner:
         label = 'ГБУ ⬛️' if partner['source'] == 'gbu' else 'Частный'
-        lines.append(f'Сдвоен с: {label} №{partner["number"]}')
+        lines.append(f'Сдвоен с: {label} · {escape(partner.get("deceased_name") or "фамилия не указана")}')
     lines+=['','Состав:']
     for p in [order['brigadier']]+order['members']:
         lines.append(escape(p['display_name']))
