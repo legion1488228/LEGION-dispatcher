@@ -14060,11 +14060,13 @@ def dispatch_board_data(db, day):
     effective_staff = dispatch_pair_demand(db, rows, requested_staff)
     pair_colors = dispatch_pair_colors(db, rows)
     by_id = {item['id']:item for item in items}
+    receipt_history = [json.loads(row.payload) for row in db.scalars(
+        select(DispatchDelivery).where(DispatchDelivery.work_date == day))] if items else []
     for item in items:
         partner = by_id.get(item['paired_order_id'])
         item['paired_order'] = {key:partner[key] for key in ('id','source','number','deceased_name','team_size')} if partner else None
         item['pair_color'] = pair_colors.get(item['id']) if partner else None
-        item['receipt'] = dispatch_receipt_info(db,item)
+        item['receipt'] = dispatch_receipt_info(db,item,receipt_history)
     return {'work_date': str(day), 'items': items, 'counts': numbers, 'free': free['groups'], 'empty_slots':empty,
         'order_completion': dispatch_control_completion(db, day) or order_completion_data(db, day),
         'ready_staff': readiness_summary_data(db, day)['totals']['ready_now'],
@@ -14521,7 +14523,7 @@ def dispatch_order_messages(item):
         'confirmable':i==len(chunks)-1} for i,chunk in enumerate(chunks)]
 
 
-def dispatch_receipt_info(db, item):
+def dispatch_receipt_info(db, item, receipt_history=None):
     if not item.get('brigadier') or item.get('is_draft'): return {'status':'not_sent'}
     message=dispatch_order_messages(item)[-1]
     row=db.get(DispatchDelivery,dispatch_delivery_key(item['work_date'],message))
@@ -14529,8 +14531,11 @@ def dispatch_receipt_info(db, item):
     if saved is None:
         # Message formatting can change between releases. Receipt identity must
         # still follow the order revision and its assigned recipient.
-        history=[json.loads(r.payload) for r in db.scalars(select(DispatchDelivery).where(
-            DispatchDelivery.work_date==item['work_date']))]
+        if receipt_history is None:
+            work_date=date.fromisoformat(item['work_date']) if isinstance(item['work_date'],str) else item['work_date']
+            receipt_history=[json.loads(r.payload) for r in db.scalars(select(DispatchDelivery).where(
+                DispatchDelivery.work_date==work_date))]
+        history=receipt_history
         history=[p for p in history if p.get('kind')=='order' and p.get('confirmable')
             and p.get('order_id')==item['id'] and p.get('chat_id')==message['chat_id']
             and p.get('status') in {'sent','sending','unknown'}]
