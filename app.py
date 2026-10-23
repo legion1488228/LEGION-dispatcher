@@ -960,7 +960,7 @@ def _order_dict(order: Order, db: Session, include_candidates: bool = False):
         "display_number": daily_number if order.source == "gbu" else order.id,
         "source_label": _label_source(order.source),
         "work_date": order.work_date.isoformat(),
-        "issue_time": order.issue_time.strftime("%H:%M"),
+        "issue_time": order.issue_time.strftime("%H:%M") if order.status != 'draft' else '',
         "arrival_time": order.arrival_time.strftime("%H:%M") if order.arrival_time else None,
         "deceased_name": order.deceased_name,
         "route": order.route,
@@ -1563,6 +1563,8 @@ def list_orders(
         q = q.where(Order.status == status)
     q = q.order_by(Order.issue_time, Order.id)
     rows = db.execute(q).scalars().all()
+    if not _is_cabinet_owner(db, user.id):
+        rows = [o for o in rows if o.status != 'draft']
     if _is_cabinet_owner(db, user.id):
         rows.sort(key=dispatch_gbu_elite_priority)
     return [_order_dict(o, db) for o in rows]
@@ -1571,6 +1573,7 @@ def list_orders(
 @app.get("/api/orders/{order_id}")
 def get_order(order_id: int, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
     order = db.get(Order, order_id)
+    if order and order.status == 'draft': dispatch_guard(db, user)
     if not order:
         raise HTTPException(404, "Заказ не найден")
     return _order_dict(order, db)
@@ -3826,6 +3829,7 @@ def gbu_agents(
 @app.get("/api/control")
 def control(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
     orders = db.execute(select(Order).where(Order.work_date == work_date, Order.status != "cancelled").order_by(Order.issue_time)).scalars().all()
+    if not _is_cabinet_owner(db, user.id): orders = [o for o in orders if o.status != 'draft']
     order_items = [_order_dict(x, db) for x in orders]
     readiness = readiness_summary_data(db, work_date)
     loads = _workloads(db, work_date)
@@ -13721,13 +13725,13 @@ class DispatchBlankInput(BaseModel):
 class DispatchPlanInput(BaseModel):
     work_date: date
     source: Literal['private', 'gbu']
-    agent_name: StrictStr = Field(max_length=200)
-    agent_phone: StrictStr = Field(max_length=50)
-    category: Literal['standard', 'vip', 'elite']
-    team_size: StrictInt = Field(ge=3, le=6)
-    deceased_name: StrictStr = Field(min_length=1, max_length=100)
+    agent_name: StrictStr = Field(default='', max_length=200)
+    agent_phone: StrictStr = Field(default='', max_length=50)
+    category: Literal['standard', 'vip', 'elite'] | None = None
+    team_size: StrictInt | None = Field(default=None, ge=3, le=6)
+    deceased_name: StrictStr = Field(default='', max_length=100)
     organization: StrictStr = Field(default='', max_length=200)
-    issue_time: time
+    issue_time: time | None = None
     morgue: StrictStr = Field(default='', max_length=500)
     church: StrictStr = Field(default='', max_length=500)
     cemetery: StrictStr = Field(default='', max_length=500)
@@ -13819,12 +13823,19 @@ def dispatch_order_data(db, order, number):
     data = _order_dict(order, db)
     plan = db.get(DispatchPlan, order.id)
     meta = json.loads(plan.payload) if plan else {}
+    data['is_draft'] = order.status == 'draft'
+    if data['is_draft']:
+        data['composition_complete'] = False
+        data['issue_time'] = order.issue_time.strftime('%H:%M')
+        if 'issue_time' in meta.get('missing_fields', []):
+            data['issue_time'] = ''; data['arrival_time'] = None
+        if not order.category: data['category_label'] = ''
     card = dispatch_match_card(db, order)
     data.update(number=number, route_fields=meta.get('route_fields', {}), managed=bool(plan),
         approved=bool(plan and plan.approved_card_id), number_card_id=card.id if card else None)
     data['assigned_count'] = int(bool(data['brigadier'])) + len(data['members'])
     data['revision'] = dispatch_hash({k: data[k] for k in ('id','source','work_date','issue_time','deceased_name',
-        'category','team_size','organization','agent_name','agent_phone','route','brigadier','members','route_fields','approved')})
+        'category','team_size','organization','agent_name','agent_phone','route','brigadier','members','route_fields','approved','is_draft')})
     return data
 
 
@@ -13961,6 +13972,18 @@ def dispatch_validate_category(source, category, size):
         raise HTTPException(422, 'Недопустимое количество человек для категории')
 
 
+def dispatch_validate_plan(data):
+    missing = [key for key in ('category','team_size','deceased_name','issue_time')
+        if not (getattr(data,key).strip() if isinstance(getattr(data,key),str) else getattr(data,key))]
+    if data.source == 'gbu' and data.category == 'vip':
+        raise HTTPException(422, 'В ГБУ только Стандарт и Элит')
+    if data.team_size is not None and (data.category or data.source == 'gbu'):
+        dispatch_validate_category(data.source, data.category or 'standard', data.team_size)
+    if missing and not data.organization.strip():
+        raise HTTPException(422, 'Для черновика укажите, от кого заказ')
+    return missing
+
+
 def dispatch_editable(db, order, revision):
     plan = db.get(DispatchPlan, order.id)
     if plan and plan.approved_card_id:
@@ -13981,23 +14004,22 @@ def dispatch_create(data: DispatchPlanInput, db: Session = Depends(get_db), user
         if meta.get('creation_hash') != dispatch_hash(data.model_dump(exclude={'revision'})):
             raise HTTPException(409, 'Запрос создания уже использован')
         return {'ok':True, 'id':existing.order_id}
-    dispatch_validate_category(data.source, data.category, data.team_size)
-    if not data.deceased_name.strip():
-        raise HTTPException(422, 'Укажите фамилию')
+    missing = dispatch_validate_plan(data)
     if data.slot_number is not None:
         _,empty=dispatch_slot_layout(db,data.work_date,dispatch_rows(db,data.work_date))
         if data.slot_number not in empty[data.source]:
             raise HTTPException(409,'Карточка уже заполнена или недоступна. Обновите страницу')
-    arrival = (datetime.combine(data.work_date, data.issue_time)-timedelta(minutes=30)).time()
+    arrival = (datetime.combine(data.work_date, data.issue_time)-timedelta(minutes=30)).time() if data.issue_time else None
     order = Order(public_id=_public_id(), source=data.source, work_date=data.work_date,
-        issue_time=data.issue_time, arrival_time=arrival, deceased_name=data.deceased_name.strip(),
-        route='\n'.join([data.morgue, data.church, data.cemetery]), category=data.category, team_size=data.team_size,
+        issue_time=data.issue_time or time(0,0), arrival_time=arrival, deceased_name=data.deceased_name.strip(),
+        route='\n'.join([data.morgue, data.church, data.cemetery]), category=data.category or '', team_size=data.team_size or 0,
         organization=data.organization.strip(), notes='', kickback_rub=0, agent_name=data.agent_name.strip(),
-        agent_phone=data.agent_phone.strip(), other_agent_phone='', status='new')
+        agent_phone=data.agent_phone.strip(), other_agent_phone='', status='draft' if missing else 'new')
     db.add(order); db.flush()
     db.add(DispatchPlan(order_id=order.id, request_key=data.request_key, payload=json.dumps({
         'creation_hash':dispatch_hash(data.model_dump(exclude={'revision'})),
         'slot_number':data.slot_number,
+        'missing_fields':missing,
         'route_fields':{k:getattr(data,k) for k in ('morgue','church','cemetery')}}, ensure_ascii=False)))
     db.commit()
     return {'ok':True, 'id':order.id}
@@ -14103,18 +14125,22 @@ def dispatch_update(order_id: int, data: DispatchPlanInput, db: Session = Depend
     plan = dispatch_editable(db, order, data.revision)
     if data.work_date != order.work_date or data.source != order.source:
         raise HTTPException(409, 'Тип и дата сохранённого заказа не меняются')
-    dispatch_validate_category(data.source, data.category, data.team_size)
-    if not data.deceased_name.strip(): raise HTTPException(422, 'Укажите фамилию')
+    missing = dispatch_validate_plan(data)
+    if missing and dispatch_assignments(db, order):
+        raise HTTPException(409, 'Сначала снимите состав перед сохранением неполного заказа')
     if data.team_size != order.team_size and dispatch_assignments(db, order):
         raise HTTPException(409, 'Сначала снимите назначенный состав перед изменением количества')
     for field in ('agent_name','agent_phone','organization','category','team_size','issue_time','deceased_name'):
         value = getattr(data, field)
+        if value is None: value = {'category':'','team_size':0,'issue_time':time(0,0)}.get(field,value)
         setattr(order, field, value.strip() if isinstance(value,str) else value)
-    order.arrival_time=(datetime.combine(data.work_date,data.issue_time)-timedelta(minutes=30)).time()
+    order.arrival_time=(datetime.combine(data.work_date,data.issue_time)-timedelta(minutes=30)).time() if data.issue_time else None
+    if missing: order.status='draft'
+    elif order.status=='draft': order.status='new'
     order.route='\n'.join([data.morgue,data.church,data.cemetery])
     if not plan:
         plan=DispatchPlan(order_id=order.id,request_key=secrets.token_hex(16),payload='{}');db.add(plan)
-    meta=json.loads(plan.payload);meta['route_fields']={k:getattr(data,k) for k in ('morgue','church','cemetery')}
+    meta=json.loads(plan.payload);meta['route_fields']={k:getattr(data,k) for k in ('morgue','church','cemetery')};meta['missing_fields']=missing
     plan.payload=json.dumps(meta,ensure_ascii=False)
     db.commit();return {'ok':True}
 
@@ -14153,6 +14179,8 @@ def dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session = Depe
     if not order: raise HTTPException(404,'Заказ не найден')
     dispatch_day_lock(db,order.work_date)
     plan=dispatch_editable(db,order,data.revision)
+    if order.status=='draft':
+        raise HTTPException(409,'Сначала дополните заказ: категорию, количество, фамилию и время')
     ids=[data.brigadier_id]+data.member_ids
     if not 1<=len(ids)<=order.team_size or len(set(ids))!=len(ids) or (not data.allow_partial and len(ids)!=order.team_size):
         raise HTTPException(422,'Проверьте количество сотрудников и отсутствие повторов')
@@ -14213,6 +14241,7 @@ def dispatch_approve(order_id: int, data: DispatchRevision, db: Session = Depend
     dispatch_guard(db,user)
     order=db.get(Order,order_id)
     if not order or order.source!='gbu': raise HTTPException(404,'Заказ ГБУ не найден')
+    if order.status=='draft': raise HTTPException(409,'Сначала дополните черновик заказа')
     dispatch_day_lock(db,order.work_date)
     plan=db.get(DispatchPlan,order_id)
     if plan and plan.approved_card_id: return {'ok':True,'already_approved':True}
@@ -14267,6 +14296,8 @@ async def dispatch_send(work_date: date, data: DispatchRevision, db: Session = D
     dispatch_guard(db,user);dispatch_day_lock(db,work_date)
     board=dispatch_board_data(db,work_date)
     if board['revision']!=data.revision: raise HTTPException(409,'Заказы или свободные изменились. Обновите страницу')
+    if any(x.get('is_draft') for x in board['items']):
+        raise HTTPException(409,'Сначала дополните черновики заказов')
     if not board['items'] or any(not x['composition_complete'] for x in board['items']):
         raise HTTPException(409,'Назначьте составы всех заказов')
     messages=[]
@@ -14451,6 +14482,7 @@ function dispatchToken(){return globalThis.crypto?.randomUUID?.().replaceAll('-'
 function dispatchEveningHtml(data){return controlEveningPreparationHtml(data).replace('id="orderPreparation"','class="dispatch-evening"').replace('id="numberCardsBtn"','data-plan-numbers')}
 function dispatchPerson(p){return [String(p.full_name||'').split(/\s+/)[0],p.metro].filter(Boolean).join(' ')}
 function dispatchMini(o){
+ if(o.is_draft)return `<article class="dispatch-mini dispatch-draft" data-plan-card="${o.id}"><button type="button" class="dispatch-card-main" data-plan-id="${o.id}"><header><b>№${o.number}</b><span>${o.source==='gbu'?'ГБУ⬛️':'Черновик'}</span>›</header><p class="dispatch-order-name"><b>${esc(o.organization)}</b><small>${esc(o.deceased_name||'Информацию можно добавить позже')}</small></p><div class="dispatch-card-meta"><span>${esc(o.category_label||'Категория не выбрана')}${o.team_size?' '+Number(o.team_size):''}</span></div><p>${o.issue_time?'◷ '+esc(o.issue_time):'Время не указано'}</p></button><footer><button type="button" data-plan-id="${o.id}">Дополнить заказ ›</button><button type="button" data-plan-delete="${o.id}" aria-label="Удалить заказ №${o.number}">🗑</button></footer></article>`;
  const words=String(o.deceased_name||'').trim().split(/\s+/),surname=words.shift()||'',given=words.join(' ');
  const assigned=Number.isInteger(o.assigned_count)?o.assigned_count:Number(Boolean(o.brigadier))+(o.members||[]).length,complete=assigned===o.team_size&&Boolean(o.brigadier);
  return `<article class="dispatch-mini ${complete?'dispatch-complete':''}" data-plan-card="${o.id}"><button type="button" class="dispatch-card-main" data-plan-id="${o.id}" aria-label="Заказ №${o.number} · ${esc(o.deceased_name)}"><header><b>№${o.number}</b><span>${o.source==='gbu'?'ГБУ⬛️':esc(o.organization||'')}</span>›</header><p class="dispatch-order-name" title="${esc(o.deceased_name)}"><b>ум: ${esc(surname)}</b><small>${given?esc(given):'&nbsp;'}</small></p><div class="dispatch-card-meta"><span class="dispatch-card-category">${esc(o.category_label)} ${o.team_size}</span><span>◷ ${esc(o.issue_time)}</span><b class="dispatch-card-progress ${complete?'dispatch-done':''}" aria-label="Назначено ${assigned} из ${o.team_size} сотрудников">${assigned}/${o.team_size}</b></div><p>📸 ${esc(o.arrival_time||'—')}</p><p class="dispatch-card-brigadier">${o.brigadier?esc(dispatchPerson(o.brigadier)):'&nbsp;'}</p></button><footer><button type="button" data-plan-crew-id="${o.id}" class="${complete?'dispatch-done':''}" ${o.approved?'disabled':''}>${complete?'Состав назначен ✓':assigned?'Дополнить состав ›':'Назначить состав ›'}</button><button type="button" data-plan-delete="${o.id}" aria-label="Удалить заказ №${o.number}" ${o.approved?'disabled':''}>🗑</button></footer></article>`;
@@ -14598,7 +14630,7 @@ return `<article class="gbu-draft dispatch-import-card" data-i="${i}"><header><b
 async function openDispatchEditor(order,source='private',slotNumber=null){
  source=order?.source||source;const day=order?.work_date||state.selectedDate,key=dispatchToken(),route=order?.route_fields||{};
  const input=(name,label,value='',extra='')=>`<label class="${['morgue','church','cemetery'].includes(name)?'dispatch-route-field':''}">${label}<input name="${name}" value="${esc(value)}" ${extra}></label>`;
- showModal(order?`${source==='gbu'?'ГБУ ⬛️':'Частный'} №${order.number}`:'Новый заказ · '+(source==='gbu'?'ГБУ ⬛️':'Частный'),`<form class="dispatch-form" id="dispatchEditor"><small class="dispatch-form-day">${esc(dispatchShortDay(day))}</small>${input('agent_name','Имя агента',order?.agent_name||'','maxlength="200"')}${input('agent_phone','Номер агента',order?.agent_phone||'','type="tel" maxlength="50"')}${input('organization','От кого заказ',order?.organization||'','maxlength="200"')}${input('deceased_name','Фамилия умершего',order?.deceased_name||'','required maxlength="100"')}<label>Категория заказа<select name="category" required><option value="">Выберите категорию</option>${Object.entries(source==='gbu'?{standard:'Стандарт',elite:'Элит'}:{standard:'Стандарт',vip:'Вип',elite:'Элит'}).map(([v,label])=>`<option value="${v}" ${v===order?.category?'selected':''}>${label}</option>`).join('')}</select></label><label>Количество человек<select name="team_size" required></select></label><div class="dispatch-times">${input('issue_time','Время выдачи',order?.issue_time||'','type="time" required')}<label>📸 Подача авто<input data-plan-arrival readonly value="${esc(order?.arrival_time||'')}"></label></div><small class="dispatch-arrival-hint">Подача автоматически за 30 минут до выдачи.</small><b class="dispatch-route-title">Маршрут</b>${input('morgue','1. Морг',route.morgue||(!Object.keys(route).length?order?.route||'':''),'maxlength="500"')}${input('church','2. Храм',route.church||'','maxlength="500"')}${input('cemetery','3. Кладбище / кремация',route.cemetery||'','maxlength="500"')}${order?`<p class="dispatch-crew-status">${order.composition_complete?'Состав назначен ✓':'Состав не назначен'}</p><button type="button" data-plan-crew ${order.approved?'disabled':''}>Выбрать бригадира и состав ›</button>${order.brigadier?'<button type="button" data-plan-clear>Снять состав</button>':''}`:'<small class="dispatch-crew-hint">Состав можно назначить после сохранения.</small>'}<p data-plan-error role="status"></p><button type="submit" class="primary" ${order?.approved?'disabled':''}>Сохранить заказ</button></form>`);
+ showModal(order?`${source==='gbu'?'ГБУ ⬛️':'Частный'} №${order.number}`:'Новый заказ · '+(source==='gbu'?'ГБУ ⬛️':'Частный'),`<form class="dispatch-form" id="dispatchEditor"><small class="dispatch-form-day">${esc(dispatchShortDay(day))}</small>${input('agent_name','Имя агента',order?.agent_name||'','maxlength="200"')}${input('agent_phone','Номер агента',order?.agent_phone||'','type="tel" maxlength="50"')}${input('organization','От кого заказ',order?.organization||'','maxlength="200"')}${input('deceased_name','Фамилия умершего',order?.deceased_name||'','maxlength="100"')}<label>Категория заказа<select name="category"><option value="">Выберите категорию</option>${Object.entries(source==='gbu'?{standard:'Стандарт',elite:'Элит'}:{standard:'Стандарт',vip:'Вип',elite:'Элит'}).map(([v,label])=>`<option value="${v}" ${v===order?.category?'selected':''}>${label}</option>`).join('')}</select></label><label>Количество человек<select name="team_size"></select></label><div class="dispatch-times">${input('issue_time','Время выдачи',order?.issue_time||'','type="time"')}<label>📸 Подача авто<input data-plan-arrival readonly value="${esc(order?.arrival_time||'')}"></label></div><small class="dispatch-arrival-hint">Подача автоматически за 30 минут до выдачи.</small><b class="dispatch-route-title">Маршрут</b>${input('morgue','1. Морг',route.morgue||(!Object.keys(route).length?order?.route||'':''),'maxlength="500"')}${input('church','2. Храм',route.church||'','maxlength="500"')}${input('cemetery','3. Кладбище / кремация',route.cemetery||'','maxlength="500"')}${order?`<p class="dispatch-crew-status">${order.composition_complete?'Состав назначен ✓':'Состав не назначен'}</p><button type="button" data-plan-crew ${order.approved?'disabled':''}>Выбрать бригадира и состав ›</button>${order.brigadier?'<button type="button" data-plan-clear>Снять состав</button>':''}`:'<small class="dispatch-crew-hint">Можно сохранить только «От кого заказ» и дополнить позже.</small>'}<p data-plan-error role="status"></p><button type="submit" class="primary" ${order?.approved?'disabled':''}>Сохранить заказ</button></form>`);
  const form=qs('#dispatchEditor'),live=()=>qs('#dispatchEditor')===form&&!qs('#modal').classList.contains('hidden');let chooseCrewAfterSave=false;
  if(source==='gbu'&&!order?.approved){
   const lookupAgent=async()=>{
@@ -14615,11 +14647,12 @@ async function openDispatchEditor(order,source='private',slotNumber=null){
  const crew=qs('[data-plan-crew]',form);if(crew)crew.onclick=()=>{chooseCrewAfterSave=true;form.requestSubmit()};
  const clear=qs('[data-plan-clear]',form);if(clear){clear.disabled=order.approved;clear.onclick=async()=>{clear.disabled=true;try{await api('/api/dispatch-board/orders/'+order.id+'/crew',{method:'DELETE',body:JSON.stringify({revision:order.revision})});closeModal();await loadDispatchBoard()}catch(e){qs('[data-plan-error]',form).textContent=e.message;clear.disabled=false}}}
  form.onsubmit=async e=>{e.preventDefault();const button=qs('[type=submit]',form);if(button.disabled)return;button.disabled=true;
- const fields=Object.fromEntries(new FormData(form));const payload={...fields,team_size:Number(fields.team_size),source,work_date:day,request_key:key,revision:order?.revision||null,slot_number:slotNumber};
+ const fields=Object.fromEntries(new FormData(form));const payload={...fields,category:fields.category||null,team_size:fields.team_size?Number(fields.team_size):null,issue_time:fields.issue_time||null,source,work_date:day,request_key:key,revision:order?.revision||null,slot_number:slotNumber};
  try{const r=await api('/api/dispatch-board/orders'+(order?'/'+order.id:''),{method:order?'PUT':'POST',body:JSON.stringify(payload)});if(!live())return;closeModal();await loadDispatchBoard();if(chooseCrewAfterSave){const fresh=dispatchBoard?.items.find(o=>o.id===(order?.id||r.id));if(fresh)await openDispatchCrew(fresh)}else toast('Заказ сохранён')}catch(error){if(live()){qs('[data-plan-error]',form).textContent=error.message;button.disabled=false;chooseCrewAfterSave=false}}
  };
 }
 async function openDispatchCrew(order){
+ if(order.is_draft){await openDispatchEditor(order);toast('Сначала дополните заказ: категорию, количество, фамилию и время');return}
  showModal('Выберите бригадира','<div id="dispatchCrew">Загрузка…</div>');const root=qs('#dispatchCrew'),live=()=>qs('#dispatchCrew')===root&&!qs('#modal').classList.contains('hidden');
  try{const data=await api('/api/dispatch-board/orders/'+order.id+'/people');if(!live())return;
  let leader=order.brigadier?.id||null,selected=new Set(order.members.map(p=>p.id)),second=new Set();let step=leader?2:1;
