@@ -13741,6 +13741,7 @@ class DispatchCrewInput(BaseModel):
     brigadier_id: StrictInt
     member_ids: list[StrictInt] = Field(max_length=5)
     second_order_employee_ids: list[StrictInt] = Field(default_factory=list, max_length=6)
+    allow_partial: StrictBool = False
 
 
 class DispatchRevision(BaseModel):
@@ -13821,6 +13822,7 @@ def dispatch_order_data(db, order, number):
     card = dispatch_match_card(db, order)
     data.update(number=number, route_fields=meta.get('route_fields', {}), managed=bool(plan),
         approved=bool(plan and plan.approved_card_id), number_card_id=card.id if card else None)
+    data['assigned_count'] = int(bool(data['brigadier'])) + len(data['members'])
     data['revision'] = dispatch_hash({k: data[k] for k in ('id','source','work_date','issue_time','deceased_name',
         'category','team_size','organization','agent_name','agent_phone','route','brigadier','members','route_fields','approved')})
     return data
@@ -13863,6 +13865,11 @@ def dispatch_slot_layout(db, day, rows):
         number=1
         while number in used[order.source]: number+=1
         mapping[order.id]=number;used[order.source].add(number)
+    # GBU numbers follow the visible category order, starting at one each day.
+    gbu_rows=sorted((order for order in rows if order.source=='gbu'),
+        key=lambda order:(dispatch_gbu_elite_priority(order),order.id))
+    for number,order in enumerate(gbu_rows,1): mapping[order.id]=number
+    used['gbu']=set(range(1,len(gbu_rows)+1))
     empty={}
     for source in ('private','gbu'):
         state=db.get(DispatchBlankState,(day,source))
@@ -14082,6 +14089,8 @@ def dispatch_import_gbu(data: DispatchGbuImportInput, db: Session = Depends(get_
             'import_raw_route':item.route},ensure_ascii=False)))
         created.append({'id':order.id,'number':slots[index]})
     db.commit()
+    final_numbers,_=dispatch_slot_layout(db,data.work_date,dispatch_rows(db,data.work_date))
+    for item in created: item['number']=final_numbers[item['id']]
     return {'ok':True,'items':created}
 
 
@@ -14120,6 +14129,23 @@ def dispatch_people(order_id: int, db: Session = Depends(get_db), user: Telegram
     return {'items':[_employee_dict(p,loads.get(p.id,0)) for p in rows]}
 
 
+@app.delete('/api/dispatch-board/orders/{order_id}')
+def dispatch_delete_order(order_id: int, data: DispatchRevision, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    dispatch_guard(db,user)
+    order=db.get(Order,order_id)
+    if not order: raise HTTPException(404,'Заказ не найден')
+    dispatch_day_lock(db,order.work_date)
+    if order.status=='cancelled': return {'ok':True,'id':order.id}
+    dispatch_editable(db,order,data.revision)
+    card=dispatch_match_card(db,order)
+    if card and effective_order_photo(db,card)['first_received']:
+        raise HTTPException(409,'После фотоотчёта заказ нельзя удалить')
+    for assignment in dispatch_assignments(db,order): db.delete(assignment)
+    order.status='cancelled'
+    db.commit()
+    return {'ok':True,'id':order.id}
+
+
 @app.post('/api/dispatch-board/orders/{order_id}/crew')
 def dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     dispatch_guard(db,user)
@@ -14128,8 +14154,8 @@ def dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session = Depe
     dispatch_day_lock(db,order.work_date)
     plan=dispatch_editable(db,order,data.revision)
     ids=[data.brigadier_id]+data.member_ids
-    if len(ids)!=order.team_size or len(set(ids))!=len(ids):
-        raise HTTPException(422,'Выберите полный состав без повторов')
+    if not 1<=len(ids)<=order.team_size or len(set(ids))!=len(ids) or (not data.allow_partial and len(ids)!=order.team_size):
+        raise HTTPException(422,'Проверьте количество сотрудников и отсутствие повторов')
     people=list(db.scalars(select(Employee).where(Employee.id.in_(ids),Employee.active.is_(True),
         _visible_employee()).order_by(Employee.id).with_for_update()))
     profiles={p.id:p for p in people}
@@ -14371,8 +14397,15 @@ body:has(#modal:not(.hidden) #dispatchGbuImport){overflow:hidden}
 .dispatch-evening .metric>span{font-size:10px;line-height:1.15;color:var(--muted)}
 .dispatch-columns{position:relative;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.dispatch-columns::before{content:"";position:absolute;top:0;bottom:0;left:50%;border-left:1px solid var(--line);pointer-events:none}.dispatch-column{min-width:0}
 .dispatch-column h3{display:flex;align-items:center;justify-content:space-between;gap:4px;font-size:15px;color:var(--gold);margin:5px 0}.dispatch-source-requested{white-space:nowrap;font-size:12px}.dispatch-column>button{width:100%;padding:7px 2px;font-size:11px;margin-bottom:6px}
-.dispatch-mini{display:grid;grid-template-rows:16px 28px 14px 14px 14px 14px;gap:3px;box-sizing:border-box;text-align:left;width:100%;height:138px;min-height:138px;max-height:138px;border:1px solid var(--line);background:var(--panel,var(--bg));border-radius:11px;padding:7px!important;margin-bottom:6px;font-size:11px;line-height:14px;overflow:hidden;color:var(--text)}
-.dispatch-mini header{display:flex;gap:6px;align-items:center;min-width:0}.dispatch-mini header span{flex:1;min-width:0;font-size:10px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.dispatch-mini b{font-size:12px}.dispatch-mini p{margin:0;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.dispatch-mini .dispatch-order-name{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;white-space:normal;max-height:28px;overflow-wrap:anywhere}.dispatch-gold{color:var(--gold)}.dispatch-mini footer{font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dispatch-done{color:var(--green,#398771)!important}
+.dispatch-mini{display:grid;grid-template-rows:1fr 24px;gap:4px;box-sizing:border-box;text-align:left;width:100%;height:144px;min-height:144px;max-height:144px;border:1px solid var(--line);background:var(--panel,var(--bg));border-radius:11px;padding:7px!important;margin-bottom:6px;font-size:11px;line-height:14px;overflow:hidden;color:var(--text)}
+.dispatch-mini.dispatch-complete{border-color:var(--green,#398771)}
+.dispatch-card-main{display:grid;grid-template-rows:16px 28px 16px 14px 14px;gap:2px;width:100%;min-width:0;min-height:0;padding:0;border:0;border-radius:0;background:transparent;text-align:left;color:inherit;font:inherit;overflow:hidden}
+.dispatch-mini header{display:flex;gap:6px;align-items:center;min-width:0}.dispatch-mini header span{flex:1;min-width:0;font-size:10px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.dispatch-mini b{font-size:12px}.dispatch-mini p{margin:0;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.dispatch-mini .dispatch-order-name{display:grid;grid-template-rows:14px 14px;max-height:28px;white-space:nowrap}.dispatch-order-name>b,.dispatch-order-name>small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dispatch-order-name>small{font-size:10px;font-weight:400;line-height:14px}
+.dispatch-card-meta{display:flex;align-items:center;justify-content:space-between;gap:3px;min-width:0;white-space:nowrap;font-size:10px}.dispatch-card-category{color:var(--gold);overflow:hidden;text-overflow:ellipsis;min-width:0}.dispatch-card-progress{font-size:11px!important;flex-shrink:0}.dispatch-gold{color:var(--gold)}
+.dispatch-mini footer{display:flex;align-items:center;justify-content:space-between;gap:4px;min-width:0;font-size:10px;color:var(--muted)}
+.dispatch-mini footer button{min-width:0;min-height:24px;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dispatch-mini footer [data-plan-delete]{flex:0 0 26px;text-align:center;font-size:15px;border:1px solid var(--line);border-radius:6px}
+.dispatch-done{color:var(--green,#398771)!important}
 .dispatch-blank{grid-template-rows:16px 1fr;border-style:dashed}.dispatch-blank p{align-self:center;color:var(--muted);font-size:11px}
 .dispatch-send{width:100%;margin:8px 0;padding:10px}.dispatch-free{border:1px solid var(--line);border-radius:12px;padding:9px;font-size:12px}.dispatch-free details{padding:5px 0}.dispatch-free summary{cursor:pointer}.dispatch-free p{font-size:11px;margin:4px 0}
 .dispatch-form{display:grid;gap:8px}.dispatch-form label{display:grid;gap:3px;font-size:12px}.dispatch-form input,.dispatch-form select{width:100%;min-width:0;box-sizing:border-box;font-size:15px;padding:9px}.dispatch-times{display:grid;grid-template-columns:1fr 1fr;gap:7px}.dispatch-form small{font-size:11px;color:var(--muted)}
@@ -14417,7 +14450,23 @@ function dispatchShortDay(day){const d=new Date(day+'T12:00:00Z');return d.toLoc
 function dispatchToken(){return globalThis.crypto?.randomUUID?.().replaceAll('-','')||Date.now().toString(36)+Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2)}
 function dispatchEveningHtml(data){return controlEveningPreparationHtml(data).replace('id="orderPreparation"','class="dispatch-evening"').replace('id="numberCardsBtn"','data-plan-numbers')}
 function dispatchPerson(p){return [String(p.full_name||'').split(/\s+/)[0],p.metro].filter(Boolean).join(' ')}
-function dispatchMini(o){return `<button type="button" class="dispatch-mini" data-plan-id="${o.id}" aria-label="Заказ №${o.number} · ${esc(o.deceased_name)}"><header><b>№${o.number}</b><span>${esc(o.organization||(o.source==='gbu'?'ГБУ ⬛️':''))}${o.source==='gbu'&&o.organization?' ⬛️':''}</span>›</header><p class="dispatch-order-name" title="${esc(o.deceased_name)}"><b>ум: ${esc(o.deceased_name)}</b></p><p class="dispatch-gold">${esc(o.category_label)} · ${o.team_size} чел.</p><p>◷ ${esc(o.issue_time)} · 📸 ${esc(o.arrival_time||'—')}</p><p class="dispatch-card-brigadier">${o.brigadier?esc(dispatchPerson(o.brigadier)):'&nbsp;'}</p><footer class="${o.composition_complete?'dispatch-done':''}">${o.composition_complete?'Состав назначен ✓':'Назначить состав ›'}</footer></button>`}
+function dispatchMini(o){
+ const words=String(o.deceased_name||'').trim().split(/\s+/),surname=words.shift()||'',given=words.join(' ');
+ const assigned=Number.isInteger(o.assigned_count)?o.assigned_count:Number(Boolean(o.brigadier))+(o.members||[]).length,complete=assigned===o.team_size&&Boolean(o.brigadier);
+ return `<article class="dispatch-mini ${complete?'dispatch-complete':''}" data-plan-card="${o.id}"><button type="button" class="dispatch-card-main" data-plan-id="${o.id}" aria-label="Заказ №${o.number} · ${esc(o.deceased_name)}"><header><b>№${o.number}</b><span>${o.source==='gbu'?'ГБУ⬛️':esc(o.organization||'')}</span>›</header><p class="dispatch-order-name" title="${esc(o.deceased_name)}"><b>ум: ${esc(surname)}</b><small>${given?esc(given):'&nbsp;'}</small></p><div class="dispatch-card-meta"><span class="dispatch-card-category">${esc(o.category_label)} ${o.team_size}</span><span>◷ ${esc(o.issue_time)}</span><b class="dispatch-card-progress ${complete?'dispatch-done':''}" aria-label="Назначено ${assigned} из ${o.team_size} сотрудников">${assigned}/${o.team_size}</b></div><p>📸 ${esc(o.arrival_time||'—')}</p><p class="dispatch-card-brigadier">${o.brigadier?esc(dispatchPerson(o.brigadier)):'&nbsp;'}</p></button><footer><button type="button" data-plan-crew-id="${o.id}" class="${complete?'dispatch-done':''}" ${o.approved?'disabled':''}>${complete?'Состав назначен ✓':assigned?'Дополнить состав ›':'Назначить состав ›'}</button><button type="button" data-plan-delete="${o.id}" aria-label="Удалить заказ №${o.number}" ${o.approved?'disabled':''}>🗑</button></footer></article>`;
+}
+function confirmDispatchDelete(order){
+ const day=order.work_date;
+ showModal('Удалить заказ?',`<div id="dispatchDelete"><p>Действительно хотите удалить заказ №${order.number} · ${esc(order.deceased_name)}?</p><p data-plan-delete-error role="status"></p><div class="dispatch-tools"><button type="button" data-plan-delete-cancel>Отмена</button><button type="button" data-plan-delete-confirm>Удалить</button></div></div>`);
+ const root=qs('#dispatchDelete'),live=()=>qs('#dispatchDelete')===root&&!qs('#modal').classList.contains('hidden');
+ qs('[data-plan-delete-cancel]',root).onclick=closeModal;
+ qs('[data-plan-delete-confirm]',root).onclick=async()=>{
+  const button=qs('[data-plan-delete-confirm]',root);if(button.disabled)return;
+  qsa('button',root).forEach(item=>item.disabled=true);
+  try{await api('/api/dispatch-board/orders/'+order.id,{method:'DELETE',body:JSON.stringify({revision:order.revision})});if(live())closeModal();if(state.selectedDate===day)await loadDispatchBoard()}
+  catch(error){if(live()){qs('[data-plan-delete-error]',root).textContent=error.message;qsa('button',root).forEach(item=>item.disabled=false)}}
+ };
+}
 function dispatchColumnCards(data,source){
  const entries=data.items.filter(o=>o.source===source).map(o=>({number:o.number,order:o}));
  entries.push(...(data.empty_slots?.[source]||[]).map(number=>({number})));
@@ -14435,17 +14484,19 @@ root.innerHTML=`${dispatchEveningHtml(data)}<div class="dispatch-tools"><button 
  qsa('[data-plan-add]',root).forEach(b=>b.onclick=async()=>{if(b.disabled)return;b.disabled=true;b.dispatchRequestKey=b.dispatchRequestKey||dispatchToken();try{await api('/api/dispatch-board/blank',{method:'POST',body:JSON.stringify({work_date:day,source:b.dataset.planAdd,request_key:b.dispatchRequestKey})});await loadDispatchBoard()}catch(error){if(root.contains(b)){qs('[data-plan-status]',root).textContent=error.message;b.disabled=false}}});
  qsa('[data-plan-blank]',root).forEach(b=>b.onclick=()=>openDispatchEditor(null,b.dataset.planSource,Number(b.dataset.planBlank)));
  qsa('[data-plan-id]',root).forEach(b=>b.onclick=()=>openDispatchEditor(data.items.find(x=>x.id===Number(b.dataset.planId))));
+ qsa('[data-plan-crew-id]',root).forEach(b=>b.onclick=()=>openDispatchCrew(data.items.find(x=>x.id===Number(b.dataset.planCrewId))));
+ qsa('[data-plan-delete]',root).forEach(b=>b.onclick=()=>confirmDispatchDelete(data.items.find(x=>x.id===Number(b.dataset.planDelete))));
  qs('[data-plan-numbers]',root).onclick=()=>openNumberCards(day);
  qs('[data-plan-send]',root).onclick=async e=>{const button=e.currentTarget;button.disabled=true;const status=qs('[data-plan-status]',root);status.textContent='Отправка заказов и списков свободных…';
   try{const result=await api('/api/dispatch-board/send?work_date='+day,{method:'POST',body:JSON.stringify({revision:data.revision})});status.textContent=result.failed.length?'Отправлено '+result.sent+' из '+result.total+'\n'+result.failed.join('\n'):'Заказы и списки свободных отправлены';}catch(error){status.textContent=error.message}finally{if(root.contains(button))button.disabled=false}
  };
  }catch(error){if(ticket===dispatchLoad)root.textContent=error.message}
 }
-function dispatchImportNumbers(board,count){
- const slots=[...(board?.empty_slots?.gbu||[1,2,3,4,5])].sort((a,b)=>a-b);
- let highest=Math.max(5,...slots,...(board?.items||[]).filter(o=>o.source==='gbu').map(o=>o.number));
- while(slots.length<count)slots.push(++highest);
- return slots.slice(0,count);
+function dispatchImportNumbers(board,count,categories='standard'){
+ const existing=(board?.items||[]).filter(order=>order.source==='gbu'),types=Array.isArray(categories)?categories:Array(count).fill(categories);
+ const elites=existing.filter(order=>order.category==='elite').length,addedElites=types.filter(category=>category==='elite').length;
+ let elite=elites,standard=existing.length+addedElites;
+ return types.map(category=>category==='elite'?++elite:++standard);
 }
 function dispatchImportAgentName(value){
  const words=String(value||'').trim().split(/\s+/).filter(Boolean);
@@ -14466,7 +14517,7 @@ async function openDispatchGbuImport(){
   const destination=qs('[data-import-paste]',root);
   destination.focus?.({preventScroll:true});
  }
- function renumber(){const rows=qsa('.gbu-draft',root),numbers=dispatchImportNumbers(board,rows.length);rows.forEach((row,i)=>qs('[data-import-number]',row).textContent='Заказ ГБУ №'+numbers[i]);return numbers}
+ function renumber(){const rows=qsa('.gbu-draft',root),numbers=dispatchImportNumbers(board,rows.length,rows.map(row=>qs('[data-k=category]',row).value));rows.forEach((row,i)=>qs('[data-import-number]',row).textContent='Заказ ГБУ №'+numbers[i]);return numbers}
  function rowHtml(d,i){
   const field=(key,label,value='',extra='',kind='')=>`<label class="dispatch-import-field ${kind}"><span>${label}</span><input data-k="${key}" value="${esc(value||'')}" ${extra}></label>`;
   const issue=String(d.issue_time||'').slice(0,5),parts=issue.split(':').map(Number);
@@ -14504,6 +14555,7 @@ return `<article class="gbu-draft dispatch-import-card" data-i="${i}"><header><b
   try{const result=await api('/api/gbu/ocr',{method:'POST',body:fd});if(!live())return;draw(result);qs('[data-import-status]',root).textContent=(result.drafts||[]).length?'Проверьте заказы перед сохранением':'Строки не найдены. Попробуйте более чёткое фото или добавьте строки вручную.'}catch(error){if(live())qs('[data-import-status]',root).textContent=error.message}finally{if(live())lock(false)}
  }
  qs('[data-import-file]',root).onchange=event=>{file=event.target.files?.[0]||null;if(file)recognize()};qs('[data-import-ocr]',root).onclick=recognize;
+ root.onchange=event=>{if(event.target.matches('[data-k=category]'))renumber()};
  qsa('[data-import-mode]',root).forEach(button=>button.onclick=async()=>{
   if(busy||readingClipboard)return;
   if(importCategory!==button.dataset.importMode){file=null;qs('[data-import-file]',root).value=''}
@@ -14570,21 +14622,21 @@ async function openDispatchEditor(order,source='private',slotNumber=null){
 async function openDispatchCrew(order){
  showModal('Выберите бригадира','<div id="dispatchCrew">Загрузка…</div>');const root=qs('#dispatchCrew'),live=()=>qs('#dispatchCrew')===root&&!qs('#modal').classList.contains('hidden');
  try{const data=await api('/api/dispatch-board/orders/'+order.id+'/people');if(!live())return;
- let leader=order.brigadier?.id||null,selected=new Set(order.members.map(p=>p.id)),second=new Set();let step=1;
+ let leader=order.brigadier?.id||null,selected=new Set(order.members.map(p=>p.id)),second=new Set();let step=leader?2:1;
  const people=data.items,old=new Set([order.brigadier?.id,...order.members.map(p=>p.id)]);
  const name=p=>dispatchPerson(p),busy=p=>p.workload>0;
  function row(p,isLeader){const checked=isLeader?leader===p.id:selected.has(p.id);const blocked=p.workload>=2&&!old.has(p.id);return `<label class="dispatch-choice" data-plan-person="${p.id}" data-plan-search="${esc(name(p).toLowerCase().replaceAll('ё','е'))}"><span>${esc(name(p))}<small>${p.height_cm||'—'}${busy(p)?' · уже на заказе':''}</small></span><input type="${isLeader?'radio':'checkbox'}" name="${isLeader?'leader':'member'}" value="${p.id}" ${checked?'checked':''} ${blocked?'disabled':''}>${busy(p)&&!blocked&&!old.has(p.id)?`<button type="button" data-plan-second="${p.id}" aria-pressed="${second.has(p.id)}">2-й заказ${second.has(p.id)?' ✓':''}</button>`:''}</label>`}
  function draw(){if(!live())return;const p=people.find(p=>p.id===leader),need=order.team_size-1;
  const sorted=people.filter(p=>p.id!==leader).sort((a,b)=>{const diff=x=>p?.height_cm&&x.height_cm?Math.abs(x.height_cm-p.height_cm):1000;return Number(diff(a)>3)-Number(diff(b)>3)||diff(a)-diff(b)||name(a).localeCompare(name(b),'ru')});
  root.innerHTML=`<p>Шаг ${step} из 2 · ${order.source==='gbu'?'ГБУ ⬛️':'Частный'} №${order.number}</p>${step===2?`<p><b>Бригадир: ${esc(name(p))} · ${p.height_cm||'—'}</b> <button type="button" data-plan-back>Изменить</button></p>`:''}<input class="search" data-plan-find placeholder="Поиск по имени и метро"><div class="${step===1?'dispatch-leaders':'dispatch-people'}">${(step===1?people.filter(p=>p.group_code==='brigadier').sort((a,b)=>name(a).localeCompare(name(b),'ru')):sorted).map(p=>row(p,step===1)).join('')}</div>${step===2?'<small>Сначала сотрудники с разницей в росте до 3 см, затем остальные.</small>':''}<p class="dispatch-selected" data-plan-selected></p><p data-plan-error role="status"></p><button type="button" class="primary" data-plan-next>${step===1?'Далее: сотрудники ›':'Назначить состав'}</button>`;
- const next=qs('[data-plan-next]',root);function update(){qs('[data-plan-selected]',root).textContent=step===1?'Выберите одного бригадира':'Выбрано '+(selected.size+1)+' из '+order.team_size;next.disabled=step===1?!leader:selected.size!==need;
+ const next=qs('[data-plan-next]',root);function update(){qs('[data-plan-selected]',root).textContent=step===1?'Выберите одного бригадира':'Выбрано '+(selected.size+1)+'/'+order.team_size;next.disabled=!leader||selected.size>need;if(step===2)next.textContent=(selected.size===need?'Назначить состав ':'Сохранить состав ')+(selected.size+1)+'/'+order.team_size;
  qsa('input[type=checkbox]',root).forEach(box=>box.disabled=!box.checked&&(selected.size>=need||people.find(p=>p.id===Number(box.value)).workload>=2&&!old.has(Number(box.value))))}update();
  qs('[data-plan-find]',root).oninput=e=>{const tokens=e.target.value.toLowerCase().replaceAll('ё','е').trim().split(/\s+/);qsa('[data-plan-search]',root).forEach(row=>row.hidden=!tokens.every(t=>row.dataset.planSearch.includes(t)))};
  qsa('input[type=radio],input[type=checkbox]',root).forEach(box=>box.onchange=()=>{const id=Number(box.value);if(step===1){leader=id;selected.delete(id)}else box.checked?selected.add(id):selected.delete(id);update()});
  qsa('[data-plan-second]',root).forEach(button=>button.onclick=e=>{e.preventDefault();const id=Number(button.dataset.planSecond);second.has(id)?second.delete(id):second.add(id);button.setAttribute('aria-pressed',String(second.has(id)));button.textContent='2-й заказ'+(second.has(id)?' ✓':'')});
  const back=qs('[data-plan-back]',root);if(back)back.onclick=()=>{step=1;draw()};
  next.onclick=async()=>{if(next.disabled)return;if(step===1){step=2;draw();return}const ids=[leader,...selected];if(ids.some(id=>busy(people.find(p=>p.id===id))&&!old.has(id)&&!second.has(id))){qs('[data-plan-error]',root).textContent='Подтвердите «2-й заказ» для занятых сотрудников';return}next.disabled=true;
- try{await api('/api/dispatch-board/orders/'+order.id+'/crew',{method:'POST',body:JSON.stringify({revision:order.revision,brigadier_id:leader,member_ids:[...selected],second_order_employee_ids:[...second]})});if(!live())return;closeModal();await loadDispatchBoard()}catch(error){if(live()){qs('[data-plan-error]',root).textContent=error.message;next.disabled=false}}};
+ try{await api('/api/dispatch-board/orders/'+order.id+'/crew',{method:'POST',body:JSON.stringify({revision:order.revision,brigadier_id:leader,member_ids:[...selected],second_order_employee_ids:[...second],allow_partial:true})});if(!live())return;closeModal();await loadDispatchBoard()}catch(error){if(live()){qs('[data-plan-error]',root).textContent=error.message;next.disabled=false}}};
  }draw();
  }catch(error){if(live())root.textContent=error.message}
 }
