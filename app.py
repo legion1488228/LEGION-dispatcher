@@ -14706,6 +14706,8 @@ def _dispatch_planning_html(html):
 body.dispatch-actions-open .topbar,body.dispatch-actions-open #dispatcherOrderOverview,body.dispatch-actions-open #summary{display:none!important}
 #dispatchActionsView{padding-bottom:18px}#dispatchActionsView h2{font-size:20px;margin:10px 0}
 .dispatch-tools{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:stretch;gap:7px;margin:8px 0}.dispatch-tools button{width:100%;min-height:32px;font-size:11px;padding:6px 7px}
+.dispatch-tools.dispatch-toolbar{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}.dispatch-tools.dispatch-toolbar button{font-size:10px;padding:5px 3px;min-width:0;line-height:1.2}
+.dispatch-assigned-person{padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}.dispatch-assigned-person small{display:block;color:var(--muted);margin-top:3px}
 .dispatch-sticky-panel{position:sticky;top:0;z-index:20;padding-bottom:6px;background:var(--bg);box-shadow:0 1px 0 var(--line);margin-bottom:6px}
 .dispatch-overview{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:center;gap:7px;margin:4px 0 10px;padding:8px 0;background:var(--bg);box-shadow:0 1px 0 var(--line)}.dispatch-requested{text-align:left;font-size:11px;line-height:1.25}.dispatch-requested b{color:var(--gold)}
 .dispatch-available{font-size:11px;line-height:1.25}.dispatch-available b{color:var(--green,#398771)}
@@ -14774,9 +14776,6 @@ body:has(#modal:not(.hidden) #dispatchGbuImport){overflow:hidden}
 .dispatch-evening .metric{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;column-gap:6px;min-height:0;padding:5px 6px;border-radius:8px;text-align:left;background:var(--panel2)}
 .dispatch-evening .metric>b{grid-row:1/3;font-size:12px;line-height:1.2}
 .dispatch-evening .metric>span{font-size:10px;line-height:1.15;color:var(--muted)}
-.dispatch-evening .dispatch-evening-gbu{grid-template-columns:auto minmax(0,1fr) minmax(54px,.95fr)}
-.dispatch-evening-gbu [data-plan-import]{grid-column:3;grid-row:1/3;width:100%;min-width:0;min-height:34px;height:100%;padding:4px 2px;font-size:9px;line-height:1.15;white-space:normal;border:1px solid var(--line);border-radius:8px}
-.dispatch-evening-gbu [data-plan-import] span{display:block}
 .dispatch-evening .metric>b{min-width:0;font-size:11px}
 .dispatch-evening .dispatch-receipt-count{display:block;min-height:20px;min-width:42px;padding:1px 3px;margin-top:3px;font-size:8px;line-height:1.2;border:1px solid var(--gold);border-radius:5px;color:var(--gold);background:var(--panel)}
 .dispatch-card-receipt{font-size:10px;font-style:normal;flex-shrink:0;color:var(--gold)}
@@ -14893,9 +14892,6 @@ function dispatchToken(){return globalThis.crypto?.randomUUID?.().replaceAll('-'
 function dispatchEveningHtml(data){
  const panel=document.createElement('div');
  panel.innerHTML=controlEveningPreparationHtml(data).replace('id="orderPreparation"','class="dispatch-evening"').replace('id="numberCardsBtn"','data-plan-numbers');
- const gbu=panel.querySelector('.summary-grid .metric:last-child');
- gbu.classList.add('dispatch-evening-gbu');
- gbu.insertAdjacentHTML('beforeend','<button type="button" data-plan-import>📷 Импорт <span>заказов ГБУ</span></button>');
  ['private','gbu'].forEach((source,index)=>{
   const items=data.items.filter(order=>order.source===source),received=items.filter(order=>order.receipt?.status==='confirmed').length;
   const heading=panel.querySelectorAll('.summary-grid .metric>b')[index];
@@ -15021,6 +15017,7 @@ async function loadDispatchBoard(){
  const assigned=data.items.filter(o=>o.composition_complete).length,posted=data.numbers.filter(n=>n.posted).length;
  const available=Math.max(0,(Number(data.ready_staff)||0)-(Number(data.requested_staff_effective??data.requested_staff)||0));
 root.innerHTML=`${dispatchEveningHtml(data)}<div class="dispatch-tools"><button type="button" data-plan-payroll>₽ Зарплата ГБУ</button><button type="button" data-plan-agents>⬛️ Агенты ГБУ</button></div><div class="dispatch-sticky-panel" role="region" aria-label="Сотрудники и заказы"><div class="dispatch-overview"><span class="dispatch-requested"><span class="dispatch-ready">Готово сотрудников: <b data-plan-ready>${Number(data.ready_staff)||0}</b></span>Запрошено сотрудников: <b data-plan-requested>${dispatchStaffCount(data.requested_staff,data.requested_staff_effective)}</b></span><span class="dispatch-available" role="status">Свободно сотрудников: <b data-plan-available>${available}</b><span class="dispatch-order-total"><span>Всего заказов: <b data-plan-total-orders>${(Number(data.counts?.private)||0)+(Number(data.counts?.gbu)||0)}</b></span><button type="button" data-plan-comment>Комментарий</button></span></span></div><div class="dispatch-columns" data-plan-headings>${['private','gbu'].map(source=>`<div class="dispatch-column"><h3><span>${source==='gbu'?'ГБУ ⬛️':'Частные'} · ${data.counts[source]}</span><span class="dispatch-source-requested" title="Запрошено сотрудников" aria-label="Запрошено сотрудников: ${dispatchStaffCount(data.requested_staff_by_source?.[source],data.requested_staff_effective_by_source?.[source])}">👥 <b data-plan-requested-source="${source}">${dispatchStaffCount(data.requested_staff_by_source?.[source],data.requested_staff_effective_by_source?.[source])}</b></span></h3><button type="button" data-plan-add="${source}">+ Добавить заказ</button></div>`).join('')}</div></div><div class="dispatch-columns" data-plan-order-cards>${['private','gbu'].map(source=>`<div class="dispatch-column">${dispatchColumnCards(data,source)}</div>`).join('')}</div><p class="dispatch-selected">Составы назначены: ${assigned}/${data.items.length}</p><button type="button" class="primary dispatch-send" data-plan-send ${!data.items.length||assigned!==data.items.length?'disabled':''}>Отправить заказы ›</button><p class="dispatch-status" data-plan-status role="status"></p><div class="dispatch-free"><b>Свободные · ${data.free.reduce((s,g)=>s+g.people.length,0)}</b>${data.free.map(g=>`<details><summary>${esc(g.label)} · ${g.people.length}</summary>${g.people.map(p=>`<p>${esc(p.name)} ${esc(p.metro)} ${esc(p.height)}</p>`).join('')||'<p>Нет свободных</p>'}</details>`).join('')}</div>`;
+ const toolbar=qs('.dispatch-tools',root);toolbar.classList.add('dispatch-toolbar');toolbar.insertAdjacentHTML('beforeend','<button type="button" data-plan-import>📷 Импорт ГБУ</button>');
  qs('[data-plan-payroll]',root).onclick=()=>openGbuPayroll();qs('[data-plan-agents]',root).onclick=()=>openGbuAgents();
  qs('[data-plan-import]',root).onclick=()=>openDispatchGbuImport();
  qs('[data-plan-comment]',root).onclick=()=>openDayComment(day);
@@ -15167,8 +15164,14 @@ async function openDispatchEditor(order,source='private',slotNumber=null){
  try{const r=await api('/api/dispatch-board/orders'+(order?'/'+order.id:''),{method:order?'PUT':'POST',body:JSON.stringify(payload)});if(!live())return;closeModal();await loadDispatchBoard();if(chooseCrewAfterSave){const fresh=dispatchBoard?.items.find(o=>o.id===(order?.id||r.id));if(fresh)await openDispatchCrew(fresh)}else toast('Заказ сохранён')}catch(error){if(live()){qs('[data-plan-error]',form).textContent=error.message;button.disabled=false;chooseCrewAfterSave=false}}
  };
 }
-async function openDispatchCrew(order){
+async function openDispatchCrew(order,edit=false){
  if(order.is_draft){await openDispatchEditor(order);toast('Сначала дополните заказ: категорию, количество, фамилию и время');return}
+ if(order.composition_complete&&!edit){
+  const people=[order.brigadier,...order.members].filter(Boolean);
+  showModal('Назначенный состав',`<div id="dispatchAssignedCrew"><p>${order.source==='gbu'?'ГБУ ⬛️':'Частный'} №${order.number} · ${esc(order.deceased_name)} · ${people.length}/${order.team_size}</p>${people.map((p,i)=>`<div class="dispatch-assigned-person"><b>${esc(dispatchPerson(p))}</b><small>${i===0?'Бригадир · ':''}Рост: ${esc(String(p.height_cm||'не указан'))}</small></div>`).join('')}<button type="button" class="primary" data-plan-edit-crew style="width:100%;margin-top:14px">Изменить состав</button></div>`);
+  qs('[data-plan-edit-crew]',qs('#dispatchAssignedCrew')).onclick=()=>openDispatchCrew(order,true);
+  return;
+ }
  showModal('Выберите бригадира','<div id="dispatchCrew">Загрузка…</div>');const root=qs('#dispatchCrew'),live=()=>qs('#dispatchCrew')===root&&!qs('#modal').classList.contains('hidden');
  try{const data=await api('/api/dispatch-board/orders/'+order.id+'/people');if(!live())return;
  let leader=order.brigadier?.id||null,selected=new Set(order.members.map(p=>p.id)),second=new Set();let step=leader?2:1;
