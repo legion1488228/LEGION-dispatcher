@@ -44,7 +44,7 @@ STATUS_LABELS = {
     "closed": "Закрыт",
     "cancelled": "Отменён",
 }
-CATEGORY_LABELS = {"standard": "Стандарт", "vip": "Вип", "elite": "Элит"}
+CATEGORY_LABELS = {"standard": "Стандарт", "vip": "Вип", "elite": "Элит", "carryout": "Вынос"}
 SOURCE_LABELS = {"private": "Частный", "gbu": "ГБУ"}
 HIDDEN_TG_IDS = {630614760}
 
@@ -13744,14 +13744,16 @@ class DispatchPlanInput(BaseModel):
     source: Literal['private', 'gbu']
     agent_name: StrictStr = Field(default='', max_length=200)
     agent_phone: StrictStr = Field(default='', max_length=50)
-    category: Literal['standard', 'vip', 'elite'] | None = None
-    team_size: StrictInt | None = Field(default=None, ge=3, le=6)
+    category: Literal['standard', 'vip', 'elite', 'carryout'] | None = None
+    team_size: StrictInt | None = Field(default=None, ge=2, le=6)
     deceased_name: StrictStr = Field(default='', max_length=100)
     organization: StrictStr = Field(default='', max_length=200)
     issue_time: time | None = None
     morgue: StrictStr = Field(default='', max_length=500)
     church: StrictStr = Field(default='', max_length=500)
     cemetery: StrictStr = Field(default='', max_length=500)
+    destination_type: Literal['cemetery', 'cremation'] | None = None
+    notes: StrictStr | None = Field(default=None, max_length=500)
     revision: StrictStr | None = None
     request_key: StrictStr = Field(pattern=r'^[a-zA-Z0-9_-]{16,64}$')
     slot_number: StrictInt | None = Field(default=None, ge=1, le=1000)
@@ -13924,6 +13926,15 @@ def dispatch_match_card(db, order, crew=None):
     return cards[0] if len(cards) == 1 else None
 
 
+def dispatch_destination_type(value, destination):
+    if value in ('cemetery', 'cremation'): return value
+    return 'cremation' if re.search(r'крематор|кремаци', str(destination or ''), re.I) else 'cemetery'
+
+
+def dispatch_ready_ids(db, day):
+    return {person['id'] for group in free_staff_snapshot(db, day)['groups'] for person in group['people']}
+
+
 def dispatch_order_data(db, order, number):
     data = _order_dict(order, db)
     plan = db.get(DispatchPlan, order.id)
@@ -13938,11 +13949,13 @@ def dispatch_order_data(db, order, number):
     card = dispatch_match_card(db, order)
     data.update(number=number, route_fields=meta.get('route_fields', {}), managed=bool(plan),
         approved=bool(plan and plan.approved_card_id), number_card_id=card.id if card else None)
+    data['destination_type'] = dispatch_destination_type(meta.get('destination_type'),
+        data['route_fields'].get('cemetery') or order.route)
     data['assigned_count'] = int(bool(data['brigadier'])) + len(data['members'])
     partner = dispatch_pair_partner(db, order)
     data['paired_order_id'] = partner.id if partner else None
     data['revision'] = dispatch_hash({k: data[k] for k in ('id','source','work_date','issue_time','deceased_name',
-        'category','team_size','organization','agent_name','agent_phone','route','brigadier','members','route_fields','approved','is_draft','paired_order_id')})
+        'category','team_size','organization','agent_name','agent_phone','route','notes','destination_type','brigadier','members','route_fields','approved','is_draft','paired_order_id')})
     return data
 
 
@@ -14029,8 +14042,9 @@ def dispatch_board_data(db, day):
     free = dispatch_free(db, day, rows)
     cards = [dispatch_match_card(db, o) for o in rows]
     statuses = number_card_statuses(db, [c for c in cards if c])
-    requested_staff = _requested_staff_by_source(db, day, include_carryouts=False)
-    effective_staff = dispatch_pair_demand(db, rows, requested_staff)
+    requested_staff = _requested_staff_by_source(db, day)
+    without_carryouts = _requested_staff_by_source(db, day, include_carryouts=False)
+    effective_staff = dispatch_pair_demand(db, rows, without_carryouts)
     pair_colors = dispatch_pair_colors(db, rows)
     by_id = {item['id']:item for item in items}
     for item in items:
@@ -14082,7 +14096,7 @@ def dispatch_agent_lookup(name: str, db: Session = Depends(get_db), user: Telegr
 def dispatch_validate_category(source, category, size):
     if source == 'gbu' and category not in {'standard', 'elite'}:
         raise HTTPException(422, 'В ГБУ только Стандарт и Элит')
-    allowed = {4, 6} if source == 'gbu' or category != 'standard' else {3, 4, 5, 6}
+    allowed = {2, 3, 4} if category == 'carryout' else ({4, 6} if source == 'gbu' or category != 'standard' else {3, 4, 5, 6})
     if size not in allowed:
         raise HTTPException(422, 'Недопустимое количество человек для категории')
 
@@ -14090,7 +14104,7 @@ def dispatch_validate_category(source, category, size):
 def dispatch_validate_plan(data):
     missing = [key for key in ('category','team_size','deceased_name','issue_time')
         if not (getattr(data,key).strip() if isinstance(getattr(data,key),str) else getattr(data,key))]
-    if data.source == 'gbu' and data.category == 'vip':
+    if data.source == 'gbu' and data.category is not None and data.category not in {'standard', 'elite'}:
         raise HTTPException(422, 'В ГБУ только Стандарт и Элит')
     if data.team_size is not None and (data.category or data.source == 'gbu'):
         dispatch_validate_category(data.source, data.category or 'standard', data.team_size)
@@ -14128,13 +14142,14 @@ def dispatch_create(data: DispatchPlanInput, db: Session = Depends(get_db), user
     order = Order(public_id=_public_id(), source=data.source, work_date=data.work_date,
         issue_time=data.issue_time or time(0,0), arrival_time=arrival, deceased_name=data.deceased_name.strip(),
         route='\n'.join([data.morgue, data.church, data.cemetery]), category=data.category or '', team_size=data.team_size or 0,
-        organization=data.organization.strip(), notes='', kickback_rub=0, agent_name=data.agent_name.strip(),
+        organization=data.organization.strip(), notes=(data.notes or '').strip(), kickback_rub=0, agent_name=data.agent_name.strip(),
         agent_phone=data.agent_phone.strip(), other_agent_phone='', status='draft' if missing else 'new')
     db.add(order); db.flush()
     db.add(DispatchPlan(order_id=order.id, request_key=data.request_key, payload=json.dumps({
         'creation_hash':dispatch_hash(data.model_dump(exclude={'revision'})),
         'slot_number':data.slot_number,
         'missing_fields':missing,
+        'destination_type':dispatch_destination_type(data.destination_type, data.cemetery),
         'route_fields':{k:getattr(data,k) for k in ('morgue','church','cemetery')}}, ensure_ascii=False)))
     db.commit()
     return {'ok':True, 'id':order.id}
@@ -14241,7 +14256,7 @@ def dispatch_update(order_id: int, data: DispatchPlanInput, db: Session = Depend
     if data.work_date != order.work_date or data.source != order.source:
         raise HTTPException(409, 'Тип и дата сохранённого заказа не меняются')
     missing = dispatch_validate_plan(data)
-    if dispatch_pair_partner(db, order) and (missing or data.team_size != order.team_size):
+    if dispatch_pair_partner(db, order) and (missing or data.team_size != order.team_size or data.category == 'carryout'):
         raise HTTPException(409, 'Сначала разъедините заказы перед изменением количества или сохранением черновика')
     if missing and dispatch_assignments(db, order):
         raise HTTPException(409, 'Сначала снимите состав перед сохранением неполного заказа')
@@ -14251,6 +14266,7 @@ def dispatch_update(order_id: int, data: DispatchPlanInput, db: Session = Depend
         value = getattr(data, field)
         if value is None: value = {'category':'','team_size':0,'issue_time':time(0,0)}.get(field,value)
         setattr(order, field, value.strip() if isinstance(value,str) else value)
+    if data.notes is not None: order.notes=data.notes.strip()
     order.arrival_time=(datetime.combine(data.work_date,data.issue_time)-timedelta(minutes=30)).time() if data.issue_time else None
     if missing: order.status='draft'
     elif order.status=='draft': order.status='new'
@@ -14258,6 +14274,7 @@ def dispatch_update(order_id: int, data: DispatchPlanInput, db: Session = Depend
     if not plan:
         plan=DispatchPlan(order_id=order.id,request_key=secrets.token_hex(16),payload='{}');db.add(plan)
     meta=json.loads(plan.payload);meta['route_fields']={k:getattr(data,k) for k in ('morgue','church','cemetery')};meta['missing_fields']=missing
+    meta['destination_type']=dispatch_destination_type(data.destination_type or meta.get('destination_type'), data.cemetery)
     plan.payload=json.dumps(meta,ensure_ascii=False)
     db.commit();return {'ok':True}
 
@@ -14269,7 +14286,10 @@ def dispatch_people(order_id: int, db: Session = Depends(get_db), user: Telegram
     if not order: raise HTTPException(404,'Заказ не найден')
     rows=list(db.scalars(select(Employee).where(Employee.active.is_(True),_visible_employee())))
     loads=dispatch_workloads(db,order.work_date,exclude_order_id=order.id)
-    return {'items':[_employee_dict(p,loads.get(p.id,0)) for p in rows]}
+    ready=dispatch_ready_ids(db,order.work_date)
+    assigned={row.employee_id for row in dispatch_assignments(db,order)}
+    return {'items':[{**_employee_dict(p,loads.get(p.id,0)), 'ready_for_day':p.id in ready}
+        for p in rows if p.id in ready or p.id in assigned]}
 
 
 @app.delete('/api/dispatch-board/orders/{order_id}')
@@ -14349,6 +14369,8 @@ def dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session = Depe
             a.role=='brigadier' and a.employee_id==data.brigadier_id for a in dispatch_assignments(db,other)):
             raise HTTPException(409,'Два одинаковых заказа бригадира нельзя однозначно связать с номером в группе')
     previous={a.employee_id for a in dispatch_assignments(db,order)}
+    if not (set(ids)-previous) <= dispatch_ready_ids(db,order.work_date):
+        raise HTTPException(409,'Выбирайте сотрудников, которые отписались о готовности на эту дату. Обновите список.')
     loads=dispatch_workloads(db,order.work_date,exclude_order_id=order.id)
     for person in people:
         count=loads.get(person.id,0)
@@ -14437,13 +14459,15 @@ def dispatch_message(order, number):
         f'Быть: {order["arrival_time"] or "—"}',
         '', 'Маршрут:']
     fields=order.get('route_fields') or {}
-    for key,label in [('morgue','Морг'),('church','Храм'),('cemetery','Кладбище / кремация')]:
+    destination_label='Кремация' if order.get('destination_type') == 'cremation' else 'Кладбище'
+    for key,label in [('morgue','Морг'),('church','Храм'),('cemetery',destination_label)]:
         lines.append(f'{label}: {escape(fields.get(key) or "—")}')
     if not fields: lines.append(escape(order.get('route') or '—'))
     partner = order.get('paired_order')
     if partner:
         label = 'ГБУ ⬛️' if partner['source'] == 'gbu' else 'Частный'
         lines.append(f'Сдвоен с: {label} · {escape(partner.get("deceased_name") or "фамилия не указана")}')
+    if order.get('notes'): lines+=['',f'Комментарий: {escape(order["notes"])}']
     lines+=['','Состав:']
     for p in [order['brigadier']]+order['members']:
         lines.append(escape(p['display_name']))
@@ -14665,6 +14689,11 @@ body:has(#modal:not(.hidden) #dispatchEditor){overflow:hidden}
 #modal #dispatchEditor .dispatch-times{gap:8px}
 #modal #dispatchEditor small{font-size:10px;line-height:1.2;margin:0}
 #modal #dispatchEditor .dispatch-route-title{font-size:12px;line-height:1.2;margin:0}
+#modal #dispatchEditor .dispatch-order-comment{grid-column:1/-1}
+#modal #dispatchEditor .dispatch-destination>span{display:flex;align-items:center;gap:2px;min-width:0}
+#modal #dispatchEditor .dispatch-destination select{font-size:11px;height:30px;min-height:30px;padding:2px;min-width:0}
+.dispatch-ready-hint{display:block;font-size:11px;color:var(--muted);margin:5px 0}
+.dispatch-choice[hidden]{display:none!important}
 #modal #dispatchEditor .dispatch-route-field{grid-template-columns:100px minmax(0,1fr);align-items:center;gap:5px}
 #modal #dispatchEditor .dispatch-crew-status{font-size:11px;line-height:1.2;align-self:center;margin:0}
 #modal #dispatchEditor button{min-width:0;min-height:32px;margin:0;padding:5px 7px;font-size:11px;line-height:1.2}
@@ -14735,12 +14764,12 @@ function dispatchMini(o){
  const rawPhone=String(o.agent_phone||''),digits=rawPhone.replace(/\D/g,'');
  const phone=/^[78]\d{10}$/.test(digits)?`+7 (${digits.slice(1,4)}) ${digits.slice(4,7)}-${digits.slice(7,9)}-${digits.slice(9)}`:rawPhone;
  const fields=o.route_fields||{},oldRoute=Object.keys(fields).length?[]:String(o.route||'').split(/[;\n]+/);
- const route=[['morgue','Морг'],['church','Храм'],['cemetery','Кладбище']].map(([key,label],i)=>{
+ const route=[['morgue','Морг'],['church','Храм'],['cemetery',o.destination_type==='cremation'?'Кремация':'Кладбище']].map(([key,label],i)=>{
   const value=String(fields[key]??oldRoute[i]??'').trim();
   return '- '+(/^(морг|храм|церковь|кладбище|крематорий|кремация)(?:\s|:|$)/i.test(value)?value:label+' '+(value||'—'));
  });
  const quantity=Number(o.team_size)+' чел';
- return `<article class="dispatch-mini dispatch-detailed ${complete?'dispatch-complete':''} ${o.paired_order?'dispatch-paired':''}" data-plan-card="${o.id}"${dispatchPairStyle(o)}><button type="button" class="dispatch-card-main" data-plan-id="${o.id}" aria-label="Заказ №${o.number} · ${esc(o.deceased_name)}"><header><b>№${o.number}</b><span>${o.source==='gbu'?'ГБУ⬛️':esc(o.organization||'')}</span>›</header><p class="dispatch-card-agent" title="${esc(o.agent_name||'')}">Агент: ${esc(o.agent_name||'—')}</p><p class="dispatch-card-phone">Номер: ${esc(phone||'—')}</p><div class="dispatch-card-meta"><span class="dispatch-card-category">Заказ: ${esc(String(o.category_label||'').toLocaleUpperCase('ru-RU'))} · <span class="dispatch-card-quantity">${quantity}</span></span></div><p class="dispatch-order-name"><b>Ум: ${esc(surname)}</b></p><div class="dispatch-card-times"><span>Выдача в ${esc(o.issue_time||'—')}</span><span>Быть в ${esc(o.arrival_time||'—')}</span></div><div class="dispatch-card-route">${route.map(stop=>`<p title="${esc(stop)}">${esc(stop)}</p>`).join('')}</div></button><button type="button" data-plan-pair="${o.id}" title="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Выбрать заказ для сдвоения'}" aria-label="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Сдвоить заказ №'+o.number}" ${o.approved?'disabled':''}>${o.paired_order?'⇄ '+esc(dispatchPairLabel(o.paired_order)):'Сдвоить заказ'}</button><footer><button type="button" data-plan-crew-id="${o.id}" title="${o.brigadier?esc(dispatchPerson(o.brigadier)):''}" class="${complete?'dispatch-done':''}" ${o.approved?'disabled':''}><span>${complete?'Состав назначен ✓':assigned?'Дополнить состав ›':'Назначить состав ›'}</span><b class="dispatch-card-progress ${complete?'dispatch-done':''}" aria-label="Назначено ${assigned} из ${o.team_size} сотрудников">${assigned}/${o.team_size}</b></button><button type="button" data-plan-delete="${o.id}" aria-label="Удалить заказ №${o.number}" ${o.approved?'disabled':''}>🗑</button></footer></article>`;
+ return `<article class="dispatch-mini dispatch-detailed ${complete?'dispatch-complete':''} ${o.paired_order?'dispatch-paired':''}" data-plan-card="${o.id}"${dispatchPairStyle(o)}><button type="button" class="dispatch-card-main" data-plan-id="${o.id}" aria-label="Заказ №${o.number} · ${esc(o.deceased_name)}"><header><b>№${o.number}</b><span>${o.source==='gbu'?'ГБУ⬛️':esc(o.organization||'')}</span>›</header><p class="dispatch-card-agent" title="${esc(o.agent_name||'')}">Агент: ${esc(o.agent_name||'—')}</p><p class="dispatch-card-phone">Номер: ${esc(phone||'—')}</p><div class="dispatch-card-meta"><span class="dispatch-card-category">Заказ: ${esc(String(o.category_label||'').toLocaleUpperCase('ru-RU'))} · <span class="dispatch-card-quantity">${quantity}</span></span></div><p class="dispatch-order-name"><b>Ум: ${esc(surname)}</b></p><div class="dispatch-card-times"><span>Выдача в ${esc(o.issue_time||'—')}</span><span>Быть в ${esc(o.arrival_time||'—')}</span></div><div class="dispatch-card-route">${route.map(stop=>`<p title="${esc(stop)}">${esc(stop)}</p>`).join('')}</div></button><button type="button" data-plan-pair="${o.id}" title="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Выбрать заказ для сдвоения'}" aria-label="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Сдвоить заказ №'+o.number}" ${o.approved||o.category==='carryout'?'disabled':''}>${o.paired_order?'⇄ '+esc(dispatchPairLabel(o.paired_order)):'Сдвоить заказ'}</button><footer><button type="button" data-plan-crew-id="${o.id}" title="${o.brigadier?esc(dispatchPerson(o.brigadier)):''}" class="${complete?'dispatch-done':''}" ${o.approved?'disabled':''}><span>${complete?'Состав назначен ✓':assigned?'Дополнить состав ›':'Назначить состав ›'}</span><b class="dispatch-card-progress ${complete?'dispatch-done':''}" aria-label="Назначено ${assigned} из ${o.team_size} сотрудников">${assigned}/${o.team_size}</b></button><button type="button" data-plan-delete="${o.id}" aria-label="Удалить заказ №${o.number}" ${o.approved?'disabled':''}>🗑</button></footer></article>`;
 }
 function cancelDispatchPair(){if(dispatchPairMode?.busy)return;dispatchPairMode=null;dispatchRenderPairMode()}
 function dispatchRenderPairMode(){
@@ -14772,7 +14801,7 @@ function dispatchRenderPairMode(){
   if(!mode)return;
   const target=dispatchBoard.items.find(item=>item.id===Number(card.dataset.planCard));
   const selected=target?.id===source.id;
-  const eligible=target&&!selected&&!source.paired_order_id&&!target.is_draft&&!target.approved&&!target.paired_order_id;
+  const eligible=target&&!selected&&!source.paired_order_id&&!target.is_draft&&!target.approved&&!target.paired_order_id&&target.category!=='carryout';
   card.classList.add(selected?'dispatch-pair-source':eligible?'dispatch-pair-target':'dispatch-pair-unavailable');
   card.setAttribute('role','button');card.setAttribute('tabindex',eligible&&!mode.busy?'0':'-1');card.setAttribute('aria-disabled',eligible&&!mode.busy?'false':'true');
   card.setAttribute('aria-label',selected?'Исходный заказ '+dispatchPairLabel(source):eligible?'Сдвоить с '+dispatchPairLabel(target)+' · '+target.deceased_name:'Заказ недоступен для сдвоения');
@@ -14786,7 +14815,7 @@ function dispatchRenderPairMode(){
 }
 async function openDispatchPair(order){
  if(dispatchPairMode?.busy)return;
- if(!order||order.is_draft||order.approved){toast('Заказ недоступен для сдвоения');return}
+ if(!order||order.is_draft||order.approved||order.category==='carryout'){toast('Заказ недоступен для сдвоения');return}
  dispatchPairMode={orderId:order.id,day:order.work_date,busy:false,error:''};
  dispatchRenderPairMode();
 }
@@ -14953,7 +14982,7 @@ return `<article class="gbu-draft dispatch-import-card" data-i="${i}"><header><b
 async function openDispatchEditor(order,source='private',slotNumber=null){
  source=order?.source||source;const day=order?.work_date||state.selectedDate,key=dispatchToken(),route=order?.route_fields||{};
  const input=(name,label,value='',extra='')=>`<label class="${['morgue','church','cemetery'].includes(name)?'dispatch-route-field':''}">${label}<input name="${name}" value="${esc(value)}" ${extra}></label>`;
- showModal(order?`${source==='gbu'?'ГБУ ⬛️':'Частный'} №${order.number}`:'Новый заказ · '+(source==='gbu'?'ГБУ ⬛️':'Частный'),`<form class="dispatch-form" id="dispatchEditor"><small class="dispatch-form-day">${esc(dispatchShortDay(day))}</small>${input('agent_name','Имя агента',order?.agent_name||'','maxlength="200"')}${input('agent_phone','Номер агента',order?.agent_phone||'','type="tel" maxlength="50"')}${input('organization','От кого заказ',order?.organization||'','maxlength="200"')}${input('deceased_name','Фамилия умершего',order?.deceased_name||'','maxlength="100"')}<label>Категория заказа<select name="category"><option value="">Выберите категорию</option>${Object.entries(source==='gbu'?{standard:'Стандарт',elite:'Элит'}:{standard:'Стандарт',vip:'Вип',elite:'Элит'}).map(([v,label])=>`<option value="${v}" ${v===order?.category?'selected':''}>${label}</option>`).join('')}</select></label><label>Количество человек<select name="team_size"></select></label><div class="dispatch-times">${input('issue_time','Время выдачи',order?.issue_time||'','type="time"')}<label>📸 Подача авто<input data-plan-arrival readonly value="${esc(order?.arrival_time||'')}"></label></div><small class="dispatch-arrival-hint">Подача автоматически за 30 минут до выдачи.</small><b class="dispatch-route-title">Маршрут</b>${input('morgue','1. Морг',route.morgue||(!Object.keys(route).length?order?.route||'':''),'maxlength="500"')}${input('church','2. Храм',route.church||'','maxlength="500"')}${input('cemetery','3. Кладбище / кремация',route.cemetery||'','maxlength="500"')}${order?`<p class="dispatch-crew-status">${order.composition_complete?'Состав назначен ✓':'Состав не назначен'}</p><button type="button" data-plan-crew ${order.approved?'disabled':''}>Выбрать бригадира и состав ›</button>${order.brigadier?'<button type="button" data-plan-clear>Снять состав</button>':''}`:'<small class="dispatch-crew-hint">Можно сохранить только «От кого заказ» и дополнить позже.</small>'}<p data-plan-error role="status"></p><button type="submit" class="primary" ${order?.approved?'disabled':''}>Сохранить заказ</button></form>`);
+ showModal(order?`${source==='gbu'?'ГБУ ⬛️':'Частный'} №${order.number}`:'Новый заказ · '+(source==='gbu'?'ГБУ ⬛️':'Частный'),`<form class="dispatch-form" id="dispatchEditor"><small class="dispatch-form-day">${esc(dispatchShortDay(day))}</small>${input('agent_name','Имя агента',order?.agent_name||'','maxlength="200"')}${input('agent_phone','Номер агента',order?.agent_phone||'','type="tel" maxlength="50"')}${input('organization','От кого заказ',order?.organization||'','maxlength="200"')}${input('deceased_name','Фамилия умершего',order?.deceased_name||'','maxlength="100"')}<label>Категория заказа<select name="category"><option value="">Выберите категорию</option>${Object.entries(source==='gbu'?{standard:'Стандарт',elite:'Элит'}:{standard:'Стандарт',vip:'Вип',elite:'Элит',carryout:'Вынос'}).map(([v,label])=>`<option value="${v}" ${v===order?.category?'selected':''}>${label}</option>`).join('')}</select></label><label>Количество человек<select name="team_size"></select></label><div class="dispatch-times">${input('issue_time','Время выдачи',order?.issue_time||'','type="time"')}<label>📸 Подача авто<input data-plan-arrival readonly value="${esc(order?.arrival_time||'')}"></label></div><small class="dispatch-arrival-hint">Подача автоматически за 30 минут до выдачи.</small><b class="dispatch-route-title">Маршрут</b>${input('morgue','1. Морг',route.morgue||(!Object.keys(route).length?order?.route||'':''),'maxlength="500"')}${input('church','2. Храм',route.church||'','maxlength="500"')}<label class="dispatch-route-field dispatch-destination"><span>3. <select name="destination_type" aria-label="Кладбище или кремация"><option value="cemetery" ${order?.destination_type!=='cremation'?'selected':''}>Кладбище</option><option value="cremation" ${order?.destination_type==='cremation'?'selected':''}>Кремация</option></select></span><input name="cemetery" value="${esc(route.cemetery||'')}" maxlength="500" placeholder="Название или адрес"></label><label class="dispatch-order-comment">Комментарий<input name="notes" value="${esc(order?.notes||'')}" maxlength="500" placeholder="Коротко об особенностях заказа"></label>${order?`<p class="dispatch-crew-status">${order.composition_complete?'Состав назначен ✓':'Состав не назначен'}</p><button type="button" data-plan-crew ${order.approved?'disabled':''}>Выбрать бригадира и состав ›</button>${order.brigadier?'<button type="button" data-plan-clear>Снять состав</button>':''}`:'<small class="dispatch-crew-hint">Можно сохранить только «От кого заказ» и дополнить позже.</small>'}<p data-plan-error role="status"></p><button type="submit" class="primary" ${order?.approved?'disabled':''}>Сохранить заказ</button></form>`);
  const form=qs('#dispatchEditor'),live=()=>qs('#dispatchEditor')===form&&!qs('#modal').classList.contains('hidden');let chooseCrewAfterSave=false;
  if(source==='gbu'&&!order?.approved){
   const lookupAgent=async()=>{
@@ -14965,7 +14994,7 @@ async function openDispatchEditor(order,source='private',slotNumber=null){
   };
   form.elements.agent_name.onchange=lookupAgent;lookupAgent();
  }
- const sizes=()=>{const allowed=source==='gbu'||form.elements.category.value!=='standard'?[4,6]:[3,4,5,6];const old=Number(form.elements.team_size.value)||order?.team_size;form.elements.team_size.innerHTML='<option value="">Выберите количество</option>'+allowed.map(n=>`<option value="${n}" ${n===old?'selected':''}>${n}</option>`).join('')};sizes();form.elements.category.onchange=sizes;
+ const sizes=()=>{const allowed=form.elements.category.value==='carryout'?[2,3,4]:(source==='gbu'||form.elements.category.value!=='standard'?[4,6]:[3,4,5,6]);const old=Number(form.elements.team_size.value)||order?.team_size;form.elements.team_size.innerHTML='<option value="">Выберите количество</option>'+allowed.map(n=>`<option value="${n}" ${n===old?'selected':''}>${n}</option>`).join('')};sizes();form.elements.category.onchange=sizes;
  form.elements.issue_time.oninput=()=>{const parts=form.elements.issue_time.value.split(':').map(Number);if(parts.length===2){const minutes=(parts[0]*60+parts[1]-30+1440)%1440;qs('[data-plan-arrival]',form).value=String(Math.floor(minutes/60)).padStart(2,'0')+':'+String(minutes%60).padStart(2,'0')}};
  const crew=qs('[data-plan-crew]',form);if(crew)crew.onclick=()=>{chooseCrewAfterSave=true;form.requestSubmit()};
  const clear=qs('[data-plan-clear]',form);if(clear){clear.disabled=order.approved;clear.onclick=async()=>{clear.disabled=true;try{await api('/api/dispatch-board/orders/'+order.id+'/crew',{method:'DELETE',body:JSON.stringify({revision:order.revision})});closeModal();await loadDispatchBoard()}catch(e){qs('[data-plan-error]',form).textContent=e.message;clear.disabled=false}}}
@@ -14981,10 +15010,10 @@ async function openDispatchCrew(order){
  let leader=order.brigadier?.id||null,selected=new Set(order.members.map(p=>p.id)),second=new Set();let step=leader?2:1;
  const people=data.items,old=new Set([order.brigadier?.id,...order.members.map(p=>p.id)]);
  const name=p=>dispatchPerson(p),busy=p=>p.workload>0;
- function row(p,isLeader){const checked=isLeader?leader===p.id:selected.has(p.id);const blocked=p.workload>=2&&!old.has(p.id);return `<label class="dispatch-choice" data-plan-person="${p.id}" data-plan-search="${esc(name(p).toLowerCase().replaceAll('ё','е'))}"><span>${esc(name(p))}<small>${p.height_cm||'—'}${busy(p)?' · уже на заказе':''}</small></span><input type="${isLeader?'radio':'checkbox'}" name="${isLeader?'leader':'member'}" value="${p.id}" ${checked?'checked':''} ${blocked?'disabled':''}>${busy(p)&&!blocked&&!old.has(p.id)?`<button type="button" data-plan-second="${p.id}" aria-pressed="${second.has(p.id)}">2-й заказ${second.has(p.id)?' ✓':''}</button>`:''}</label>`}
+ function row(p,isLeader){const checked=isLeader?leader===p.id:selected.has(p.id);const blocked=(p.workload>=2||p.ready_for_day===false)&&!old.has(p.id);return `<label class="dispatch-choice" data-plan-person="${p.id}" data-plan-search="${esc(name(p).toLowerCase().replaceAll('ё','е'))}"><span>${esc(name(p))}<small>${p.height_cm||'—'}${busy(p)?' · уже на заказе':''}${p.ready_for_day===false?' · готовность не подтверждена':''}</small></span><input type="${isLeader?'radio':'checkbox'}" name="${isLeader?'leader':'member'}" value="${p.id}" ${checked?'checked':''} ${blocked?'disabled':''}>${busy(p)&&!blocked&&!old.has(p.id)?`<button type="button" data-plan-second="${p.id}" aria-pressed="${second.has(p.id)}">2-й заказ${second.has(p.id)?' ✓':''}</button>`:''}</label>`}
  function draw(){if(!live())return;const p=people.find(p=>p.id===leader),need=order.team_size-1;
  const sorted=people.filter(p=>p.id!==leader).sort((a,b)=>{const diff=x=>p?.height_cm&&x.height_cm?Math.abs(x.height_cm-p.height_cm):1000;return Number(diff(a)>3)-Number(diff(b)>3)||diff(a)-diff(b)||name(a).localeCompare(name(b),'ru')});
- root.innerHTML=`<p>Шаг ${step} из 2 · ${order.source==='gbu'?'ГБУ ⬛️':'Частный'} №${order.number}</p>${step===2?`<p><b>Бригадир: ${esc(name(p))} · ${p.height_cm||'—'}</b> <button type="button" data-plan-back>Изменить</button></p>`:''}<input class="search" data-plan-find placeholder="Поиск по имени и метро"><div class="${step===1?'dispatch-leaders':'dispatch-people'}">${(step===1?people.filter(p=>p.group_code==='brigadier').sort((a,b)=>name(a).localeCompare(name(b),'ru')):sorted).map(p=>row(p,step===1)).join('')}</div>${step===2?'<small>Сначала сотрудники с разницей в росте до 3 см, затем остальные.</small>':''}<p class="dispatch-selected" data-plan-selected></p><p data-plan-error role="status"></p><button type="button" class="primary" data-plan-next>${step===1?'Далее: сотрудники ›':'Назначить состав'}</button>`;
+ root.innerHTML=`<p>Шаг ${step} из 2 · ${order.source==='gbu'?'ГБУ ⬛️':'Частный'} №${order.number}</p>${step===2?`<p><b>Бригадир: ${esc(name(p))} · ${p.height_cm||'—'}</b> <button type="button" data-plan-back>Изменить</button></p>`:''}<input class="search" data-plan-find placeholder="Поиск среди готовых: имя или метро"><small class="dispatch-ready-hint">Готовы на ${esc(dispatchShortDay(order.work_date))}. Уже назначенные сотрудники сохранены.</small><div class="${step===1?'dispatch-leaders':'dispatch-people'}">${(step===1?people.filter(p=>p.group_code==='brigadier').sort((a,b)=>name(a).localeCompare(name(b),'ru')):sorted).map(p=>row(p,step===1)).join('')}</div>${step===2?'<small>Сначала сотрудники с разницей в росте до 3 см, затем остальные.</small>':''}<p class="dispatch-selected" data-plan-selected></p><p data-plan-error role="status"></p><button type="button" class="primary" data-plan-next>${step===1?'Далее: сотрудники ›':'Назначить состав'}</button>`;
  const next=qs('[data-plan-next]',root);function update(){qs('[data-plan-selected]',root).textContent=step===1?'Выберите одного бригадира':'Выбрано '+(selected.size+1)+'/'+order.team_size;next.disabled=!leader||selected.size>need;if(step===2)next.textContent=(selected.size===need?'Назначить состав ':'Сохранить состав ')+(selected.size+1)+'/'+order.team_size;
  qsa('input[type=checkbox]',root).forEach(box=>box.disabled=!box.checked&&(selected.size>=need||people.find(p=>p.id===Number(box.value)).workload>=2&&!old.has(Number(box.value))))}update();
  qs('[data-plan-find]',root).oninput=e=>{const tokens=e.target.value.toLowerCase().replaceAll('ё','е').trim().split(/\s+/);qsa('[data-plan-search]',root).forEach(row=>row.hidden=!tokens.every(t=>row.dataset.planSearch.includes(t)))};
