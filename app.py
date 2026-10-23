@@ -13769,6 +13769,11 @@ class DispatchRevision(BaseModel):
     revision: StrictStr
 
 
+class DispatchPairInput(DispatchRevision):
+    partner_id: StrictInt | None = Field(default=None, ge=1)
+    partner_revision: StrictStr | None = None
+
+
 class DispatchGbuImportItem(GbuDraft):
     category: Literal['standard', 'elite'] = 'standard'
     deceased_name: StrictStr = Field(min_length=1, max_length=100)
@@ -13827,6 +13832,61 @@ def dispatch_assignments(db, order):
     return list(db.scalars(select(Assignment).where(Assignment.order_id == order.id).options(selectinload(Assignment.employee))))
 
 
+def dispatch_pair_partner(db, order):
+    plan = db.get(DispatchPlan, order.id)
+    partner_id = json.loads(plan.payload).get('paired_order_id') if plan else None
+    if type(partner_id) is not int or partner_id == order.id or order.status == 'cancelled':
+        return None
+    partner = db.get(Order, partner_id)
+    other = db.get(DispatchPlan, partner_id)
+    if not partner or not other or partner.status == 'cancelled' or partner.work_date != order.work_date:
+        return None
+    return partner if json.loads(other.payload).get('paired_order_id') == order.id else None
+
+
+def dispatch_set_pair_meta(db, order, partner_id):
+    plan = db.get(DispatchPlan, order.id)
+    if not plan:
+        plan = DispatchPlan(order_id=order.id, request_key=secrets.token_hex(16), payload='{}')
+        db.add(plan)
+    meta = json.loads(plan.payload)
+    if partner_id is None: meta.pop('paired_order_id', None)
+    else: meta['paired_order_id'] = partner_id
+    plan.payload = json.dumps(meta, ensure_ascii=False)
+
+
+def dispatch_pair_crews(db, order, partner, candidate=None):
+    def crew(value):
+        rows = dispatch_assignments(db, value)
+        return next((a.employee_id for a in rows if a.role == 'brigadier'), None), {a.employee_id for a in rows}
+    leader, people = candidate if candidate is not None else crew(order)
+    other_leader, other_people = crew(partner)
+    if ((leader and other_leader and leader != other_leader)
+            or len(set(people) | other_people) > max(order.team_size, partner.team_size)):
+        raise HTTPException(409, 'Для сдвоенных заказов нужен общий состав и один бригадир. Проверьте назначения.')
+
+
+def dispatch_unlink_pair(db, order):
+    partner = dispatch_pair_partner(db, order)
+    if partner:
+        dispatch_editable(db, partner, dispatch_order_data(db, partner, 0)['revision'])
+        dispatch_set_pair_meta(db, partner, None)
+    dispatch_set_pair_meta(db, order, None)
+
+
+def dispatch_pair_demand(db, rows, requested):
+    effective = dict(requested)
+    for order in rows:
+        partner = dispatch_pair_partner(db, order)
+        if not partner or order.id > partner.id: continue
+        if any(o.status == 'draft' or o.category not in ('standard','vip','elite') or o.team_size <= 0
+               for o in (order, partner)): continue
+        # Reuse the smaller crew; a 4+6 pair needs six distinct people.
+        reused = min((order, partner), key=lambda o:(o.team_size, -o.id))
+        effective[reused.source] = max(0, effective[reused.source] - reused.team_size)
+    return effective
+
+
 def dispatch_match_card(db, order, crew=None):
     crew = crew if crew is not None else dispatch_assignments(db, order)
     leader = next((a.employee for a in crew if a.role == 'brigadier'), None)
@@ -13855,8 +13915,10 @@ def dispatch_order_data(db, order, number):
     data.update(number=number, route_fields=meta.get('route_fields', {}), managed=bool(plan),
         approved=bool(plan and plan.approved_card_id), number_card_id=card.id if card else None)
     data['assigned_count'] = int(bool(data['brigadier'])) + len(data['members'])
+    partner = dispatch_pair_partner(db, order)
+    data['paired_order_id'] = partner.id if partner else None
     data['revision'] = dispatch_hash({k: data[k] for k in ('id','source','work_date','issue_time','deceased_name',
-        'category','team_size','organization','agent_name','agent_phone','route','brigadier','members','route_fields','approved','is_draft')})
+        'category','team_size','organization','agent_name','agent_phone','route','brigadier','members','route_fields','approved','is_draft','paired_order_id')})
     return data
 
 
@@ -13944,10 +14006,16 @@ def dispatch_board_data(db, day):
     cards = [dispatch_match_card(db, o) for o in rows]
     statuses = number_card_statuses(db, [c for c in cards if c])
     requested_staff = _requested_staff_by_source(db, day, include_carryouts=False)
+    effective_staff = dispatch_pair_demand(db, rows, requested_staff)
+    by_id = {item['id']:item for item in items}
+    for item in items:
+        partner = by_id.get(item['paired_order_id'])
+        item['paired_order'] = {key:partner[key] for key in ('id','source','number','deceased_name','team_size')} if partner else None
     return {'work_date': str(day), 'items': items, 'counts': numbers, 'free': free['groups'], 'empty_slots':empty,
         'order_completion': dispatch_control_completion(db, day) or order_completion_data(db, day),
         'ready_staff': readiness_summary_data(db, day)['totals']['ready_now'],
         'requested_staff_by_source': requested_staff, 'requested_staff': sum(requested_staff.values()),
+        'requested_staff_effective_by_source': effective_staff, 'requested_staff_effective': sum(effective_staff.values()),
         'numbers': [{'order_id': x['id'], 'number': x['number'], 'source': x['source'],
             'brigadier': x['brigadier'], 'surname': x['deceased_name'], 'posted': bool(c),
             'closed': bool(c and statuses.get(c.id, {}).get('closed'))} for x, c in zip(items, cards)],
@@ -14147,6 +14215,8 @@ def dispatch_update(order_id: int, data: DispatchPlanInput, db: Session = Depend
     if data.work_date != order.work_date or data.source != order.source:
         raise HTTPException(409, 'Тип и дата сохранённого заказа не меняются')
     missing = dispatch_validate_plan(data)
+    if dispatch_pair_partner(db, order) and (missing or data.team_size != order.team_size):
+        raise HTTPException(409, 'Сначала разъедините заказы перед изменением количества или сохранением черновика')
     if missing and dispatch_assignments(db, order):
         raise HTTPException(409, 'Сначала снимите состав перед сохранением неполного заказа')
     if data.team_size != order.team_size and dispatch_assignments(db, order):
@@ -14187,10 +14257,42 @@ def dispatch_delete_order(order_id: int, data: DispatchRevision, db: Session = D
     card=dispatch_match_card(db,order)
     if card and effective_order_photo(db,card)['first_received']:
         raise HTTPException(409,'После фотоотчёта заказ нельзя удалить')
+    if dispatch_pair_partner(db, order): dispatch_unlink_pair(db, order)
     for assignment in dispatch_assignments(db,order): db.delete(assignment)
     order.status='cancelled'
     db.commit()
     return {'ok':True,'id':order.id}
+
+
+@app.post('/api/dispatch-board/orders/{order_id}/pair')
+def dispatch_pair_order(order_id: int, data: DispatchPairInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    dispatch_guard(db, user)
+    order = db.get(Order, order_id)
+    if not order or order.status == 'cancelled': raise HTTPException(404, 'Заказ не найден')
+    dispatch_day_lock(db, order.work_date)
+    dispatch_editable(db, order, data.revision)
+    existing = dispatch_pair_partner(db, order)
+    if data.partner_id is None:
+        if existing:
+            dispatch_editable(db, existing, data.partner_revision)
+            dispatch_unlink_pair(db, order)
+        db.commit()
+        return {'ok':True}
+    if data.partner_id == order.id: raise HTTPException(422, 'Выберите другой заказ')
+    partner = db.get(Order, data.partner_id)
+    if not partner or partner.status == 'cancelled': raise HTTPException(404, 'Второй заказ не найден')
+    if partner.work_date != order.work_date: raise HTTPException(422, 'Можно сдвоить заказы только одного дня')
+    dispatch_editable(db, partner, data.partner_revision)
+    if existing or dispatch_pair_partner(db, partner):
+        raise HTTPException(409, 'Заказ уже сдвоен. Сначала разъедините прежнюю пару.')
+    for item in (order, partner):
+        if item.status == 'draft' or item.category not in ('standard','vip','elite') or item.team_size <= 0:
+            raise HTTPException(409, 'Перед сдвоением заполните категорию, количество, фамилию и время обоих заказов')
+    dispatch_pair_crews(db, order, partner)
+    dispatch_set_pair_meta(db, order, partner.id)
+    dispatch_set_pair_meta(db, partner, order.id)
+    db.commit()
+    return {'ok':True}
 
 
 @app.post('/api/dispatch-board/orders/{order_id}/crew')
@@ -14210,6 +14312,8 @@ def dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session = Depe
     profiles={p.id:p for p in people}
     if len(people)!=len(ids) or profiles[data.brigadier_id].group_code!='brigadier' or not profiles[data.brigadier_id].tg_id:
         raise HTTPException(409,'Проверьте бригадира, его Telegram ID и сотрудников')
+    partner = dispatch_pair_partner(db, order)
+    if partner: dispatch_pair_crews(db, order, partner, (data.brigadier_id, set(ids)))
     for other in dispatch_rows(db,order.work_date):
         if other.id==order.id or other.source!=order.source: continue
         if other.deceased_name.strip().casefold()==order.deceased_name.strip().casefold() and any(
@@ -14306,6 +14410,10 @@ def dispatch_message(order, number):
     for key,label in [('morgue','Морг'),('church','Храм'),('cemetery','Кладбище / кремация')]:
         lines.append(f'{label}: {escape(fields.get(key) or "—")}')
     if not fields: lines.append(escape(order.get('route') or '—'))
+    partner = order.get('paired_order')
+    if partner:
+        label = 'ГБУ ⬛️' if partner['source'] == 'gbu' else 'Частный'
+        lines.append(f'Сдвоен с: {label} №{partner["number"]}')
     lines+=['','Состав:']
     for p in [order['brigadier']]+order['members']:
         lines.append(escape(p['display_name']))
@@ -14321,6 +14429,9 @@ async def dispatch_send(work_date: date, data: DispatchRevision, db: Session = D
         raise HTTPException(409,'Сначала дополните черновики заказов')
     if not board['items'] or any(not x['composition_complete'] for x in board['items']):
         raise HTTPException(409,'Назначьте составы всех заказов')
+    for order in dispatch_rows(db, work_date):
+        partner = dispatch_pair_partner(db, order)
+        if partner: dispatch_pair_crews(db, order, partner)
     messages=[]
     for item in board['items']:
         leader=item['brigadier']
@@ -14402,6 +14513,13 @@ body.dispatch-actions-open .topbar,body.dispatch-actions-open #dispatcherOrderOv
 .dispatch-overview{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:center;gap:7px;margin:4px 0 10px;padding:8px 0;background:var(--bg);box-shadow:0 1px 0 var(--line)}.dispatch-requested{text-align:left;font-size:11px;line-height:1.25}.dispatch-requested b{color:var(--gold)}
 .dispatch-available{font-size:11px;line-height:1.25}.dispatch-available b{color:var(--green,#398771)}
 .dispatch-order-total{display:block;margin-top:4px}.dispatch-order-total b{color:var(--gold)}
+.dispatch-order-total{display:flex;align-items:center;justify-content:space-between;gap:4px}
+.dispatch-order-total [data-plan-comment]{min-height:22px;min-width:0;padding:3px 5px;font-size:8px;line-height:1.1;border:1px solid var(--gold);border-radius:6px;background:var(--panel2);color:var(--gold)}
+.dispatch-pair-choices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+.dispatch-pair-choices button{min-width:0;text-align:left;padding:7px;font-size:11px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--text)}
+.dispatch-pair-choices strong,.dispatch-pair-choices small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dispatch-pair-choices small{font-size:10px;color:var(--muted);margin-top:3px}
+.dispatch-pair-actions{display:flex;gap:6px;margin-top:10px}.dispatch-pair-actions button{flex:1}
 .dispatch-ready{display:block;margin-bottom:4px}.dispatch-ready b{color:var(--green,#398771)}
 #modal:has(#dispatchGbuImport){left:8px;right:8px;top:10px;width:auto;min-width:0;max-width:calc(100vw - 16px);max-height:calc(100vh - 20px);max-height:calc(100dvh - 20px);padding:10px;box-sizing:border-box;overflow-x:hidden;overscroll-behavior:contain}
 #dispatchGbuImport,#modal:has(#dispatchGbuImport)>.modal-body{min-width:0;width:100%;max-width:100%;box-sizing:border-box}
@@ -14470,18 +14588,22 @@ body:has(#modal:not(.hidden) #dispatchGbuImport){overflow:hidden}
 .dispatch-detailed .dispatch-card-main{grid-template-rows:12px 10px 10px 11px 12px 20px minmax(0,1fr);gap:0;font-size:9px;line-height:10px}
 .dispatch-detailed header{gap:4px;font-size:10px;line-height:12px}
 .dispatch-detailed header>b{font-size:11px}
-.dispatch-detailed header span{font-size:9px}
+.dispatch-detailed header span{font-size:9px;font-weight:700}
 .dispatch-detailed .dispatch-card-agent,.dispatch-detailed .dispatch-card-phone{font-size:9px;line-height:10px}
 .dispatch-detailed .dispatch-card-meta{font-size:8.5px;line-height:11px;gap:3px}
+.dispatch-detailed .dispatch-card-category{font-weight:700}
 .dispatch-detailed .dispatch-card-quantity{color:inherit;white-space:nowrap}
 .dispatch-detailed .dispatch-order-name{display:block;max-height:none;line-height:12px}
 .dispatch-detailed .dispatch-order-name>b{font-size:10px;line-height:12px}
-.dispatch-detailed .dispatch-card-times{display:grid;grid-template-rows:repeat(2,10px);align-items:start;justify-content:start;gap:0;font-size:8.5px;line-height:10px;white-space:nowrap}
+.dispatch-detailed .dispatch-card-times{display:grid;grid-template-rows:repeat(2,10px);align-items:start;justify-content:start;gap:0;padding-right:60px;font-size:8.5px;line-height:10px;white-space:nowrap}
+.dispatch-detailed{position:relative}
+.dispatch-detailed>[data-plan-pair]{position:absolute;right:6px;top:61px;box-sizing:border-box;width:56px;max-width:45%;min-width:0;min-height:20px;padding:2px;font-size:8px;line-height:9px;white-space:normal;border:1px solid var(--gold);border-radius:5px;background:var(--panel2);color:var(--gold);z-index:1}
 .dispatch-detailed .dispatch-card-route{display:grid;grid-template-rows:repeat(3,minmax(0,1fr));gap:0;min-height:0;overflow:hidden;text-align:left}
 .dispatch-detailed .dispatch-card-route p{font-size:8.5px;line-height:10px;white-space:normal;overflow-wrap:anywhere;text-overflow:clip}
 .dispatch-detailed footer{font-size:8.5px;gap:3px}
 .dispatch-detailed footer button{min-height:20px}
-.dispatch-detailed footer [data-plan-crew-id]{display:flex;flex:1;align-items:center;justify-content:space-between;gap:3px}
+.dispatch-detailed footer [data-plan-crew-id]{display:flex;flex:1;align-items:center;justify-content:space-between;gap:3px;padding:1px 4px;border:1px solid var(--gold);border-radius:5px;background:var(--gold);color:#211b10}
+.dispatch-complete footer [data-plan-crew-id]{border-color:var(--green,#398771);background:rgba(57,135,113,.12);color:var(--green,#398771)}
 .dispatch-detailed footer [data-plan-crew-id]>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
 .dispatch-detailed footer .dispatch-card-progress{font-size:9px!important}
 .dispatch-detailed footer [data-plan-delete]{flex-basis:22px;font-size:13px}
@@ -14559,6 +14681,8 @@ function dispatchEveningHtml(data){
  return panel.innerHTML;
 }
 function dispatchPerson(p){return [String(p.full_name||'').split(/\s+/)[0],p.metro].filter(Boolean).join(' ')}
+function dispatchStaffCount(gross,effective=gross){const total=Number(gross)||0,net=Number(effective)||0;return String(total)+(net!==total?' ('+net+')':'')}
+function dispatchPairLabel(order){return (order.source==='gbu'?'ГБУ':'Частный')+' №'+order.number}
 function dispatchMini(o){
  if(o.is_draft)return `<article class="dispatch-mini dispatch-draft" data-plan-card="${o.id}"><button type="button" class="dispatch-card-main" data-plan-id="${o.id}"><header><b>№${o.number}</b><span>${o.source==='gbu'?'ГБУ⬛️':'Черновик'}</span>›</header><p class="dispatch-order-name"><b>${esc(o.organization)}</b><small>${esc(o.deceased_name||'Информацию можно добавить позже')}</small></p><div class="dispatch-card-meta"><span>${esc(o.category_label||'Категория не выбрана')}${o.team_size?' '+Number(o.team_size):''}</span></div><p>${o.issue_time?'◷ '+esc(o.issue_time):'Время не указано'}</p></button><footer><button type="button" data-plan-id="${o.id}">Дополнить заказ ›</button><button type="button" data-plan-delete="${o.id}" aria-label="Удалить заказ №${o.number}">🗑</button></footer></article>`;
  const surname=String(o.deceased_name||'').trim().split(/\s+/)[0]||'—';
@@ -14571,7 +14695,30 @@ function dispatchMini(o){
   return '- '+(/^(морг|храм|церковь|кладбище|крематорий|кремация)(?:\s|:|$)/i.test(value)?value:label+' '+(value||'—'));
  });
  const quantity=Number(o.team_size)+' чел';
- return `<article class="dispatch-mini dispatch-detailed ${complete?'dispatch-complete':''}" data-plan-card="${o.id}"><button type="button" class="dispatch-card-main" data-plan-id="${o.id}" aria-label="Заказ №${o.number} · ${esc(o.deceased_name)}"><header><b>№${o.number}</b><span>${o.source==='gbu'?'ГБУ⬛️':esc(o.organization||'')}</span>›</header><p class="dispatch-card-agent" title="${esc(o.agent_name||'')}">Агент: ${esc(o.agent_name||'—')}</p><p class="dispatch-card-phone">Номер: ${esc(phone||'—')}</p><div class="dispatch-card-meta"><span class="dispatch-card-category">Заказ: ${esc(String(o.category_label||'').toLocaleUpperCase('ru-RU'))} · <span class="dispatch-card-quantity">${quantity}</span></span></div><p class="dispatch-order-name"><b>Ум: ${esc(surname)}</b></p><div class="dispatch-card-times"><span>Выдача в ${esc(o.issue_time||'—')}</span><span>Быть в ${esc(o.arrival_time||'—')}</span></div><div class="dispatch-card-route">${route.map(stop=>`<p title="${esc(stop)}">${esc(stop)}</p>`).join('')}</div></button><footer><button type="button" data-plan-crew-id="${o.id}" title="${o.brigadier?esc(dispatchPerson(o.brigadier)):''}" class="${complete?'dispatch-done':''}" ${o.approved?'disabled':''}><span>${complete?'Состав назначен ✓':assigned?'Дополнить состав ›':'Назначить состав ›'}</span><b class="dispatch-card-progress ${complete?'dispatch-done':''}" aria-label="Назначено ${assigned} из ${o.team_size} сотрудников">${assigned}/${o.team_size}</b></button><button type="button" data-plan-delete="${o.id}" aria-label="Удалить заказ №${o.number}" ${o.approved?'disabled':''}>🗑</button></footer></article>`;
+ return `<article class="dispatch-mini dispatch-detailed ${complete?'dispatch-complete':''}" data-plan-card="${o.id}"><button type="button" class="dispatch-card-main" data-plan-id="${o.id}" aria-label="Заказ №${o.number} · ${esc(o.deceased_name)}"><header><b>№${o.number}</b><span>${o.source==='gbu'?'ГБУ⬛️':esc(o.organization||'')}</span>›</header><p class="dispatch-card-agent" title="${esc(o.agent_name||'')}">Агент: ${esc(o.agent_name||'—')}</p><p class="dispatch-card-phone">Номер: ${esc(phone||'—')}</p><div class="dispatch-card-meta"><span class="dispatch-card-category">Заказ: ${esc(String(o.category_label||'').toLocaleUpperCase('ru-RU'))} · <span class="dispatch-card-quantity">${quantity}</span></span></div><p class="dispatch-order-name"><b>Ум: ${esc(surname)}</b></p><div class="dispatch-card-times"><span>Выдача в ${esc(o.issue_time||'—')}</span><span>Быть в ${esc(o.arrival_time||'—')}</span></div><div class="dispatch-card-route">${route.map(stop=>`<p title="${esc(stop)}">${esc(stop)}</p>`).join('')}</div></button><button type="button" data-plan-pair="${o.id}" title="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Выбрать заказ для сдвоения'}" aria-label="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Сдвоить заказ №'+o.number}" ${o.approved?'disabled':''}>${o.paired_order?'⇄ '+esc(dispatchPairLabel(o.paired_order)):'Сдвоить заказ'}</button><footer><button type="button" data-plan-crew-id="${o.id}" title="${o.brigadier?esc(dispatchPerson(o.brigadier)):''}" class="${complete?'dispatch-done':''}" ${o.approved?'disabled':''}><span>${complete?'Состав назначен ✓':assigned?'Дополнить состав ›':'Назначить состав ›'}</span><b class="dispatch-card-progress ${complete?'dispatch-done':''}" aria-label="Назначено ${assigned} из ${o.team_size} сотрудников">${assigned}/${o.team_size}</b></button><button type="button" data-plan-delete="${o.id}" aria-label="Удалить заказ №${o.number}" ${o.approved?'disabled':''}>🗑</button></footer></article>`;
+}
+async function openDispatchPair(order){
+ if(order.approved){toast('Состав уже подтверждён');return}
+ const day=order.work_date;
+ showModal('Сдвоить заказ','<div id="dispatchPair">Загрузка…</div>');
+ const root=qs('#dispatchPair'),live=()=>qs('#dispatchPair')===root&&!qs('#modal').classList.contains('hidden');
+ try{
+  const board=await api('/api/dispatch-board?work_date='+day);if(!live())return;
+  const current=board.items.find(item=>item.id===order.id);
+  if(!current||current.is_draft||current.approved){root.textContent='Заказ недоступен для сдвоения. Обновите страницу.';return}
+  const partner=board.items.find(item=>item.id===current.paired_order_id);
+  const choices=partner?[]:board.items.filter(item=>item.id!==current.id&&!item.is_draft&&!item.approved&&!item.paired_order_id);
+  root.innerHTML=`<p><b>${esc(dispatchPairLabel(current))}</b> · ${esc(current.deceased_name)}</p><p class="muted">Выберите второй заказ на этот день. Для пары нужен общий состав; запрос уменьшится на меньший состав из двух заказов.</p>${partner?`<p>Сдвоен с <b>${esc(dispatchPairLabel(partner))}</b> · ${esc(partner.deceased_name)}</p>`:`<div class="dispatch-pair-choices">${choices.map(item=>`<button type="button" data-plan-pair-choice="${item.id}"><strong>${esc(dispatchPairLabel(item))} · ${esc(item.deceased_name)}</strong><small>${esc(item.category_label)} · ${Number(item.team_size)} чел · ${esc(item.issue_time||'—')}</small></button>`).join('')||'<p class="muted">Заполните ещё один заказ на этот день.</p>'}</div>`}<p data-plan-pair-error role="status"></p><div class="dispatch-pair-actions">${partner?'<button type="button" data-plan-unpair>Разъединить заказы</button>':''}<button type="button" data-plan-pair-cancel>Отмена</button></div>`;
+  const save=async target=>{
+   if(current.approved)return;qsa('button',root).forEach(button=>button.disabled=true);qs('[data-plan-pair-error]',root).textContent='';
+   try{await api('/api/dispatch-board/orders/'+current.id+'/pair',{method:'POST',body:JSON.stringify({revision:current.revision,partner_id:target?.id??null,partner_revision:(target||partner)?.revision??null})});
+    if(live()){closeModal();if(state.selectedDate===day)await loadDispatchBoard()}
+   }catch(error){if(live()){qs('[data-plan-pair-error]',root).textContent=error.message;qsa('button',root).forEach(button=>button.disabled=false)}}
+  };
+  qsa('[data-plan-pair-choice]',root).forEach(button=>button.onclick=()=>save(choices.find(item=>item.id===Number(button.dataset.planPairChoice))));
+  const remove=qs('[data-plan-unpair]',root);if(remove)remove.onclick=()=>save(null);
+  qs('[data-plan-pair-cancel]',root).onclick=closeModal;
+ }catch(error){if(live())root.textContent=error.message}
 }
 function confirmDispatchDelete(order){
  const day=order.work_date;
@@ -14596,10 +14743,12 @@ async function loadDispatchBoard(){
  if(!dispatchBoard||dispatchBoard.work_date!==day)root.textContent='Загрузка…';
  try{const data=await api('/api/dispatch-board?work_date='+day);if(ticket!==dispatchLoad||state.selectedDate!==day||currentViewId()!=='dispatchActionsView')return;dispatchBoard=data;
  const assigned=data.items.filter(o=>o.composition_complete).length,posted=data.numbers.filter(n=>n.posted).length;
- const available=Math.max(0,(Number(data.ready_staff)||0)-(Number(data.requested_staff)||0));
-root.innerHTML=`${dispatchEveningHtml(data)}<div class="dispatch-tools"><button type="button" data-plan-payroll>₽ Зарплата ГБУ</button><button type="button" data-plan-agents>⬛️ Агенты ГБУ</button></div><div class="dispatch-sticky-panel" role="region" aria-label="Сотрудники и заказы"><div class="dispatch-overview"><span class="dispatch-requested"><span class="dispatch-ready">Готово сотрудников: <b data-plan-ready>${Number(data.ready_staff)||0}</b></span>Запрошено сотрудников: <b data-plan-requested>${Number(data.requested_staff)||0}</b></span><span class="dispatch-available" role="status">Свободно сотрудников: <b data-plan-available>${available}</b><span class="dispatch-order-total">Всего заказов: <b data-plan-total-orders>${(Number(data.counts?.private)||0)+(Number(data.counts?.gbu)||0)}</b></span></span></div><div class="dispatch-columns" data-plan-headings>${['private','gbu'].map(source=>`<div class="dispatch-column"><h3><span>${source==='gbu'?'ГБУ ⬛️':'Частные'} · ${data.counts[source]}</span><span class="dispatch-source-requested" title="Запрошено сотрудников" aria-label="Запрошено сотрудников: ${Number(data.requested_staff_by_source?.[source])||0}">👥 <b data-plan-requested-source="${source}">${Number(data.requested_staff_by_source?.[source])||0}</b></span></h3><button type="button" data-plan-add="${source}">+ Добавить заказ</button></div>`).join('')}</div></div><div class="dispatch-columns" data-plan-order-cards>${['private','gbu'].map(source=>`<div class="dispatch-column">${dispatchColumnCards(data,source)}</div>`).join('')}</div><p class="dispatch-selected">Составы назначены: ${assigned}/${data.items.length}</p><button type="button" class="primary dispatch-send" data-plan-send ${!data.items.length||assigned!==data.items.length?'disabled':''}>Отправить заказы ›</button><p class="dispatch-status" data-plan-status role="status"></p><div class="dispatch-free"><b>Свободные · ${data.free.reduce((s,g)=>s+g.people.length,0)}</b>${data.free.map(g=>`<details><summary>${esc(g.label)} · ${g.people.length}</summary>${g.people.map(p=>`<p>${esc(p.name)} ${esc(p.metro)} ${esc(p.height)}</p>`).join('')||'<p>Нет свободных</p>'}</details>`).join('')}</div>`;
+ const available=Math.max(0,(Number(data.ready_staff)||0)-(Number(data.requested_staff_effective??data.requested_staff)||0));
+root.innerHTML=`${dispatchEveningHtml(data)}<div class="dispatch-tools"><button type="button" data-plan-payroll>₽ Зарплата ГБУ</button><button type="button" data-plan-agents>⬛️ Агенты ГБУ</button></div><div class="dispatch-sticky-panel" role="region" aria-label="Сотрудники и заказы"><div class="dispatch-overview"><span class="dispatch-requested"><span class="dispatch-ready">Готово сотрудников: <b data-plan-ready>${Number(data.ready_staff)||0}</b></span>Запрошено сотрудников: <b data-plan-requested>${dispatchStaffCount(data.requested_staff,data.requested_staff_effective)}</b></span><span class="dispatch-available" role="status">Свободно сотрудников: <b data-plan-available>${available}</b><span class="dispatch-order-total"><span>Всего заказов: <b data-plan-total-orders>${(Number(data.counts?.private)||0)+(Number(data.counts?.gbu)||0)}</b></span><button type="button" data-plan-comment>Комментарий</button></span></span></div><div class="dispatch-columns" data-plan-headings>${['private','gbu'].map(source=>`<div class="dispatch-column"><h3><span>${source==='gbu'?'ГБУ ⬛️':'Частные'} · ${data.counts[source]}</span><span class="dispatch-source-requested" title="Запрошено сотрудников" aria-label="Запрошено сотрудников: ${dispatchStaffCount(data.requested_staff_by_source?.[source],data.requested_staff_effective_by_source?.[source])}">👥 <b data-plan-requested-source="${source}">${dispatchStaffCount(data.requested_staff_by_source?.[source],data.requested_staff_effective_by_source?.[source])}</b></span></h3><button type="button" data-plan-add="${source}">+ Добавить заказ</button></div>`).join('')}</div></div><div class="dispatch-columns" data-plan-order-cards>${['private','gbu'].map(source=>`<div class="dispatch-column">${dispatchColumnCards(data,source)}</div>`).join('')}</div><p class="dispatch-selected">Составы назначены: ${assigned}/${data.items.length}</p><button type="button" class="primary dispatch-send" data-plan-send ${!data.items.length||assigned!==data.items.length?'disabled':''}>Отправить заказы ›</button><p class="dispatch-status" data-plan-status role="status"></p><div class="dispatch-free"><b>Свободные · ${data.free.reduce((s,g)=>s+g.people.length,0)}</b>${data.free.map(g=>`<details><summary>${esc(g.label)} · ${g.people.length}</summary>${g.people.map(p=>`<p>${esc(p.name)} ${esc(p.metro)} ${esc(p.height)}</p>`).join('')||'<p>Нет свободных</p>'}</details>`).join('')}</div>`;
  qs('[data-plan-payroll]',root).onclick=()=>openGbuPayroll();qs('[data-plan-agents]',root).onclick=()=>openGbuAgents();
  qs('[data-plan-import]',root).onclick=()=>openDispatchGbuImport();
+ qs('[data-plan-comment]',root).onclick=()=>openDayComment(day);
+ qsa('[data-plan-pair]',root).forEach(button=>button.onclick=()=>openDispatchPair(data.items.find(item=>item.id===Number(button.dataset.planPair))));
  qsa('[data-plan-add]',root).forEach(b=>b.onclick=async()=>{if(b.disabled)return;b.disabled=true;b.dispatchRequestKey=b.dispatchRequestKey||dispatchToken();try{await api('/api/dispatch-board/blank',{method:'POST',body:JSON.stringify({work_date:day,source:b.dataset.planAdd,request_key:b.dispatchRequestKey})});await loadDispatchBoard()}catch(error){if(root.contains(b)){qs('[data-plan-status]',root).textContent=error.message;b.disabled=false}}});
  qsa('[data-plan-blank]',root).forEach(b=>b.onclick=()=>openDispatchEditor(null,b.dataset.planSource,Number(b.dataset.planBlank)));
  qsa('[data-plan-id]',root).forEach(b=>b.onclick=()=>openDispatchEditor(data.items.find(x=>x.id===Number(b.dataset.planId))));
