@@ -13919,12 +13919,34 @@ def dispatch_match_card(db, order, crew=None):
     leader = next((a.employee for a in crew if a.role == 'brigadier'), None)
     if not leader or not leader.tg_id:
         return None
+    plan=db.get(DispatchPlan,order.id)
+    linked_id=json.loads(plan.payload).get('number_card_id') if plan else None
+    if type(linked_id) is int:
+        linked=db.scalar(select(NumberCardEvent).where(NumberCardEvent.id==linked_id,
+            NumberCardEvent.tg_id==leader.tg_id,NumberCardEvent.source==order.source,
+            NumberCardEvent.work_date==order.work_date,_visible_number_card()))
+        if linked:return linked
     # Never guess between two funerals/duplicate number messages.
     normalize = lambda s: ' '.join(str(s or '').casefold().replace('ё', 'е').split())
-    cards = [c for c in db.scalars(select(NumberCardEvent).where(NumberCardEvent.work_date == order.work_date,
-        NumberCardEvent.source == order.source, NumberCardEvent.tg_id == leader.tg_id, _visible_number_card()))
-        if normalize(c.surname) == normalize(order.deceased_name)]
-    return cards[0] if len(cards) == 1 else None
+    cards = list(db.scalars(select(NumberCardEvent).where(NumberCardEvent.work_date == order.work_date,
+        NumberCardEvent.source == order.source, NumberCardEvent.tg_id == leader.tg_id, _visible_number_card())))
+    name=normalize(order.deceased_name)
+    exact=[c for c in cards if normalize(c.surname)==name]
+    peers=list(db.scalars(select(Order).join(Assignment,Assignment.order_id==Order.id).where(
+        Order.work_date==order.work_date,Order.source==order.source,Order.status!='cancelled',
+        Assignment.role=='brigadier',Assignment.employee_id==leader.id)))
+    if len(exact)==1 and sum(normalize(o.deceased_name)==name for o in peers)==1:
+        return exact[0]
+    # Historic GBU plans contain a full name, while the group number contains
+    # only the surname. Match it only when both sides are unambiguous.
+    surname=name.split()[0] if name else ''
+    same=[c for c in cards if normalize(c.surname).split()[:1]==[surname]]
+    if surname and len(same)==1 and sum(normalize(o.deceased_name).split()[:1]==[surname] for o in peers)==1:
+        for other in peers:
+            plan=db.get(DispatchPlan,other.id)
+            if other.id!=order.id and plan and json.loads(plan.payload).get('number_card_id')==same[0].id:return None
+        return same[0]
+    return None
 
 
 def dispatch_destination_type(value, destination):
@@ -14511,6 +14533,77 @@ class DispatchReceiptInput(BaseModel):
     message_id: StrictInt = Field(ge=1)
 
 
+class DispatchActivationInput(BaseModel):
+    job_id: StrictStr = Field(pattern=r'^[a-f0-9]{64}$')
+    tg_id: StrictInt
+    card: NumberCardInput | None = None
+
+
+def dispatch_queue_activation(db,item):
+    uid=item['brigadier']['tg_id']
+    access=bot_cabinet_access_data(db,uid)
+    if not access['allowed']:raise HTTPException(409,'Бригадиру нужен доступ к личному кабинету')
+    key=dispatch_hash({'activation_order':item['id'],'brigadier':uid})
+    job=db.get(CabinetCommand,key)
+    if job and job.status in {'queued','running','done'}:return job
+    if job and json.loads(job.result or '{}').get('delivery_unknown'):return job
+    payload={'tg_id':uid,'action':'number','access_version':access['version'],
+        'dispatch_activation':{'order_id':item['id'],'revision':item['revision']},
+        'values':{'work_date':item['work_date'],'source':item['source'],
+            'surname':item['deceased_name'].strip().split()[0].upper(),
+            'photo_time':item['arrival_time'] or item['issue_time']}}
+    if not job:
+        job=CabinetCommand(id=key,tg_id=uid,fingerprint=dispatch_hash(payload));db.add(job)
+    job.payload=json.dumps(payload,ensure_ascii=False);job.status='queued';job.result='{}'
+    return job
+
+
+@app.post('/api/bot/dispatch-board/activate', dependencies=[Depends(_bot_key)])
+def dispatch_activate(data: DispatchActivationInput, db: Session = Depends(get_db)):
+    job=db.get(CabinetCommand,data.job_id)
+    if not job or job.tg_id!=data.tg_id:raise HTTPException(404,'Действие не найдено')
+    intent=json.loads(job.payload);activation=intent.get('dispatch_activation')
+    if not activation or job.status not in {'queued','running'}:raise HTTPException(409,'Действие уже завершено')
+    access=bot_cabinet_access_data(db,data.tg_id)
+    if not access['allowed'] or intent.get('access_version')!=access['version']:
+        raise HTTPException(403,'Доступ к кабинету изменён')
+    order=db.get(Order,activation['order_id'])
+    if not order or order.status in {'cancelled','draft'}:raise HTTPException(409,'Заказ отменён')
+    dispatch_day_lock(db,order.work_date)
+    item=dispatch_order_data(db,order,0)
+    if (not item['brigadier'] or item['brigadier']['tg_id']!=data.tg_id
+            or item['revision']!=activation['revision']):
+        raise HTTPException(409,'Заказ изменён. Требуется новое сообщение от диспетчера')
+    values=intent['values']
+    if data.card is None:return {'ok':True,'values':values}
+    card=data.card
+    if (card.tg_id!=data.tg_id or card.work_date!=order.work_date or card.source!=order.source
+            or card.surname.strip().upper()!=values['surname']):
+        raise HTTPException(409,'Карточка не соответствует подтверждённому заказу')
+    existing=db.scalar(select(NumberCardEvent).where(NumberCardEvent.chat_id==card.chat_id,
+        NumberCardEvent.message_id==card.message_id))
+    if existing and (existing.tg_id!=card.tg_id or existing.work_date!=card.work_date
+            or existing.source!=card.source or existing.surname.strip().upper()!=card.surname.strip().upper()):
+        raise HTTPException(409,'Номер уже принадлежит другому заказу')
+    if existing is None:
+        existing=NumberCardEvent(**{**card.model_dump(),'phone':brigadier_phone8(card.phone)});db.add(existing);db.flush()
+    if db.get(NumberCardDeletion,existing.id):raise HTTPException(409,'Карточка удалена')
+    for other in db.scalars(select(DispatchPlan).where(DispatchPlan.order_id!=order.id)):
+        if json.loads(other.payload).get('number_card_id')==existing.id:
+            raise HTTPException(409,'Номер уже связан с другим заказом. Диспетчер должен проверить совпадение фамилий')
+    plan=db.get(DispatchPlan,order.id)
+    if plan is None:
+        plan=DispatchPlan(order_id=order.id,request_key=secrets.token_hex(16),payload='{}');db.add(plan)
+    meta=json.loads(plan.payload)
+    meta['number_card_id']=existing.id;plan.payload=json.dumps(meta,ensure_ascii=False)
+    report_key=f'card:{card.chat_id}:{card.message_id}'
+    control=db.get(OrderPhotoControl,report_key)
+    if control is None:control=OrderPhotoControl(report_key=report_key,tg_id=data.tg_id);db.add(control)
+    if not control.photo_time:control.photo_time=values['photo_time']
+    db.commit()
+    return {'ok':True,'report_key':report_key,'photo_time':control.photo_time}
+
+
 def dispatch_delivery_key(day, message):
     return dispatch_hash({'day':str(day),'chat':message['chat_id'],'text':message['text'],
         'kind':message.get('kind'),'order_id':message.get('order_id'),'revision':message.get('revision')})[:48]
@@ -14569,10 +14662,11 @@ def dispatch_confirm_receipt(data: DispatchReceiptInput, db: Session = Depends(g
     leader=item.get('brigadier')
     if not leader or leader.get('tg_id')!=data.tg_id or item['revision']!=saved['revision']:
         raise HTTPException(409,'Заказ или состав изменён. Дождитесь нового сообщения.')
+    job=dispatch_queue_activation(db,item)
     if not saved.get('confirmed_at'): saved['confirmed_at']=datetime.utcnow().isoformat()+'Z'
     saved.update(status='sent',message_id=data.message_id)
     row.payload=json.dumps(saved,ensure_ascii=False);db.commit()
-    return {'ok':True,'confirmed_at':saved['confirmed_at']}
+    return {'ok':True,'confirmed_at':saved['confirmed_at'],'activation_status':job.status}
 
 
 async def dispatch_deliver_messages(db, work_date, messages):
@@ -14708,6 +14802,9 @@ body.dispatch-actions-open .topbar,body.dispatch-actions-open #dispatcherOrderOv
 .dispatch-tools{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:stretch;gap:7px;margin:8px 0}.dispatch-tools button{width:100%;min-height:32px;font-size:11px;padding:6px 7px}
 .dispatch-tools.dispatch-toolbar{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}.dispatch-tools.dispatch-toolbar button{font-size:10px;padding:5px 3px;min-width:0;line-height:1.2}
 .dispatch-assigned-person{padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}.dispatch-assigned-person small{display:block;color:var(--muted);margin-top:3px}
+.dispatch-mini.dispatch-roster-open{position:relative;overflow:visible;z-index:5}
+.dispatch-assigned-tab{position:absolute;top:calc(100% + 2px);left:-1px;right:-1px;padding:8px;border:1px solid var(--gold);border-radius:10px;background:var(--panel,var(--bg));color:var(--text);box-shadow:0 7px 18px #0003;max-height:55vh;overflow-y:auto}
+.dispatch-assigned-tab header{display:flex;justify-content:space-between;gap:4px}.dispatch-assigned-tab header b{font-size:11px}.dispatch-assigned-tab button{font-size:10px;min-height:26px;padding:4px 6px}.dispatch-assigned-tab .dispatch-assigned-person{font-size:11px;padding:6px 0}.dispatch-assigned-tab .dispatch-assigned-person b{font-size:11px}.dispatch-assigned-tab .primary{width:100%;margin-top:8px}
 .dispatch-sticky-panel{position:sticky;top:0;z-index:20;padding-bottom:6px;background:var(--bg);box-shadow:0 1px 0 var(--line);margin-bottom:6px}
 .dispatch-overview{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:center;gap:7px;margin:4px 0 10px;padding:8px 0;background:var(--bg);box-shadow:0 1px 0 var(--line)}.dispatch-requested{text-align:left;font-size:11px;line-height:1.25}.dispatch-requested b{color:var(--gold)}
 .dispatch-available{font-size:11px;line-height:1.25}.dispatch-available b{color:var(--green,#398771)}
@@ -15025,7 +15122,8 @@ root.innerHTML=`${dispatchEveningHtml(data)}<div class="dispatch-tools"><button 
  qsa('[data-plan-add]',root).forEach(b=>b.onclick=async()=>{if(b.disabled)return;b.disabled=true;b.dispatchRequestKey=b.dispatchRequestKey||dispatchToken();try{await api('/api/dispatch-board/blank',{method:'POST',body:JSON.stringify({work_date:day,source:b.dataset.planAdd,request_key:b.dispatchRequestKey})});await loadDispatchBoard()}catch(error){if(root.contains(b)){qs('[data-plan-status]',root).textContent=error.message;b.disabled=false}}});
  qsa('[data-plan-blank]',root).forEach(b=>b.onclick=()=>openDispatchEditor(null,b.dataset.planSource,Number(b.dataset.planBlank)));
  qsa('[data-plan-id]',root).forEach(b=>b.onclick=()=>openDispatchEditor(data.items.find(x=>x.id===Number(b.dataset.planId))));
- qsa('[data-plan-crew-id]',root).forEach(b=>b.onclick=()=>openDispatchCrew(data.items.find(x=>x.id===Number(b.dataset.planCrewId))));
+ qsa('[data-plan-crew-id]',root).forEach(b=>{const order=data.items.find(x=>x.id===Number(b.dataset.planCrewId));if(order.composition_complete)b.disabled=false;b.setAttribute('aria-expanded','false');b.onclick=()=>openDispatchCrew(order)});
+ if(dispatchCrewExpanded!==null){const expanded=data.items.find(o=>o.id===dispatchCrewExpanded&&o.composition_complete);if(expanded)dispatchShowAssignedCrew(expanded);else dispatchCloseAssignedCrew()}
  qsa('[data-plan-delete]',root).forEach(b=>b.onclick=()=>confirmDispatchDelete(data.items.find(x=>x.id===Number(b.dataset.planDelete))));
  qs('[data-plan-numbers]',root).onclick=()=>openNumberCards(day);
  qsa('[data-plan-receipts]',root).forEach(button=>button.onclick=()=>openDispatchReceipts(button.dataset.planReceipts));
@@ -15164,14 +15262,32 @@ async function openDispatchEditor(order,source='private',slotNumber=null){
  try{const r=await api('/api/dispatch-board/orders'+(order?'/'+order.id:''),{method:order?'PUT':'POST',body:JSON.stringify(payload)});if(!live())return;closeModal();await loadDispatchBoard();if(chooseCrewAfterSave){const fresh=dispatchBoard?.items.find(o=>o.id===(order?.id||r.id));if(fresh)await openDispatchCrew(fresh)}else toast('Заказ сохранён')}catch(error){if(live()){qs('[data-plan-error]',form).textContent=error.message;button.disabled=false;chooseCrewAfterSave=false}}
  };
 }
+let dispatchCrewExpanded=null;
+function dispatchCloseAssignedCrew(){
+ qsa('.dispatch-assigned-tab').forEach(tab=>tab.remove());
+ qsa('.dispatch-roster-open').forEach(card=>card.classList.remove('dispatch-roster-open'));
+ qsa('[data-plan-crew-id][aria-expanded="true"]').forEach(button=>button.setAttribute('aria-expanded','false'));
+ dispatchCrewExpanded=null;
+}
+function dispatchShowAssignedCrew(order){
+ dispatchCloseAssignedCrew();
+ const card=qs(`[data-plan-card="${order.id}"]`,qs('#dispatchActionsView'));if(!card)return;
+ dispatchCrewExpanded=order.id;card.classList.add('dispatch-roster-open');
+ const people=[order.brigadier,...order.members].filter(Boolean),button=qs('[data-plan-crew-id]',card);
+ button.setAttribute('aria-expanded','true');button.setAttribute('aria-controls','dispatchAssignedCrew'+order.id);
+ const tab=document.createElement('section');tab.className='dispatch-assigned-tab';tab.id='dispatchAssignedCrew'+order.id;
+ tab.setAttribute('aria-label','Назначенный состав заказа №'+order.number);
+ tab.innerHTML=`<header><b>Состав · ${people.length}/${order.team_size}</b><button type="button" data-plan-collapse-crew>Свернуть ↑</button></header>${people.map((p,i)=>`<div class="dispatch-assigned-person"><b>${esc(dispatchPerson(p))}</b><small>${i===0?'Бригадир · ':''}Рост: ${esc(String(p.height_cm||'не указан'))}</small></div>`).join('')}<button type="button" class="primary" data-plan-edit-crew ${order.approved?'disabled':''}>Изменить состав</button>`;
+ card.append(tab);qs('[data-plan-collapse-crew]',tab).onclick=dispatchCloseAssignedCrew;
+ qs('[data-plan-edit-crew]',tab).onclick=()=>{dispatchCloseAssignedCrew();return openDispatchCrew(order,true)};
+}
 async function openDispatchCrew(order,edit=false){
  if(order.is_draft){await openDispatchEditor(order);toast('Сначала дополните заказ: категорию, количество, фамилию и время');return}
  if(order.composition_complete&&!edit){
-  const people=[order.brigadier,...order.members].filter(Boolean);
-  showModal('Назначенный состав',`<div id="dispatchAssignedCrew"><p>${order.source==='gbu'?'ГБУ ⬛️':'Частный'} №${order.number} · ${esc(order.deceased_name)} · ${people.length}/${order.team_size}</p>${people.map((p,i)=>`<div class="dispatch-assigned-person"><b>${esc(dispatchPerson(p))}</b><small>${i===0?'Бригадир · ':''}Рост: ${esc(String(p.height_cm||'не указан'))}</small></div>`).join('')}<button type="button" class="primary" data-plan-edit-crew style="width:100%;margin-top:14px">Изменить состав</button></div>`);
-  qs('[data-plan-edit-crew]',qs('#dispatchAssignedCrew')).onclick=()=>openDispatchCrew(order,true);
+  if(dispatchCrewExpanded===order.id)dispatchCloseAssignedCrew();else dispatchShowAssignedCrew(order);
   return;
  }
+ if(order.approved){toast('Состав уже подтверждён в зарплате');return}
  showModal('Выберите бригадира','<div id="dispatchCrew">Загрузка…</div>');const root=qs('#dispatchCrew'),live=()=>qs('#dispatchCrew')===root&&!qs('#modal').classList.contains('hidden');
  try{const data=await api('/api/dispatch-board/orders/'+order.id+'/people');if(!live())return;
  let leader=order.brigadier?.id||null,selected=new Set(order.members.map(p=>p.id)),second=new Set();let step=leader?2:1;
@@ -15227,6 +15343,15 @@ async function dispatchAttachControl(dialog,card){
 
 
 INLINE_INDEX_HTML = _dispatch_planning_html(INLINE_INDEX_HTML)
+
+# A confirmed dispatch skips number/spec/schedule, but morning contact stays manual.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "if(data.work_date>data.today)return null;\n  const photo=cabinetPhotoInfo(c);",
+    "if(data.work_date>data.today||!c.on_contact)return null;\n  const photo=cabinetPhotoInfo(c);", 1,
+).replace(
+    "disabled:!prepared||!today||(cashRequired&&!c.cash)",
+    "disabled:!prepared||!today||!c.on_contact||(cashRequired&&!c.cash)", 1,
+)
 
 
 def _staff_directory_loading_html(html):
