@@ -14056,8 +14056,8 @@ def dispatch_board_data(db, day):
     cards = [dispatch_match_card(db, o) for o in rows]
     statuses = number_card_statuses(db, [c for c in cards if c])
     requested_staff = _requested_staff_by_source(db, day)
-    without_carryouts = _requested_staff_by_source(db, day, include_carryouts=False)
-    effective_staff = dispatch_pair_demand(db, rows, without_carryouts)
+    # Carryouts still need staff; only paired orders reduce the displayed demand.
+    effective_staff = dispatch_pair_demand(db, rows, requested_staff)
     pair_colors = dispatch_pair_colors(db, rows)
     by_id = {item['id']:item for item in items}
     for item in items:
@@ -14467,6 +14467,14 @@ def dispatch_approve(order_id: int, data: DispatchRevision, db: Session = Depend
     db.commit();return {'ok':True}
 
 
+def dispatch_crew_person(person):
+    name=str(person.get('full_name') or person.get('display_name') or '').strip().split()
+    name=name[0] if name else 'Имя не указано'
+    metro=str(person.get('metro') or '').strip() or 'метро не указано'
+    height=person.get('height_cm') or 'рост не указан'
+    return f'{name} · {metro} · {height}'
+
+
 def dispatch_message(order, number):
     source='ГБУ ⬛️' if order['source']=='gbu' else 'Частный'
     lines=[f'<b>Заказ: {source}</b>',
@@ -14491,7 +14499,7 @@ def dispatch_message(order, number):
     if order.get('notes'): lines+=['',f'Комментарий: {escape(order["notes"])}']
     lines+=['','Состав:']
     for p in [order['brigadier']]+order['members']:
-        lines.append(escape(p['display_name']))
+        lines.append(escape(dispatch_crew_person(p)))
     return '\n'.join(lines)
 
 
