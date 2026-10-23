@@ -15861,6 +15861,200 @@ body.dashboard-compact #employeeReadiness #readinessGroups .group-block:last-chi
 INLINE_INDEX_HTML = _readiness_toolbar_html(INLINE_INDEX_HTML)
 
 
+def _readiness_comfort_html(html):
+    """Compact staff dashboard with explicit target date and stable touch areas."""
+    start = html.index('async function loadReadiness(){')
+    end = html.index('\nfunction employeeListName(', start)
+    section = html[start:end]
+    old_reserve = '<div class="group-title"><span>${esc(g.label)}</span><span>${ready}/${total}</span></div>'
+    old_group = '<div class="group-title"><span>${esc(g.label)}</span><span>${answered}/${total}</span></div>'
+    for old, new in (
+        (old_reserve, '<div class="group-title"><span>${esc(g.label)}</span><span class="readiness-response-count"><small>Готовы</small><b>${ready}/${total}</b></span></div>'),
+        (old_group, '<div class="group-title"><span>${esc(g.label)}</span><span class="readiness-response-count"><small>Отписались</small><b>${answered}/${total}</b></span></div>'),
+    ):
+        if section.count(old) != 1:
+            raise ValueError('Comfort readiness heading missing')
+        section = section.replace(old, new, 1)
+    first = section.index("    if(code==='reserve'){")
+    last = section.index('\n    return `<div class="group-block">', first)
+    reserve = section[first:last].replace('class="group-block"', 'class="group-block readiness-reserve"', 1)
+    reserve, count = re.subn(r'\s*<button type="button" disabled aria-label="Не используется"><b>—</b></button>', '', reserve)
+    if count != 2:
+        raise ValueError('Reserve unused statuses missing')
+    section = section[:first] + reserve + section[last:]
+    tail = section.rfind('\n}')
+    section = section[:tail] + '\n  updateReadinessNumbers();' + section[tail:]
+    html = html[:start] + section + html[end:]
+    old_title = "qs('#readinessTitle').textContent=day===state.bootstrap.today?'Готовность на завтра':'Готовность на следующий день';"
+    if html.count(old_title) != 1:
+        raise ValueError('Readiness title missing')
+    html = html.replace(old_title, "qs('#readinessTitle').textContent='Готовность';", 1)
+    for old in ("qs('#readinessDayLabel').textContent=fmtDate(nextReadinessDay(day));", "qs('#readinessDayLabel').textContent=fmtDate(day);"):
+        if html.count(old) != 1:
+            raise ValueError('Readiness target label missing')
+        html = html.replace(old, old.replace('fmtDate(', 'readinessTargetLabel('), 1)
+    # Demand updates may finish before/after the readiness people request.
+    old = " qs('[data-readiness-staff]',root).textContent=staff+(effective!=='—'&&effective!==staff?' ('+effective+')':'');"
+    if html.count(old) != 1:
+        raise ValueError('Demand value update missing')
+    html = html.replace(old, old + '\n updateReadinessNumbers();', 1)
+    first = html.index('function fitOrdersScreen(){')
+    last = html.index('\nfunction scheduleOrdersScreenFit(){', first)
+    html = html[:first] + r'''function fitOrdersScreen(){
+ const main=qs('main');if(!main)return;
+ main.style.removeProperty('transform');main.style.removeProperty('width');
+ main.style.removeProperty('--orders-group-extra');main.style.removeProperty('--readiness-card-extra');
+ qs('#readinessView')?.style.removeProperty('margin-top');
+ // Use natural compact card heights. Short screens scroll instead of shrinking
+ // all labels and touch targets; tall screens never inflate empty cells.
+}
+''' + html[last:]
+    return html.replace('</body>', r'''<style id="readiness-comfort-style">
+body.dashboard-compact main{transform:none!important;width:100%!important;padding:0 10px}
+body.dashboard-compact #employeeReadiness #readinessTopActions{grid-template-rows:44px!important;gap:6px;margin:2px 0 12px!important}
+body.dashboard-compact #employeeReadiness #readinessTopActions>button{height:44px!important;min-height:44px!important;gap:5px;font-size:12px!important;border-radius:12px}
+body.dashboard-compact #employeeReadiness #readinessTopActions>button>span:first-child{font-size:17px!important}
+body.dashboard-compact #employeeReadiness .readiness-section-heading{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:5px;margin:0 0 8px}
+body.dashboard-compact #employeeReadiness #readinessTitle{font-size:18px!important;font-weight:750;line-height:1.2;flex:0 1 auto;width:auto;white-space:normal}
+body.dashboard-compact #employeeReadiness #readinessDayLabel{display:inline-block;margin:0!important;padding:5px 8px;border:1px solid var(--gold2);border-radius:9px;font-size:11px!important;line-height:1.2;color:var(--gold2);background:var(--panel)}
+body.dashboard-compact #employeeReadiness #readinessOverview{gap:6px;margin:0 0 10px}
+body.dashboard-compact #employeeReadiness #readinessOverview .metric{min-height:60px!important;border-radius:12px;padding:8px 3px!important;box-shadow:none}
+body.dashboard-compact #employeeReadiness #readinessOverview .metric b{font-size:24px!important;letter-spacing:-.02em;color:var(--text)}
+body.dashboard-compact #employeeReadiness #readinessOverview .metric.is-zero b{color:var(--muted)}
+body.dashboard-compact #employeeReadiness #readinessOverview #noResponseCount.warn{background:rgba(227,180,84,.12);border-color:var(--gold2)}
+body.dashboard-compact #employeeReadiness #readinessOverview #noResponseCount.warn b{color:var(--gold2)}
+body.dashboard-compact #employeeReadiness #readinessGroups .group-block{min-height:0!important;margin:0 0 8px;border-radius:13px;overflow:hidden;background:var(--panel)}
+body.dashboard-compact #employeeReadiness #readinessGroups .group-title{align-items:center;gap:8px;padding:9px 10px 7px;font-size:14px!important;line-height:1.2}
+body.dashboard-compact #employeeReadiness #readinessGroups .readiness-response-count{display:inline-flex;align-items:center;justify-content:flex-end;gap:5px;flex-shrink:0;font-size:13px;font-variant-numeric:tabular-nums}
+body.dashboard-compact #readinessGroups .readiness-response-count small{font-size:9px;color:var(--muted);font-weight:500}
+body.dashboard-compact #readinessGroups .readiness-response-count b{font-size:13px;color:var(--text)}
+body.dashboard-compact #employeeReadiness #readinessGroups .group-stats{flex:none;gap:5px;padding:0 7px 7px;grid-template-columns:repeat(4,minmax(0,1fr))}
+body.dashboard-compact #employeeReadiness #readinessGroups .group-stats button{height:48px;min-height:44px!important;border-radius:8px;padding:4px 1px;gap:3px;font-size:9px;line-height:1.15;touch-action:manipulation}
+body.dashboard-compact #employeeReadiness #readinessGroups .group-stats b{font-size:19px!important;line-height:1;color:var(--text);font-variant-numeric:tabular-nums}
+body.dashboard-compact #employeeReadiness #readinessGroups .group-stats button:not(.has-people) b{color:var(--muted)}
+body.dashboard-compact #employeeReadiness #readinessGroups button[data-rstatus="ready"].has-people{background:rgba(88,199,133,.12)}
+body.dashboard-compact #employeeReadiness #readinessGroups button[data-rstatus="ready"].has-people b{color:var(--green)}
+body.dashboard-compact #employeeReadiness #readinessGroups button[data-rstatus="no_response"].has-people{background:rgba(227,180,84,.13)}
+body.dashboard-compact #employeeReadiness #readinessGroups button[data-rstatus="no_response"].has-people b{color:var(--gold2)}
+body.dashboard-compact #employeeReadiness #readinessGroups .readiness-reserve .group-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+body.dashboard-compact #employeeReadiness #readinessGroups .group-block:last-child{margin-bottom:10px}
+@media(max-width:350px){
+ body.dashboard-compact main{padding:0 8px}
+ body.dashboard-compact #employeeReadiness #readinessTopActions{gap:4px}
+ body.dashboard-compact #employeeReadiness #readinessTopActions>button{font-size:10px!important;gap:3px}
+ body.dashboard-compact #employeeReadiness #readinessTitle{font-size:16px!important}
+ body.dashboard-compact #employeeReadiness #readinessDayLabel{font-size:10px!important;padding:4px 6px}
+ body.dashboard-compact #employeeReadiness #readinessOverview{gap:4px}
+ body.dashboard-compact #employeeReadiness #readinessGroups .group-title{font-size:13px!important}
+ body.dashboard-compact #employeeReadiness #readinessGroups .group-stats{gap:4px}
+}
+</style><script>
+function readinessTargetLabel(day){
+ const today=state.bootstrap?.today;
+ const short=new Intl.DateTimeFormat('ru-RU',{day:'numeric',month:'long',timeZone:'UTC'}).format(new Date(day+'T12:00:00Z'));
+ if(day===today)return 'Сегодня · '+short;
+ if(today&&day===nextReadinessDay(today))return 'Завтра · '+short;
+ return fmtDate(day);
+}
+function updateReadinessNumbers(){
+ qsa('#readinessOverview .metric').forEach(tile=>{
+  const value=qs('b',tile)?.textContent?.trim()||'';
+  tile.classList.toggle('is-zero',/^0(?:\s|$)/.test(value));
+ });
+}
+</script></body>''', 1)
+
+
+INLINE_INDEX_HTML = _readiness_comfort_html(INLINE_INDEX_HTML)
+
+
+def _dispatch_visible_crew_html(html):
+    """Keep assigned crews in the card flow and deletion in its top corner."""
+    first = html.index('function dispatchMini(o){')
+    last = html.index('\nfunction cancelDispatchPair()', first)
+    html = html[:first] + r'''function dispatchDeleteButton(o){
+ return `<button type="button" class="dispatch-delete-corner" data-plan-delete="${o.id}" title="Удалить заказ" aria-label="Удалить заказ №${o.number}" ${o.approved?'disabled':''}><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg></button>`;
+}
+function dispatchMini(o){
+ const title=o.source==='gbu'?'ГБУ':String(o.organization||o.agent_name||'Частный');
+ const head=`<header><b>№${o.number} · ${esc(title)}</b></header>`;
+ if(o.is_draft)return `<article class="dispatch-mini dispatch-draft" data-plan-card="${o.id}">${dispatchDeleteButton(o)}<button type="button" class="dispatch-card-main" data-plan-id="${o.id}">${head}<p class="dispatch-order-name"><b>${esc(o.deceased_name||'Черновик')}</b><small>Информацию можно добавить позже</small></p><div class="dispatch-card-meta"><span>${esc(o.category_label||'Категория не выбрана')}${o.team_size?' · '+Number(o.team_size)+' чел.':''}</span></div><p>${esc(o.issue_time||'Время не указано')}</p></button><footer><button type="button" data-plan-id="${o.id}">Дополнить заказ</button></footer></article>`;
+ const surname=String(o.deceased_name||'').trim().split(/\s+/)[0]||'—';
+ const people=[o.brigadier,...(o.members||[])].filter(Boolean);
+ const assigned=Number.isInteger(o.assigned_count)?o.assigned_count:people.length,complete=assigned===o.team_size&&Boolean(o.brigadier);
+ const rawPhone=String(o.agent_phone||''),digits=rawPhone.replace(/\D/g,'');
+ const phone=/^[78]\d{10}$/.test(digits)?`+7 (${digits.slice(1,4)}) ${digits.slice(4,7)}-${digits.slice(7,9)}-${digits.slice(9)}`:rawPhone;
+ const fields=o.route_fields||{},oldRoute=Object.keys(fields).length?[]:String(o.route||'').split(/[;\n]+/);
+ const route=[['morgue','Морг'],['church','Храм'],['cemetery',o.destination_type==='cremation'?'Кремация':'Кладбище']].map(([key,label],i)=>{
+  let value=String(fields[key]??oldRoute[i]??'').trim();
+  if(key==='church'&&typeof o.church_required==='boolean')value=o.church_required?(value||'Да'):'Нет';
+  return /^(морг|храм|церковь|кладбище|крематорий|кремация)(?:\s|:|$)/i.test(value)?value:label+' '+(value||'—');
+ });
+ return `<article class="dispatch-mini dispatch-detailed ${complete?'dispatch-complete':''} ${o.paired_order?'dispatch-paired':''}" data-plan-card="${o.id}"${dispatchPairStyle(o)}>${dispatchDeleteButton(o)}<button type="button" class="dispatch-card-main" data-plan-id="${o.id}" aria-label="Изменить заказ №${o.number} · ${esc(o.deceased_name)}">${head}<p class="dispatch-card-agent">Агент: ${esc(o.agent_name||'—')}</p><p class="dispatch-card-phone">${esc(phone||'Телефон не указан')}</p><div class="dispatch-card-meta"><span class="dispatch-card-category">${esc(o.category_label||'—')} · ${Number(o.team_size)} чел.</span></div><p class="dispatch-order-name"><b>Ум: ${esc(surname)}</b></p><div class="dispatch-card-times"><span>Выдача <b>${esc(o.issue_time||'—')}</b></span><span>Быть <b>${esc(o.arrival_time||'—')}</b></span></div><div class="dispatch-card-route">${route.map(stop=>`<p>${esc(stop)}</p>`).join('')}</div></button><section class="dispatch-inline-crew" aria-label="Состав заказа №${o.number}"><div class="dispatch-inline-status ${complete?'dispatch-done':''}"><span>Состав</span><b>${assigned}/${o.team_size}${complete?' ✓':''}</b></div><div class="dispatch-inline-people">${people.map(p=>`<p>${p.id===o.brigadier?.id?'<strong>':''}${esc(dispatchPerson(p))}${p.id===o.brigadier?.id?'</strong>':''}</p>`).join('')||'<p class="muted">Пока не назначен</p>'}</div><button type="button" class="dispatch-edit-inline" data-plan-crew-id="${o.id}" ${o.approved?'disabled':''}>${assigned?'Изменить состав':'Назначить состав'}</button></section><button type="button" class="dispatch-pair-inline" data-plan-pair="${o.id}" title="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Выбрать заказ для сдвоения'}" ${o.approved||o.category==='carryout'?'disabled':''}>${o.paired_order?'Сдвоен: '+esc(dispatchPairLabel(o.paired_order)):'Сдвоить заказ'}</button></article>`;
+}
+''' + html[last:]
+    old = " qsa('[data-plan-crew-id]',root).forEach(b=>{const order=data.items.find(x=>x.id===Number(b.dataset.planCrewId));if(order.composition_complete)b.disabled=false;b.setAttribute('aria-expanded','false');b.onclick=()=>openDispatchCrew(order)});"
+    new = " qsa('[data-plan-crew-id]',root).forEach(b=>{const order=data.items.find(x=>x.id===Number(b.dataset.planCrewId));b.onclick=()=>openDispatchCrew(order,true)});"
+    if html.count(old) != 1:
+        raise ValueError('Dispatch crew binding missing')
+    html = html.replace(old, new, 1)
+    old = " if(dispatchCrewExpanded!==null){const expanded=data.items.find(o=>o.id===dispatchCrewExpanded&&o.composition_complete);if(expanded)dispatchShowAssignedCrew(expanded);else dispatchCloseAssignedCrew()}\n"
+    if html.count(old) != 1:
+        raise ValueError('Dispatch crew restoration missing')
+    html = html.replace(old, '', 1)
+    first = html.index('let dispatchCrewExpanded=null;')
+    last = html.index('async function openDispatchCrew(', first)
+    html = html[:first] + html[last:]
+    old = " if(order.composition_complete&&!edit){\n  if(dispatchCrewExpanded===order.id)dispatchCloseAssignedCrew();else dispatchShowAssignedCrew(order);\n  return;\n }\n"
+    if html.count(old) != 1:
+        raise ValueError('Dispatch crew disclosure missing')
+    html = html.replace(old, '', 1)
+    return html.replace('</body>', r'''<style id="dispatch-visible-crew-style">
+#dispatchActionsView .dispatch-columns{gap:10px;align-items:start}
+#dispatchActionsView .dispatch-mini{position:relative;height:auto;min-height:0;max-height:none;grid-template-rows:auto;gap:6px;padding:9px!important;margin-bottom:9px;overflow:visible;font-size:12px;line-height:1.35}
+#dispatchActionsView .dispatch-mini .dispatch-card-main{display:grid;grid-template-rows:none;grid-auto-rows:auto;gap:3px;overflow:visible;font-size:12px;line-height:1.35}
+#dispatchActionsView .dispatch-mini header{display:block;min-height:32px;padding-right:35px;line-height:1.25}
+#dispatchActionsView .dispatch-mini header b{display:block;font-size:14px;font-weight:700;white-space:normal;overflow-wrap:anywhere}
+#dispatchActionsView .dispatch-mini p{white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere}
+#dispatchActionsView .dispatch-card-agent{font-size:11px;line-height:1.35;color:var(--muted)}
+#dispatchActionsView .dispatch-card-phone{font-size:11px;line-height:1.35;font-variant-numeric:tabular-nums;color:var(--text)}
+#dispatchActionsView .dispatch-card-meta{display:block;white-space:normal;font-size:11px;line-height:1.3;margin:2px 0}
+#dispatchActionsView .dispatch-card-category{display:inline-block;padding:3px 6px;border-radius:7px;background:rgba(185,149,71,.13);color:var(--gold);font-weight:500;overflow:visible;overflow-wrap:anywhere}
+#dispatchActionsView .dispatch-mini .dispatch-order-name{display:block;grid-template-rows:none;max-height:none;line-height:1.3}
+#dispatchActionsView .dispatch-order-name b{font-size:13px;white-space:normal;overflow-wrap:anywhere}
+#dispatchActionsView .dispatch-card-times{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:none;gap:4px;padding:6px 0;margin:3px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);font-size:10px;line-height:1.3;white-space:normal}
+#dispatchActionsView .dispatch-card-times span+span{border-left:1px solid var(--line);padding-left:6px}
+#dispatchActionsView .dispatch-card-times b{display:block;font-size:12px;font-weight:600;font-variant-numeric:tabular-nums}
+#dispatchActionsView .dispatch-card-route{display:grid;grid-template-rows:none;gap:2px;overflow:visible;min-height:0}
+#dispatchActionsView .dispatch-card-route p{font-size:11px;line-height:1.35}
+#dispatchActionsView .dispatch-delete-corner,#dispatchActionsView .dispatch-blank [data-plan-delete-blank]{position:absolute;top:5px;right:5px;display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:34px!important;height:34px;min-height:34px;padding:6px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);z-index:2;touch-action:manipulation}
+#dispatchActionsView .dispatch-delete-corner svg{pointer-events:none}
+#dispatchActionsView .dispatch-delete-corner:disabled{opacity:.4}
+#dispatchActionsView .dispatch-inline-crew{display:grid;gap:5px;min-width:0;margin-top:2px}
+#dispatchActionsView .dispatch-inline-status{display:flex;align-items:center;gap:5px;padding:4px 6px;border-radius:7px;background:var(--panel2);font-size:12px;line-height:1.3}
+#dispatchActionsView .dispatch-inline-status b{font-size:12px;font-weight:600}
+#dispatchActionsView .dispatch-complete .dispatch-inline-status{background:rgba(57,135,113,.12);color:var(--green,#398771)}
+#dispatchActionsView .dispatch-inline-people{display:grid;gap:2px;padding:0 2px;font-size:12px;line-height:1.4;min-width:0}
+#dispatchActionsView .dispatch-inline-people strong{font-weight:750}
+#dispatchActionsView .dispatch-edit-inline{width:100%;min-width:0;min-height:36px;padding:6px 4px;border:1px solid var(--gold);border-radius:8px;background:transparent;color:var(--gold);font-size:11px;font-weight:600;line-height:1.25;white-space:normal;touch-action:manipulation}
+#dispatchActionsView .dispatch-pair-inline{position:static;width:100%;max-width:none;min-height:28px;padding:3px 1px;border:0;background:transparent;color:var(--gold);font-size:10px;line-height:1.3;white-space:normal;text-align:left}
+#dispatchActionsView .dispatch-draft{min-height:150px}
+#dispatchActionsView .dispatch-blank{min-height:110px}
+#dispatchActionsView .dispatch-blank footer{min-height:0}
+#dispatchActionsView .dispatch-draft footer button{font-size:11px;min-height:32px;white-space:normal}
+#dispatchActionsView .dispatch-mini button:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+@media(max-width:350px){
+ #dispatchActionsView .dispatch-mini{padding:7px!important;font-size:11px}
+ #dispatchActionsView .dispatch-mini header b{font-size:13px}
+ #dispatchActionsView .dispatch-inline-people{font-size:11px}
+ #dispatchActionsView .dispatch-card-agent,#dispatchActionsView .dispatch-card-phone,#dispatchActionsView .dispatch-card-route p{font-size:10px}
+}
+</style></body>''', 1)
+
+
+INLINE_INDEX_HTML = _dispatch_visible_crew_html(INLINE_INDEX_HTML)
+
+
 def _isolated_preview_screen_html():
     html = INLINE_INDEX_HTML
     # No real Telegram SDK, credentials, database session or notifications.
