@@ -5241,6 +5241,15 @@ def effective_order_photo(db: Session, card):
     override = db.get(OrderPhotoOverride, card.id)
     first = bool(control.first_received if control else photo and photo.active)
     second = bool(control and control.second_received) if card.source == 'gbu' else False
+    # Older imports can contain the actual pictures without matching control
+    # flags. Read only stage numbers, never the image payload, to reconcile them.
+    if not first or (card.source == 'gbu' and not second):
+        media_stages = set(db.scalars(select(OrderReportMedia.stage).where(
+            OrderReportMedia.report_key == key,
+            OrderReportMedia.media != '',
+            OrderReportMedia.stage.in_((1, 2) if card.source == 'gbu' else (1,)))))
+        first = first or 1 in media_stages
+        second = card.source == 'gbu' and (second or 2 in media_stages)
     manual_first = override.first_received if override else None
     manual_second = override.second_received if override and card.source == 'gbu' else None
     return {'first_received': first if manual_first is None else manual_first,
