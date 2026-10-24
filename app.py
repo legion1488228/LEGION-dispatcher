@@ -14961,6 +14961,7 @@ async def dispatch_deliver_crew_change(db, key):
 
 @app.post('/api/bot/dispatch-board/maintenance', dependencies=[Depends(_bot_key)])
 async def dispatch_maintenance(db: Session = Depends(get_db)):
+    await private_intake_daily_header(db)
     for intake_event in list(db.scalars(select(PrivateIntakeEvent).where(
             PrivateIntakeEvent.payload.contains('"status": "pending"'))).all()):
         await private_intake_deliver(db,intake_event)
@@ -16683,10 +16684,15 @@ def private_intake_info(db,order):
 
 
 async def private_intake_deliver(db,event):
+    event_key=event.key
     db.refresh(event,with_for_update=True)
     saved=json.loads(event.payload)
-    for target in saved.get('deliveries',[]):
-        if target['status']!='pending':continue
+    count=len(saved.get('deliveries',[]))
+    db.commit()
+    for index in range(count):
+        event=db.get(PrivateIntakeEvent,event_key);db.refresh(event,with_for_update=True)
+        saved=json.loads(event.payload);target=saved['deliveries'][index]
+        if target['status']!='pending':db.commit();continue
         target['status']='sending';event.payload=json.dumps(saved,ensure_ascii=False);db.commit()
         try:
             result=await free_staff_telegram_call(target['method'],target['data'])
@@ -16694,7 +16700,10 @@ async def private_intake_deliver(db,event):
             target.update(status='sent',message_id=result['message_id'])
         except Exception:
             target['status']='unknown'
-        event=db.get(PrivateIntakeEvent,event.key);event.payload=json.dumps(saved,ensure_ascii=False);db.commit()
+        event=db.get(PrivateIntakeEvent,event_key);db.refresh(event,with_for_update=True)
+        current=json.loads(event.payload);current['deliveries'][index]=target
+        event.payload=json.dumps(current,ensure_ascii=False);db.commit()
+    event=db.get(PrivateIntakeEvent,event_key);saved=json.loads(event.payload)
     return {**saved['result'],'delivery_ok':all(t['status']=='sent' for t in saved.get('deliveries',[]))}
 
 
@@ -16739,7 +16748,7 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
             'missing_fields':['category','team_size','deceased_name','issue_time']},ensure_ascii=False)))
         if not session:session=PrivateIntakeSession(tg_id=data.tg_id);db.add(session)
         session.order_id=order.id
-        notice=f'<b>На завтра · {day.strftime("%d.%m.%Y")}</b>\n<b>{number} заказ: {escape(order.agent_name)}</b>'
+        notice=f'<b><u>{number} заказ</u></b>: {escape(order.agent_name)} 👇'
     elif data.action=='finish':
         if session:session.order_id=None
         notice=None
@@ -16761,7 +16770,7 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
             if len(messages)>=100:raise HTTPException(409,'Лимит 100 сообщений на заказ')
             messages.append({'text':data.text,'photo':data.photo,'by':data.tg_id,'at':datetime.now(MOSCOW).isoformat()})
             plan.payload=json.dumps(meta,ensure_ascii=False)
-            notice=f'<b>{escape(heading)}</b>\n{escape(data.text or "Фотография к заказу")}'
+            notice=escape(data.text) if data.text else None
         elif data.action=='time':
             if not re.fullmatch(r'([01]\d|2[0-3]):[0-5]\d',data.text):raise HTTPException(422,'Время в формате 09:30')
             if dispatch_assignments(db,order):raise HTTPException(409,'У заказа назначен состав. Измените время в приложении и уведомите бригадира.')
@@ -16786,14 +16795,15 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
             notice=f'<b>{escape(heading)}</b>\n<b>ОТМЕНЁН</b>\nНумерация оставшихся заказов обновлена.'
     result={'ok':True,**(private_intake_info(db,order) if order else {})}
     deliveries=[]
-    if notice:
+    if notice or data.photo:
         import html as _html
-        plain=_html.unescape(re.sub('<[^>]+>','',notice))
+        plain=_html.unescape(re.sub('<[^>]+>','',notice or ''))
         for chat in targets:
             if data.photo:
-                deliveries.append({'status':'pending','method':'sendPhoto','data':{'chat_id':chat,'photo':data.photo,'caption':f'Частный №{number} · {order.work_date.strftime("%d.%m")} · {order.agent_name}'}})
-            for start in range(0,len(plain),1000):
-                deliveries.append({'status':'pending','method':'sendMessage','data':{'chat_id':chat,'text':escape(plain[start:start+1000]),'parse_mode':'HTML'}})
+                deliveries.append({'status':'pending','method':'sendPhoto','data':{'chat_id':chat,'photo':data.photo,'caption':''}})
+            chunks=[notice] if notice and len(notice)<=3500 else [escape(plain[start:start+500]) for start in range(0,len(plain),500)]
+            for chunk in chunks:
+                deliveries.append({'status':'pending','method':'sendMessage','data':{'chat_id':chat,'text':chunk,'parse_mode':'HTML'}})
         if data.action=='cancel' and cancelled_leader:
             deliveries.append({'status':'pending','method':'sendMessage','data':{
                 'chat_id':cancelled_leader,'text':escape(plain),'parse_mode':'HTML'}})
@@ -16820,3 +16830,26 @@ def private_intake_order_notice(db,order,notice,revision,action):
     db.add(PrivateIntakeEvent(key=key,payload=json.dumps({'result':{'ok':True},'deliveries':[
         {'status':'pending','method':'sendMessage','data':{'chat_id':chat,'text':escape(value),'parse_mode':'HTML'}}
         for chat in sorted(recipients)]},ensure_ascii=False)))
+
+
+def private_intake_day_heading(day):
+    weekdays=('ПОНЕДЕЛЬНИК','ВТОРНИК','СРЕДА','ЧЕТВЕРГ','ПЯТНИЦА','СУББОТА','ВОСКРЕСЕНЬЕ')
+    months=('января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря')
+    return f'Заказы на завтра ({weekdays[day.weekday()]}) {day.day} {months[day.month-1]}'
+
+
+async def private_intake_daily_header(db,now=None):
+    now=now or datetime.now(MOSCOW)
+    # The bot's existing 15-second maintenance loop checks the midnight hour.
+    # One durable event per destination prevents duplicate headers on restart.
+    if now.hour!=0:return
+    day=now.date()+timedelta(days=1)
+    if db.get_bind().dialect.name=='postgresql':
+        db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),{'key':'private-header:'+str(day)})
+    for chat in private_intake_targets(db):
+        key=f'private-header:{day}:{chat}'
+        if db.get(PrivateIntakeEvent,key):continue
+        db.add(PrivateIntakeEvent(key=key,payload=json.dumps({'result':{'ok':True},'deliveries':[
+            {'status':'pending','method':'sendMessage','data':{'chat_id':chat,
+                'text':'<b>'+private_intake_day_heading(day)+'</b>','parse_mode':'HTML'}}]},ensure_ascii=False)))
+    db.commit()
