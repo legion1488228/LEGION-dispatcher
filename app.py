@@ -8092,7 +8092,7 @@ def cabinet_command_create(data: CabinetCommandInput, db: Session = Depends(get_
             values = payload['values']
             if 'frame_team_size' in values:
                 size = values['frame_team_size']
-                if type(size) is not int or size not in (3, 4, 5, 6):
+                if type(size) is not int or size not in (2, 3, 4, 5, 6):
                     raise HTTPException(422, 'Укажите количество сотрудников для фото')
                 if card.source == 'gbu':
                     assigned = cabinet_photo_team_sizes(db, [card]).get(card.id)
@@ -8133,7 +8133,7 @@ def cabinet_command_create(data: CabinetCommandInput, db: Session = Depends(get_
         source = payload['values'].get('source') if data.action in {'number', 'edit'} else card.source
         if source is None and data.action == 'edit':
             source = card.source
-        if category not in ({'standard', 'elite'} if source == 'gbu' else {'standard', 'vip', 'elite'}):
+        if category not in ({'standard', 'elite'} if source == 'gbu' else {'standard', 'vip', 'elite', 'carryout'}):
             raise HTTPException(422, 'Выберите категорию заказа')
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     if len(encoded.encode()) > 5600000:
@@ -8201,7 +8201,7 @@ def cabinet_command_finish(data: CabinetCommandResult, db: Session = Depends(get
     if row.status not in {'done','error'}:
         result = dict(data.result)
         intent = json.loads(row.payload)
-        if data.status == 'done' and intent.get('action') in {'number', 'edit', 'photo'} and intent.get('values', {}).get('uniform_category') in {'standard', 'vip', 'elite'}:
+        if data.status == 'done' and intent.get('action') in {'number', 'edit', 'photo'} and intent.get('values', {}).get('uniform_category') in {'standard', 'vip', 'elite', 'carryout'}:
             key = str(result.get('report_key') or intent.get('report_key') or '')
             if re.fullmatch(r'card:-?\d+:\d+', key):
                 saved = db.get(CabinetOrderState, key)
@@ -8213,7 +8213,7 @@ def cabinet_command_finish(data: CabinetCommandResult, db: Session = Depends(get
                     saved.tg_id = row.tg_id
                     if intent.get('action') == 'photo':
                         frame_size = intent.get('values', {}).get('frame_team_size')
-                        if type(frame_size) is int and frame_size in (3, 4, 5, 6):
+                        if type(frame_size) is int and frame_size in (2, 3, 4, 5, 6):
                             meta['frame_team_size'] = frame_size
                     saved.payload = json.dumps(dict(meta, uniform_category=intent['values']['uniform_category']))
         if data.status == 'done' and intent.get('action') == 'cash_summary':
@@ -8287,9 +8287,9 @@ def cabinet_state_sync(data: list[dict], db: Session = Depends(get_db)):
         for key in ('dispatch_spec', 'dispatch_revision'):
             if key in previous:
                 values[key] = previous[key]
-        if previous.get('uniform_category') in {'standard', 'vip', 'elite'}:
+        if previous.get('uniform_category') in {'standard', 'vip', 'elite', 'carryout'}:
             values['uniform_category'] = previous['uniform_category']
-        if type(previous.get('frame_team_size')) is int and previous['frame_team_size'] in (3, 4, 5, 6):
+        if type(previous.get('frame_team_size')) is int and previous['frame_team_size'] in (2, 3, 4, 5, 6):
             values['frame_team_size'] = previous['frame_team_size']
         if previous.get('tea_received') and not values['tea_received']:
             values.update(prepared=previous.get('prepared'), tea_received=True,
@@ -9354,7 +9354,7 @@ def control_order_spec(source, gbu_detail, meta, cash):
         # Old cash/photo forms supplied defaults; they are not a dispatcher's choice.
         category = assigned.get('category')
         size = assigned.get('team_size')
-        allowed = {'standard': (3, 4, 5, 6), 'vip': (4, 6), 'elite': (4, 6)}
+        allowed = {'standard': (3, 4, 5, 6), 'vip': (4, 6), 'elite': (4, 6), 'carryout': (2, 3, 4)}
     if isinstance(category, str) and type(size) is int and size in allowed.get(category, ()):
         return {'category': category, 'team_size': size}
     return None
@@ -9384,8 +9384,8 @@ def cabinet_check_assigned_values(db, card, values, required=False):
 
 
 class DispatchOrderSpecInput(BaseModel):
-    category: Literal['standard', 'vip', 'elite']
-    team_size: StrictInt = Field(ge=3, le=6)
+    category: Literal['standard', 'vip', 'elite', 'carryout']
+    team_size: StrictInt = Field(ge=2, le=6)
     version: StrictInt = Field(ge=0)
 
 
@@ -9462,7 +9462,7 @@ def save_order_spec_values(card_id, change, db, user, trusted_native=False):
     if not order_spec_dispatcher(db, user.id) and not order_spec_own_editable(db, card):
         raise HTTPException(409, 'Заказ уже закрыт. Для изменения категории или количества людей обратитесь к диспетчеру')
     allowed = {'standard': (4, 6), 'elite': (4, 6)} if card.source == 'gbu' else {
-        'standard': (3, 4, 5, 6), 'vip': (4, 6), 'elite': (4, 6)}
+        'standard': (3, 4, 5, 6), 'vip': (4, 6), 'elite': (4, 6), 'carryout': (2, 3, 4)}
     if change.team_size not in allowed.get(change.category, ()):
         raise HTTPException(422, 'Такой состав недоступен для выбранной категории')
     if change.version != version:
@@ -9497,8 +9497,8 @@ class BotOrderSpecRequest(BaseModel):
 
 
 class BotOrderSpecSave(BotOrderSpecRequest):
-    category: Literal['standard', 'vip', 'elite']
-    team_size: StrictInt = Field(ge=3, le=6)
+    category: Literal['standard', 'vip', 'elite', 'carryout']
+    team_size: StrictInt = Field(ge=2, le=6)
     version: StrictInt = Field(ge=0)
 
 
@@ -16053,6 +16053,18 @@ function dispatchMini(o){
 
 
 INLINE_INDEX_HTML = _dispatch_visible_crew_html(INLINE_INDEX_HTML)
+
+
+def _cabinet_carryout_photo_html(html):
+    # Apply to final generated HTML, after earlier UI transforms have run.
+    html = html.replace("standard:'Стандарт',vip:'Вип',elite:'Элит'", "standard:'Стандарт',vip:'Вип',elite:'Элит',carryout:'Вынос'")
+    html = html.replace("standard:'Ст',vip:'В',elite:'Э'", "standard:'Ст',vip:'В',elite:'Э',carryout:'Вынос '")
+    html = html.replace("{standard:[3,4,5,6],vip:[4,6],elite:[4,6]}", "{standard:[3,4,5,6],vip:[4,6],elite:[4,6],carryout:[2,3,4]}")
+    html = html.replace("const teamValid=()=>card?.source==='gbu'?[4,6].includes(teamSize()):[3,4,5,6].includes(teamSize());", "const teamValid=()=>card?.source==='gbu'?[4,6].includes(teamSize()):(card?.order_spec?.category==='carryout'?[2,3,4]:[3,4,5,6]).includes(teamSize());")
+    return html
+
+
+INLINE_INDEX_HTML = _cabinet_carryout_photo_html(INLINE_INDEX_HTML)
 
 
 def _isolated_preview_screen_html():
