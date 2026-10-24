@@ -14070,6 +14070,7 @@ def dispatch_order_data(db, order, number):
     data = _order_dict(order, db)
     plan = db.get(DispatchPlan, order.id)
     meta = json.loads(plan.payload) if plan else {}
+    data['source_messages'] = meta.get('source_messages',[]) if order.source=='private' else []
     data['is_draft'] = order.status == 'draft'
     if data['is_draft']:
         data['composition_complete'] = False
@@ -14123,6 +14124,11 @@ def dispatch_slot_layout(db, day, rows):
         number=json.loads(plan.payload).get('slot_number') if plan else None
         if type(number) is int and number>0 and number not in used[order.source]:
             mapping[order.id]=number;used[order.source].add(number)
+    # Cancelled private orders keep their numbers; gaps are never offered as new slots.
+    for payload in db.scalars(select(DispatchPlan.payload).join(Order,Order.id==DispatchPlan.order_id).where(
+            Order.work_date==day,Order.source=='private',Order.status=='cancelled')):
+        number=json.loads(payload).get('slot_number')
+        if type(number) is int and number>0:used['private'].add(number)
     for order in rows:
         if order.id in mapping: continue
         number=1
@@ -14410,6 +14416,7 @@ def dispatch_update(order_id: int, data: DispatchPlanInput, db: Session = Depend
     plan = dispatch_editable(db, order, data.revision)
     if data.work_date != order.work_date or data.source != order.source:
         raise HTTPException(409, 'Тип и дата сохранённого заказа не меняются')
+    old_issue_time=order.issue_time.strftime('%H:%M')
     missing = dispatch_validate_plan(data)
     if dispatch_pair_partner(db, order) and (missing or data.team_size != order.team_size or data.category == 'carryout'):
         raise HTTPException(409, 'Сначала разъедините заказы перед изменением количества или сохранением черновика')
@@ -14433,6 +14440,8 @@ def dispatch_update(order_id: int, data: DispatchPlanInput, db: Session = Depend
     meta['church_required']=dispatch_church_required(data.church_required, data.church)
     meta['destination_type']=dispatch_destination_type(data.destination_type or meta.get('destination_type'), data.cemetery)
     plan.payload=json.dumps(meta,ensure_ascii=False)
+    if order.source=='private' and meta.get('private_intake') and old_issue_time!=order.issue_time.strftime('%H:%M'):
+        private_intake_order_notice(db,order,f"Время выдачи изменено: {old_issue_time} → {order.issue_time.strftime('%H:%M')}",data.revision,'time')
     db.commit();return {'ok':True}
 
 
@@ -14468,6 +14477,9 @@ def dispatch_delete_order(order_id: int, data: DispatchRevision, db: Session = D
     if card and effective_order_photo(db,card)['first_received']:
         raise HTTPException(409,'После фотоотчёта заказ нельзя удалить')
     if dispatch_pair_partner(db, order): dispatch_unlink_pair(db, order)
+    plan=db.get(DispatchPlan,order.id)
+    if order.source=='private' and plan and json.loads(plan.payload).get('private_intake'):
+        private_intake_order_notice(db,order,'ОТМЕНЁН. Номер сохранён.',data.revision,'cancel')
     for assignment in dispatch_assignments(db,order): db.delete(assignment)
     order.status='cancelled'
     db.commit()
@@ -14952,6 +14964,9 @@ async def dispatch_deliver_crew_change(db, key):
 
 @app.post('/api/bot/dispatch-board/maintenance', dependencies=[Depends(_bot_key)])
 async def dispatch_maintenance(db: Session = Depends(get_db)):
+    for intake_event in list(db.scalars(select(PrivateIntakeEvent).where(
+            PrivateIntakeEvent.payload.contains('"status": "pending"'))).all()):
+        await private_intake_deliver(db,intake_event)
     # Recover committed notifications if the request ended before delivery started.
     notices=list(db.scalars(select(DispatchDelivery).where(
         or_(DispatchDelivery.fingerprint.like('crew-change:%'),DispatchDelivery.fingerprint.like('cce0%')))))
@@ -15495,7 +15510,7 @@ async function openDispatchEditor(order,source='private',slotNumber=null){
  source=order?.source||source;const day=order?.work_date||state.selectedDate,key=dispatchToken(),route=order?.route_fields||{};
  const churchRequired=order?.church_required??Boolean(String(route.church||'').trim()&&!/^(?:—|-|нет|нет храма|без храма)$/i.test(String(route.church).trim()));
  const input=(name,label,value='',extra='')=>`<label class="${['morgue','church','cemetery'].includes(name)?'dispatch-route-field':''}">${label}<input name="${name}" value="${esc(value)}" ${extra}></label>`;
- showModal(order?`${source==='gbu'?'ГБУ ⬛️':'Частный'} №${order.number}`:'Новый заказ · '+(source==='gbu'?'ГБУ ⬛️':'Частный'),`<form class="dispatch-form" id="dispatchEditor"><small class="dispatch-form-day">${esc(dispatchShortDay(day))}</small>${input('agent_name','Имя агента',order?.agent_name||'','maxlength="200"')}${input('agent_phone','Номер агента',order?.agent_phone||'','type="tel" maxlength="50"')}${input('organization','От кого заказ',order?.organization||'','maxlength="200"')}${input('deceased_name','Фамилия умершего',order?.deceased_name||'','maxlength="100"')}<label>Категория заказа<select name="category"><option value="">Выберите категорию</option>${Object.entries(source==='gbu'?{standard:'Стандарт',elite:'Элит'}:{standard:'Стандарт',vip:'Вип',elite:'Элит',carryout:'Вынос'}).map(([v,label])=>`<option value="${v}" ${v===order?.category?'selected':''}>${label}</option>`).join('')}</select></label><label>Количество человек<select name="team_size"></select></label><div class="dispatch-times">${input('issue_time','Время выдачи',order?.issue_time||'','type="time"')}<label>📸 Подача авто<input data-plan-arrival readonly value="${esc(order?.arrival_time||'')}"></label></div><small class="dispatch-arrival-hint">Подача автоматически за 30 минут до выдачи.</small><b class="dispatch-route-title">Маршрут</b>${input('morgue','1. Морг',route.morgue||(!Object.keys(route).length?order?.route||'':''),'maxlength="500"')}<label class="dispatch-route-field dispatch-church"><span>2. Храм <select name="church_required" aria-label="Нужен храм"><option value="yes" ${churchRequired?'selected':''}>Да</option><option value="no" ${!churchRequired?'selected':''}>Нет</option></select></span><input name="church" value="${esc(route.church||'')}" maxlength="500" placeholder="Название или адрес храма"></label><label class="dispatch-route-field dispatch-destination"><span>3. <select name="destination_type" aria-label="Кладбище или кремация"><option value="cemetery" ${order?.destination_type!=='cremation'?'selected':''}>Кладбище</option><option value="cremation" ${order?.destination_type==='cremation'?'selected':''}>Кремация</option></select></span><input name="cemetery" value="${esc(route.cemetery||'')}" maxlength="500" placeholder="Название или адрес"></label><label class="dispatch-order-comment">Комментарий<input name="notes" value="${esc(order?.notes||'')}" maxlength="500" placeholder="Коротко об особенностях заказа"></label>${order?`<p class="dispatch-crew-status">${order.composition_complete?'Состав назначен ✓':'Состав не назначен'}</p><button type="button" data-plan-crew ${order.approved?'disabled':''}>Выбрать бригадира и состав ›</button>${order.brigadier?'<button type="button" data-plan-clear>Снять состав</button>':''}`:'<small class="dispatch-crew-hint">Можно сохранить только «От кого заказ» и дополнить позже.</small>'}<p data-plan-error role="status"></p><button type="submit" class="primary" ${order?.approved?'disabled':''}>Сохранить заказ</button></form>`);
+ showModal(order?`${source==='gbu'?'ГБУ ⬛️':'Частный'} №${order.number}`:'Новый заказ · '+(source==='gbu'?'ГБУ ⬛️':'Частный'),`<form class="dispatch-form" id="dispatchEditor">${order?.source_messages?.length?`<section class="private-source-text"><b>Текст из бота</b>${order.source_messages.map(m=>`<p>${esc(m.text||'')}${m.photo?'<small>Фотография отправлена в чат ЛЕГИОН</small>':''}</p>`).join('')}</section>`:''}<small class="dispatch-form-day">${esc(dispatchShortDay(day))}</small>${input('agent_name','Имя агента',order?.agent_name||'','maxlength="200"')}${input('agent_phone','Номер агента',order?.agent_phone||'','type="tel" maxlength="50"')}${input('organization','От кого заказ',order?.organization||'','maxlength="200"')}${input('deceased_name','Фамилия умершего',order?.deceased_name||'','maxlength="100"')}<label>Категория заказа<select name="category"><option value="">Выберите категорию</option>${Object.entries(source==='gbu'?{standard:'Стандарт',elite:'Элит'}:{standard:'Стандарт',vip:'Вип',elite:'Элит',carryout:'Вынос'}).map(([v,label])=>`<option value="${v}" ${v===order?.category?'selected':''}>${label}</option>`).join('')}</select></label><label>Количество человек<select name="team_size"></select></label><div class="dispatch-times">${input('issue_time','Время выдачи',order?.issue_time||'','type="time"')}<label>📸 Подача авто<input data-plan-arrival readonly value="${esc(order?.arrival_time||'')}"></label></div><small class="dispatch-arrival-hint">Подача автоматически за 30 минут до выдачи.</small><b class="dispatch-route-title">Маршрут</b>${input('morgue','1. Морг',route.morgue||(!Object.keys(route).length?order?.route||'':''),'maxlength="500"')}<label class="dispatch-route-field dispatch-church"><span>2. Храм <select name="church_required" aria-label="Нужен храм"><option value="yes" ${churchRequired?'selected':''}>Да</option><option value="no" ${!churchRequired?'selected':''}>Нет</option></select></span><input name="church" value="${esc(route.church||'')}" maxlength="500" placeholder="Название или адрес храма"></label><label class="dispatch-route-field dispatch-destination"><span>3. <select name="destination_type" aria-label="Кладбище или кремация"><option value="cemetery" ${order?.destination_type!=='cremation'?'selected':''}>Кладбище</option><option value="cremation" ${order?.destination_type==='cremation'?'selected':''}>Кремация</option></select></span><input name="cemetery" value="${esc(route.cemetery||'')}" maxlength="500" placeholder="Название или адрес"></label><label class="dispatch-order-comment">Комментарий<input name="notes" value="${esc(order?.notes||'')}" maxlength="500" placeholder="Коротко об особенностях заказа"></label>${order?`<p class="dispatch-crew-status">${order.composition_complete?'Состав назначен ✓':'Состав не назначен'}</p><button type="button" data-plan-crew ${order.approved?'disabled':''}>Выбрать бригадира и состав ›</button>${order.brigadier?'<button type="button" data-plan-clear>Снять состав</button>':''}`:'<small class="dispatch-crew-hint">Можно сохранить только «От кого заказ» и дополнить позже.</small>'}<p data-plan-error role="status"></p><button type="submit" class="primary" ${order?.approved?'disabled':''}>Сохранить заказ</button></form>`);
  const form=qs('#dispatchEditor'),live=()=>qs('#dispatchEditor')===form&&!qs('#modal').classList.contains('hidden');let chooseCrewAfterSave=false;
  const toggleChurch=()=>{form.elements.church.disabled=form.elements.church_required.value!=='yes'};form.elements.church_required.onchange=toggleChurch;toggleChurch();
  if(source==='gbu'&&!order?.approved){
@@ -16628,3 +16643,177 @@ def legion_ui_preview():
         'Referrer-Policy': 'no-referrer',
         'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src 'self' about:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'",
     })
+
+
+
+# Private order inbox: original messages remain separate from reviewed order fields.
+class PrivateIntakeSession(Base):
+    __tablename__='private_intake_sessions'
+    tg_id=Column(BigInteger,primary_key=True)
+    order_id=Column(Integer,nullable=True)
+
+
+class PrivateIntakeEvent(Base):
+    __tablename__='private_intake_events'
+    key=Column(String(160),primary_key=True)
+    payload=Column(String,nullable=False)
+
+
+class PrivateIntakeInput(BaseModel):
+    tg_id: StrictInt
+    action: Literal['start','append','finish','list','time','cancel','resume']
+    request_key: StrictStr=Field(min_length=1,max_length=100)
+    agent_name: StrictStr=Field(default='',max_length=200)
+    agent_phone: StrictStr=Field(default='',max_length=50)
+    text: StrictStr=Field(default='',max_length=4096)
+    order_id: StrictInt | None=None
+    photo: StrictStr=Field(default='',max_length=500)
+
+
+def private_intake_targets(db):
+    row=db.get(ReadinessChatConfig,1)
+    settings=json.loads(row.payload) if row else {}
+    excluded={int(g['chat_id']) for g in settings.get('groups',[]) if g.get('group_code')=='brigadier'}
+    return sorted({int(c) for c in settings.get('admin_chat_ids',[]) if int(c)<0}-excluded)
+
+
+def private_intake_info(db,order):
+    plan=db.get(DispatchPlan,order.id);meta=json.loads(plan.payload) if plan else {}
+    return {'id':order.id,'number':meta.get('slot_number'),'agent_name':order.agent_name,
+        'work_date':str(order.work_date),'cancelled':order.status=='cancelled'}
+
+
+async def private_intake_deliver(db,event):
+    db.refresh(event,with_for_update=True)
+    saved=json.loads(event.payload)
+    for target in saved.get('deliveries',[]):
+        if target['status']!='pending':continue
+        target['status']='sending';event.payload=json.dumps(saved,ensure_ascii=False);db.commit()
+        try:
+            result=await free_staff_telegram_call(target['method'],target['data'])
+            if not isinstance(result,dict) or not result.get('message_id'):raise ValueError('Нет подтверждения')
+            target.update(status='sent',message_id=result['message_id'])
+        except Exception:
+            target['status']='unknown'
+        event=db.get(PrivateIntakeEvent,event.key);event.payload=json.dumps(saved,ensure_ascii=False);db.commit()
+    return {**saved['result'],'delivery_ok':all(t['status']=='sent' for t in saved.get('deliveries',[]))}
+
+
+@app.post('/api/bot/private-intake',dependencies=[Depends(_bot_key)])
+async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
+    if not dispatch_can_access(db,data.tg_id):raise HTTPException(403,'Только владелец и диспетчеры')
+    key=str(data.tg_id)+':'+data.request_key
+    # Serialize one operator's retries and current-order changes, then lock the work day.
+    if db.get_bind().dialect.name=='postgresql':
+        db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),{'key':'private-intake:'+str(data.tg_id)})
+    event=db.get(PrivateIntakeEvent,key)
+    if event:
+        saved=json.loads(event.payload)
+        if saved['input_hash']!=dispatch_hash(data.model_dump()):raise HTTPException(409,'Запрос уже использован')
+        db.commit();return await private_intake_deliver(db,event)
+    session=db.get(PrivateIntakeSession,data.tg_id)
+    if data.action=='list':
+        tomorrow=datetime.now(MOSCOW).date()+timedelta(days=1)
+        rows=list(db.scalars(select(Order).where(Order.source=='private',Order.work_date>=tomorrow-timedelta(days=1),Order.work_date<=tomorrow+timedelta(days=7)).order_by(Order.work_date,Order.id)))
+        return {'ok':True,'items':[private_intake_info(db,o) for o in rows]}
+    targets=private_intake_targets(db)
+    if not targets and data.action!='finish':raise HTTPException(409,'Не настроен чат сверки ЛЕГИОН. Проверьте настройки чатов.')
+    order=None
+    if data.action=='start':
+        if not data.agent_name.strip():raise HTTPException(422,'Введите агента')
+        day=datetime.now(MOSCOW).date()+timedelta(days=1);dispatch_day_lock(db,day)
+        rows=list(db.scalars(select(Order).where(Order.work_date==day,Order.source=='private').order_by(Order.id)))
+        mapping,_=dispatch_slot_layout(db,day,rows)
+        for old in rows:
+            plan=db.get(DispatchPlan,old.id)
+            if plan:
+                meta=json.loads(plan.payload)
+                if not meta.get('slot_number'):meta['slot_number']=mapping[old.id];plan.payload=json.dumps(meta,ensure_ascii=False)
+        number=max(mapping.values(),default=0)+1
+        if number>1000:raise HTTPException(409,'Лимит заказов на день')
+        order=Order(public_id=_public_id(),source='private',work_date=day,issue_time=time(0,0),arrival_time=None,
+            deceased_name='',route='',category='',team_size=0,organization=data.agent_name.strip(),notes='',kickback_rub=0,
+            agent_name=data.agent_name.strip(),agent_phone=data.agent_phone.strip(),other_agent_phone='',status='draft')
+        db.add(order);db.flush()
+        db.add(DispatchPlan(order_id=order.id,request_key=dispatch_hash({'intake':key})[:32],payload=json.dumps({
+            'slot_number':number,'private_intake':True,'source_messages':[],
+            'missing_fields':['category','team_size','deceased_name','issue_time']},ensure_ascii=False)))
+        if not session:session=PrivateIntakeSession(tg_id=data.tg_id);db.add(session)
+        session.order_id=order.id
+        notice=f'<b>На завтра · {day.strftime("%d.%m.%Y")}</b>\n<b>{number} заказ: {escape(order.agent_name)}</b>'
+    elif data.action=='finish':
+        if session:session.order_id=None
+        notice=None
+    else:
+        order=db.get(Order,data.order_id or (session.order_id if session else None))
+        if not order or order.source!='private':raise HTTPException(404,'Частный заказ не найден')
+        dispatch_day_lock(db,order.work_date)
+        if order.status=='cancelled':raise HTTPException(409,'Заказ отменён')
+        plan=db.get(DispatchPlan,order.id)
+        if not plan:raise HTTPException(409,'Заказ не поддерживает этот режим')
+        meta=json.loads(plan.payload);number=meta.get('slot_number')
+        heading=f'Частный №{number} · {order.work_date.strftime("%d.%m")} · {order.agent_name}'
+        if data.action=='resume':
+            if not session:session=PrivateIntakeSession(tg_id=data.tg_id);db.add(session)
+            session.order_id=order.id;notice=None
+        elif data.action=='append':
+            if not data.text.strip() and not data.photo:raise HTTPException(422,'Пришлите текст или фотографию')
+            messages=meta.setdefault('source_messages',[])
+            if len(messages)>=100:raise HTTPException(409,'Лимит 100 сообщений на заказ')
+            messages.append({'text':data.text,'photo':data.photo,'by':data.tg_id,'at':datetime.now(MOSCOW).isoformat()})
+            plan.payload=json.dumps(meta,ensure_ascii=False)
+            notice=f'<b>{escape(heading)}</b>\n{escape(data.text or "Фотография к заказу")}'
+        elif data.action=='time':
+            if not re.fullmatch(r'([01]\d|2[0-3]):[0-5]\d',data.text):raise HTTPException(422,'Время в формате 09:30')
+            if dispatch_assignments(db,order):raise HTTPException(409,'У заказа назначен состав. Измените время в приложении и уведомите бригадира.')
+            dispatch_editable(db,order,dispatch_order_data(db,order,0)['revision'])
+            old=order.issue_time.strftime('%H:%M');order.issue_time=time.fromisoformat(data.text)
+            order.arrival_time=(datetime.combine(order.work_date,order.issue_time)-timedelta(minutes=30)).time()
+            meta['missing_fields']=[f for f in meta.get('missing_fields',[]) if f!='issue_time'];plan.payload=json.dumps(meta,ensure_ascii=False)
+            notice=f'<b>{escape(heading)}</b>\nВремя выдачи изменено: {old} → {data.text}'
+        elif data.action=='cancel':
+            card=dispatch_match_card(db,order)
+            if plan.approved_card_id or (card and effective_order_photo(db,card)['first_received']):raise HTTPException(409,'После фото или подтверждения зарплаты отмена здесь недоступна')
+            if dispatch_pair_partner(db,order):dispatch_unlink_pair(db,order)
+            crew=dispatch_assignments(db,order)
+            cancelled_leader=next((a.employee.tg_id for a in crew if a.role=='brigadier' and a.employee),None)
+            for assignment in crew:db.delete(assignment)
+            order.status='cancelled'
+            if session and session.order_id==order.id:session.order_id=None
+            notice=f'<b>{escape(heading)}</b>\n<b>ОТМЕНЁН</b>\nНомер сохраняется за заказом.'
+    result={'ok':True,**(private_intake_info(db,order) if order else {})}
+    deliveries=[]
+    if notice:
+        import html as _html
+        plain=_html.unescape(re.sub('<[^>]+>','',notice))
+        for chat in targets:
+            if data.photo:
+                deliveries.append({'status':'pending','method':'sendPhoto','data':{'chat_id':chat,'photo':data.photo,'caption':f'Частный №{number} · {order.work_date.strftime("%d.%m")} · {order.agent_name}'}})
+            for start in range(0,len(plain),1000):
+                deliveries.append({'status':'pending','method':'sendMessage','data':{'chat_id':chat,'text':escape(plain[start:start+1000]),'parse_mode':'HTML'}})
+        if data.action=='cancel' and cancelled_leader:
+            deliveries.append({'status':'pending','method':'sendMessage','data':{
+                'chat_id':cancelled_leader,'text':escape(plain),'parse_mode':'HTML'}})
+    event=PrivateIntakeEvent(key=key,payload=json.dumps({'input_hash':dispatch_hash(data.model_dump()),'result':result,'deliveries':deliveries},ensure_ascii=False))
+    db.add(event);db.commit()
+    return await private_intake_deliver(db,event)
+
+INLINE_INDEX_HTML=INLINE_INDEX_HTML.replace('</head>',"""<style>
+#dispatchEditor .private-source-text{position:sticky;top:0;z-index:4;max-height:26vh;overflow:auto;overscroll-behavior:contain;background:var(--panel,var(--bg));border:1px solid var(--gold);border-radius:10px;padding:10px;white-space:pre-wrap;line-height:1.4;font-size:13px}
+#dispatchEditor .private-source-text p{margin:6px 0;border-top:1px solid var(--line);padding-top:5px;overflow-wrap:anywhere}
+#dispatchEditor .private-source-text small{display:block;color:var(--muted)}
+</style></head>""",1)
+
+
+def private_intake_order_notice(db,order,notice,revision,action):
+    plan=db.get(DispatchPlan,order.id)
+    number=json.loads(plan.payload).get('slot_number') if plan else None
+    key='app:'+dispatch_hash({'order':order.id,'revision':revision,'action':action})
+    if db.get(PrivateIntakeEvent,key):return
+    recipients=set(private_intake_targets(db))
+    recipients.update(a.employee.tg_id for a in dispatch_assignments(db,order)
+        if a.role=='brigadier' and a.employee and a.employee.tg_id)
+    value=f"Частный №{number} · {order.work_date.strftime('%d.%m')} · {order.agent_name}\n{notice}"
+    db.add(PrivateIntakeEvent(key=key,payload=json.dumps({'result':{'ok':True},'deliveries':[
+        {'status':'pending','method':'sendMessage','data':{'chat_id':chat,'text':escape(value),'parse_mode':'HTML'}}
+        for chat in sorted(recipients)]},ensure_ascii=False)))
