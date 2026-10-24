@@ -16167,6 +16167,153 @@ renderOwnerCabinet=function(data){
 INLINE_INDEX_HTML = _compact_photo_crew_html(INLINE_INDEX_HTML)
 
 
+def _readiness_paired_overview_html(html):
+    first = html.index('function fitOrdersScreen(){')
+    last = html.index('\nfunction scheduleOrdersScreenFit(){', first)
+    html = html[:first] + r'''function fitOrdersScreen(){
+ const main=qs('main');if(!main)return;
+ main.style.removeProperty('transform');main.style.removeProperty('width');
+ main.style.removeProperty('--orders-group-extra');main.style.removeProperty('--readiness-card-extra');
+ qs('#readinessView')?.style.removeProperty('margin-top');
+ const root=qs('#employeeReadiness');
+ if(!root||!document.body.classList.contains('dashboard-compact'))return;
+ const nav=qs('.bottom-nav'),height=window.visualViewport?.height||window.innerHeight;
+ const top=root.getBoundingClientRect().top+window.scrollY;
+ const available=Math.max(0,Math.floor(height-top-(nav?.getBoundingClientRect().height||82)-8));
+ const value=available+'px';
+ if(root.style.getPropertyValue('--readiness-available')!==value)root.style.setProperty('--readiness-available',value);
+}
+''' + html[last:]
+    return html.replace('</body>', r'''<style id="readiness-paired-overview-style">
+body.dashboard-compact #employeeReadiness{display:flex;flex-direction:column;min-height:var(--readiness-available,0px)}
+body.dashboard-compact #employeeReadiness #readinessOverview{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px!important;flex:none;margin-bottom:10px}
+body.dashboard-compact #employeeReadiness #readinessNextDemand,
+body.dashboard-compact #employeeReadiness #readinessSummary{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr));gap:0!important;min-width:0;margin:0!important;border:1px solid var(--line);border-radius:13px;background:var(--panel);overflow:hidden}
+body.dashboard-compact #employeeReadiness #readinessOverview .metric{position:relative;min-width:0;border:0!important;border-radius:0!important;background:transparent;min-height:64px!important;margin:0!important;padding:8px 2px!important}
+body.dashboard-compact #employeeReadiness #readinessOverview .metric+.metric::before{content:"";position:absolute;left:0;top:13px;bottom:13px;width:1px;background:var(--line)}
+body.dashboard-compact #employeeReadiness #readinessOverview #noResponseCount.warn{background:rgba(227,180,84,.12)}
+body.dashboard-compact #employeeReadiness #readinessGroups{display:flex;flex-direction:column;flex:1;gap:8px}
+body.dashboard-compact #employeeReadiness #readinessGroups .group-block{flex:1;margin:0!important;min-height:88px!important}
+body.dashboard-compact #employeeReadiness #readinessGroups .group-stats{flex:1}
+body.dashboard-compact #employeeReadiness #readinessGroups .group-stats button{height:auto;min-height:48px!important}
+body.dashboard-compact #employeeReadiness #readinessTopActions,body.dashboard-compact #employeeReadiness .readiness-section-heading{flex:none}
+@media(max-width:350px){body.dashboard-compact #employeeReadiness #readinessOverview{gap:9px!important}body.dashboard-compact #employeeReadiness #readinessOverview .metric span{font-size:9px!important}}
+</style></body>''', 1)
+
+
+INLINE_INDEX_HTML = _readiness_paired_overview_html(INLINE_INDEX_HTML)
+
+
+def _equal_dispatch_card_sizes_html(html):
+    html = html.replace('function fitOrdersScreen(){\n', 'function fitOrdersScreen(){\n fitDispatchCardSizes();\n', 1)
+    return html.replace('</body>', r'''<style id="equal-dispatch-card-sizes">
+#dispatchActionsView [data-plan-order-cards] .dispatch-mini{height:var(--dispatch-card-height,auto);min-height:var(--dispatch-card-height,0px);max-height:none;margin-bottom:9px}
+#dispatchActionsView [data-plan-order-cards] .dispatch-detailed{grid-template-rows:var(--dispatch-info-height,auto) minmax(0,1fr) 28px}
+#dispatchActionsView .dispatch-detailed .dispatch-card-main{align-content:start}
+#dispatchActionsView .dispatch-detailed .dispatch-card-main{grid-template-rows:var(--dispatch-detail-rows,none);align-items:start}
+#dispatchActionsView .dispatch-detailed .dispatch-card-route{grid-template-rows:var(--dispatch-route-rows,none);align-items:start}
+#dispatchActionsView .dispatch-inline-people{grid-template-rows:var(--dispatch-person-rows,repeat(6,17px));align-content:start;align-items:start}
+#dispatchActionsView .dispatch-detailed header{min-height:35px}
+#dispatchActionsView .dispatch-detailed .dispatch-card-agent{min-height:30px}
+#dispatchActionsView .dispatch-detailed .dispatch-card-route{min-height:45px;align-content:start}
+#dispatchActionsView .dispatch-inline-crew{grid-template-rows:auto minmax(112px,1fr) auto;align-self:stretch}
+#dispatchActionsView .dispatch-inline-people{display:grid;gap:2px;min-height:var(--dispatch-crew-height,112px);line-height:17px}
+#dispatchActionsView .dispatch-inline-people p{min-height:17px;margin:0}
+#dispatchActionsView .dispatch-edit-inline{align-self:end}
+#dispatchActionsView .dispatch-pair-inline{align-self:end}
+</style><script>
+function fitDispatchCardSizes(){
+ const root=qs('#dispatchActionsView');
+ if(!root||!root.classList.contains('active'))return;
+ const cards=qsa('[data-plan-order-cards] .dispatch-mini',root);
+ if(!cards.length)return;
+ // Measure without the previous equal height, so changing width or removing
+ // an order can also reduce the shared size. Six name lines are always reserved.
+ for(const key of ['--dispatch-card-height','--dispatch-info-height','--dispatch-crew-height','--dispatch-detail-rows','--dispatch-route-rows','--dispatch-person-rows'])root.style.removeProperty(key);
+ const info=qsa('.dispatch-detailed .dispatch-card-main',root),people=qsa('.dispatch-inline-people',root);
+ const maxHeight=items=>Math.ceil(Math.max(0,...items.map(el=>el.getBoundingClientRect().height)));
+ const alignRows=(containers,count,key,minimum=0)=>{
+  if(!containers.length)return;
+  const heights=Array.from({length:count},(_,index)=>Math.max(minimum,maxHeight(containers.map(el=>el.children[index]).filter(Boolean))));
+  root.style.setProperty(key,heights.map(height=>height+'px').join(' '));
+ };
+ // Reserve each field's largest wrapped height, rather than only equalizing
+ // the total information area. No long name or route needs to be clipped.
+ alignRows(qsa('.dispatch-detailed .dispatch-card-route',root),3,'--dispatch-route-rows');
+ alignRows(people,6,'--dispatch-person-rows',17);
+ alignRows(info,7,'--dispatch-detail-rows');
+ const infoHeight=maxHeight(info),crewHeight=Math.max(112,maxHeight(people));
+ if(infoHeight)root.style.setProperty('--dispatch-info-height',infoHeight+'px');
+ root.style.setProperty('--dispatch-crew-height',crewHeight+'px');
+ const height=maxHeight(cards);
+ if(height)root.style.setProperty('--dispatch-card-height',height+'px');
+}
+</script></body>''', 1)
+
+
+INLINE_INDEX_HTML = _equal_dispatch_card_sizes_html(INLINE_INDEX_HTML)
+
+
+def _photo_anchored_crew_editor_html(html):
+    start = html.index('async function openGbuOrderRoster(')
+    end = html.index('\nasync function openGbuPayrollRoster', start)
+    section = html[start:end]
+    section = section.replace('editing=false,resume=null){', 'editing=false,resume=null,photoHost=null){', 1)
+    section = section.replace('document.body.append(dialog);dialog.showModal();', "if(photoHost){photoHost.append(dialog);dialog.show();dialog.addEventListener('close',()=>queueMicrotask(()=>{if(!photoHost.querySelector('dialog[open]'))photoHost.dispatchEvent(new Event('crew-editor-close'))}))}else{document.body.append(dialog);dialog.showModal()}", 1)
+    section = section.replace("showArchived:true,search:''});", "showArchived:true,search:''},photoHost);", 1)
+    section = section.replace("else await openGbuOrderRoster(cardId)", "else if(!photoHost)await openGbuOrderRoster(cardId)", 1)
+    html = html[:start] + section + html[end:]
+    start = html.index('async function openDispatchCrew(order,edit=false){')
+    end = html.index('\nconst dispatchOriginalNumbers=', start)
+    section = html[start:end].replace('order,edit=false){', 'order,edit=false,photoHost=null){', 1)
+    old = " showModal('Выберите бригадира','<div id=\"dispatchCrew\">Загрузка…</div>');const root=qs('#dispatchCrew'),live=()=>qs('#dispatchCrew')===root&&!qs('#modal').classList.contains('hidden');"
+    new = " if(photoHost)photoHost.innerHTML='<header class=\"photo-crew-editor-head\"><b>Состав заказа</b><button type=\"button\" data-photo-crew-back>Назад</button></header><div id=\"dispatchCrew\">Загрузка…</div>';else showModal('Выберите бригадира','<div id=\"dispatchCrew\">Загрузка…</div>');const root=photoHost?qs('#dispatchCrew',photoHost):qs('#dispatchCrew'),live=()=>(photoHost?qs('#dispatchCrew',photoHost):qs('#dispatchCrew'))===root&&(photoHost?photoHost.isConnected:!qs('#modal').classList.contains('hidden'));if(photoHost)qs('[data-photo-crew-back]',photoHost).onclick=()=>photoHost.dispatchEvent(new Event('crew-editor-close'));"
+    if section.count(old)!=1:raise ValueError('Dispatch photo editor anchor missing')
+    section=section.replace(old,new,1)
+    section=section.replace('closeModal();await loadDispatchBoard()', "if(photoHost)photoHost.dispatchEvent(new Event('crew-editor-close'));else{closeModal();await loadDispatchBoard()}",1)
+    html=html[:start]+section+html[end:]
+    html=html.replace("dialog.close();openGbuOrderRoster(card.id,()=>loadControl(),true)", "openPhotoCrewEditor(dialog,card,null,refresh)",1)
+    html=html.replace("dialog.close();openDispatchCrew(order,true)", "openPhotoCrewEditor(dialog,card,order,refresh)",1)
+    return html.replace('</body>', r'''<style id="photo-anchored-crew-editor">
+.bc-photo-viewer.photo-crew-editing .bc-expanded-card{grid-template-rows:auto minmax(120px,44%) minmax(0,1fr);overflow:hidden}
+.bc-photo-viewer.photo-crew-editing .bc-viewer-info{display:none}
+.bc-photo-viewer .photo-crew-editor{min-height:0;overflow:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;border-top:1px solid var(--line);padding:7px 0;touch-action:pan-y}
+.bc-photo-viewer .photo-crew-editor .gbu-crew-dialog{position:static;inset:auto;display:block;width:100%;max-width:none;height:auto;max-height:none;margin:0;padding:0;border:0;border-radius:0;background:transparent;color:inherit;box-shadow:none;overflow:visible}
+.bc-photo-viewer .photo-crew-editor .gbu-crew-dialog:not([open]){display:none}
+.bc-photo-viewer .photo-crew-editor [data-crew-body]{max-height:none;overflow:visible}
+.bc-photo-viewer .photo-crew-editor button{width:auto;min-width:0;min-height:34px;border-radius:8px;padding:6px 8px;font-size:12px;line-height:1.25}
+.bc-photo-viewer .photo-crew-editor input[type=search],.bc-photo-viewer .photo-crew-editor input.search{font-size:16px;min-height:38px;width:100%;box-sizing:border-box}
+.bc-photo-viewer .photo-crew-editor .photo-crew-editor-head,.bc-photo-viewer .photo-crew-editor .gbu-crew-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+.bc-photo-viewer .photo-crew-editor h3{font-size:16px;margin:0}
+.bc-photo-viewer .photo-crew-editor .dispatch-people,.bc-photo-viewer .photo-crew-editor .dispatch-leaders{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}
+.bc-photo-viewer .photo-crew-editor .dispatch-choice{min-width:0;overflow-wrap:anywhere;font-size:12px}
+.bc-photo-viewer .photo-crew-editor .dispatch-choice small{display:block;font-size:10px}
+.bc-photo-viewer .photo-crew-editor .dispatch-choice,
+.bc-photo-viewer .photo-crew-editor .gbu-crew-choice{display:grid!important;grid-template-columns:minmax(0,1fr) 24px;align-items:center;gap:6px}
+.bc-photo-viewer .photo-crew-editor .dispatch-choice>span,
+.bc-photo-viewer .photo-crew-editor .gbu-crew-choice>span{grid-column:1;grid-row:1;min-width:0}
+.bc-photo-viewer .photo-crew-editor .dispatch-choice>input,
+.bc-photo-viewer .photo-crew-editor .gbu-crew-choice>input{grid-column:2;grid-row:1;justify-self:end;align-self:center;margin:0;width:21px;height:21px;min-width:21px;accent-color:var(--gold)}
+.bc-photo-viewer .photo-crew-editor .dispatch-choice>button{grid-column:1/-1;grid-row:auto}
+
+</style><script>
+function openPhotoCrewEditor(dialog,card,order,afterClose){
+ if(!dialog.open||!['owner','assistant'].includes(state.bootstrap?.cabinet_kind)||dialog.querySelector('.photo-crew-editor'))return;
+ const shell=dialog.querySelector('.bc-expanded-card');if(!shell)return;
+ dialog.querySelectorAll('.bc-compact-crew').forEach(panel=>panel.hidden=true);
+ dialog.querySelector('[data-gbu-order-roster]')?.setAttribute('aria-expanded','false');
+ const host=document.createElement('section');host.className='photo-crew-editor';host.setAttribute('aria-label','Изменение состава под фотографией');shell.append(host);dialog.classList.add('photo-crew-editing');
+ let finished=false;
+ const finish=()=>{if(finished)return;finished=true;host.querySelectorAll('dialog[open]').forEach(d=>d.close());host.remove();dialog.classList.remove('photo-crew-editing');dialog.removeEventListener('close',finish);if(dialog.open&&afterClose)afterClose()};
+ host.addEventListener('crew-editor-close',finish);dialog.addEventListener('close',finish,{once:true});
+ if(order)openDispatchCrew(order,true,host);else openGbuOrderRoster(card.id,null,true,null,host);
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML = _photo_anchored_crew_editor_html(INLINE_INDEX_HTML)
+
+
 def _isolated_preview_screen_html():
     html = INLINE_INDEX_HTML
     # No real Telegram SDK, credentials, database session or notifications.
