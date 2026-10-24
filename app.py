@@ -14738,6 +14738,8 @@ def dispatch_activate(data: DispatchActivationInput, db: Session = Depends(get_d
     if not order or order.status in {'cancelled','draft'}:raise HTTPException(409,'Заказ отменён')
     dispatch_day_lock(db,order.work_date)
     item=dispatch_order_data(db,order,0)
+    if not dispatch_original_order_delivered(db,item['id'],item['work_date'],data.tg_id):
+        raise HTTPException(409,'Сам заказ ещё не отправлен бригадиру. Автопубликация номера заблокирована.')
     plan=db.get(DispatchPlan,order.id)
     carried=json.loads(plan.payload).get('crew_receipt',{}) if plan else {}
     crew_only_change=(carried.get('revision')==item['revision']
@@ -14792,6 +14794,8 @@ def dispatch_receipt_info(db, item, receipt_history=None):
     if not item.get('brigadier') or item.get('is_draft'): return {'status':'not_sent'}
     plan=db.get(DispatchPlan,item['id'])
     carried=json.loads(plan.payload).get('crew_receipt',{}) if plan else {}
+    if carried and not dispatch_original_order_delivered(db,item['id'],item['work_date'],item['brigadier'].get('tg_id')):
+        carried={}
     if (carried.get('notice_key') and carried.get('revision')==item['revision']
             and carried.get('tg_id')==item['brigadier'].get('tg_id')):
         notice=db.get(DispatchDelivery,carried['notice_key'])
@@ -14845,6 +14849,8 @@ def dispatch_confirm_receipt(data: DispatchReceiptInput, db: Session = Depends(g
     leader=item.get('brigadier')
     if not leader or leader.get('tg_id')!=data.tg_id or item['revision']!=saved['revision']:
         raise HTTPException(409,'Заказ или состав изменён. Дождитесь нового сообщения.')
+    if saved.get('kind')=='crew_change' and not dispatch_original_order_delivered(db,item['id'],item['work_date'],data.tg_id):
+        raise HTTPException(409,'Сам заказ ещё не отправлен. Дождитесь сообщения с заказом от диспетчера.')
     if not item['composition_complete']:
         raise HTTPException(409,'Диспетчер ещё не назначил полный состав заказа')
     plan=db.get(DispatchPlan,order.id)
@@ -14926,10 +14932,24 @@ def dispatch_crew_change_text(before, after):
     return '\n'.join(lines)
 
 
+def dispatch_original_order_delivered(db,order_id,work_date,tg_id):
+    if not tg_id:return False
+    day=date.fromisoformat(work_date) if isinstance(work_date,str) else work_date
+    for row in db.scalars(select(DispatchDelivery).where(DispatchDelivery.work_date==day)):
+        record=json.loads(row.payload)
+        if (record.get('kind')=='order' and record.get('confirmable')
+                and record.get('order_id')==order_id and record.get('chat_id')==tg_id
+                and (record.get('status')=='sent' or record.get('confirmed_at'))):
+            return True
+    return False
+
+
 def dispatch_queue_crew_change(db, before, after):
     text=dispatch_crew_change_text(before,after)
     leader=after.get('brigadier') or {}
     if not text or not leader.get('tg_id'): return None
+    if (before.get('brigadier') or {}).get('tg_id')!=leader['tg_id']:return None
+    if not dispatch_original_order_delivered(db,after['id'],after['work_date'],leader['tg_id']):return None
     # Unique event ID allows A→B→A replacements; queue in the same transaction as assignments.
     key='cce0'+secrets.token_hex(22)
     db.add(DispatchDelivery(fingerprint=key,work_date=date.fromisoformat(after['work_date']),
@@ -14944,6 +14964,12 @@ async def dispatch_deliver_crew_change(db, key):
     saved=json.loads(row.payload)
     if saved.get('kind')!='crew_change' or saved.get('status')!='pending':
         db.commit();return saved.get('status')
+    order=db.get(Order,saved['order_id'])
+    item=dispatch_order_data(db,order,0) if order and order.status not in {'cancelled','draft'} else None
+    if (not item or (item.get('brigadier') or {}).get('tg_id')!=saved['chat_id']
+            or item['revision']!=saved.get('revision')
+            or not dispatch_original_order_delivered(db,item['id'],item['work_date'],saved['chat_id'])):
+        saved['status']='skipped';row.payload=json.dumps(saved,ensure_ascii=False);db.commit();return 'skipped'
     saved['status']='sending';row.payload=json.dumps(saved,ensure_ascii=False);db.commit()
     try:
         result=await free_staff_telegram_call('sendMessage',{
@@ -15030,6 +15056,12 @@ async def dispatch_send(work_date: date, data: DispatchRevision, db: Session = D
         partner=dispatch_pair_partner(db,db.get(Order,item['id']))
         if partner: dispatch_pair_crews(db,db.get(Order,item['id']),partner)
         if dispatch_receipt_info(db,item).get('status')!='confirmed':
+            if not dispatch_original_order_delivered(db,item['id'],item['work_date'],leader['tg_id']):
+                plan=db.get(DispatchPlan,item['id'])
+                if plan:
+                    meta=json.loads(plan.payload)
+                    meta.pop('crew_receipt',None)
+                    plan.payload=json.dumps(meta,ensure_ascii=False)
             messages.extend(dispatch_order_messages(item))
     key=dispatch_auto_free_key(work_date)
     if not db.get(DispatchDelivery,key):
