@@ -16137,7 +16137,7 @@ function dispatch_crew_person_js(p){return [dispatchPerson(p),p.height_cm].filte
     html = html.replace('</body>', r'''<style>
 .bc-photo-viewer .bc-viewer-title-row{position:relative;overflow:visible}
 .bc-photo-viewer .bc-compact-crew[hidden]{display:none!important}
-.bc-photo-viewer .bc-compact-crew{position:absolute;right:0;top:100%;z-index:12;width:min(275px,calc(100vw - 70px));box-sizing:border-box;max-height:240px;overflow:auto;padding:9px 10px;border:1px solid var(--gold);border-radius:10px;background:var(--panel);box-shadow:0 5px 18px #0003;text-align:left;font-size:12px;line-height:1.4}
+.bc-photo-viewer .bc-compact-crew{position:absolute;right:0;top:100%;z-index:12;width:max-content;max-width:min(275px,calc(100vw - 70px));box-sizing:border-box;max-height:240px;overflow:auto;padding:9px 10px;border:1px solid var(--gold);border-radius:10px;background:var(--panel);box-shadow:0 5px 18px #0003;text-align:left;font-size:12px;line-height:1.4}
 .bc-compact-crew p{margin:0 0 3px!important;overflow-wrap:anywhere}.bc-compact-crew strong{font-weight:750}.bc-compact-crew small{display:block;margin-top:5px;color:var(--muted);font-size:11px}
 .bc-compact-crew-actions{display:flex;gap:5px;margin-top:6px}.bc-compact-crew button{min-height:32px;padding:5px 7px;font-size:11px;border:1px solid var(--gold);border-radius:7px;background:var(--panel2);color:var(--gold)}
 .cabinet-readonly-crew{margin:10px 0;padding:10px;border:1px solid var(--line);border-radius:10px;font-size:13px}.cabinet-readonly-crew p{margin:4px 0;overflow-wrap:anywhere}.cabinet-readonly-crew small{color:var(--muted)}
