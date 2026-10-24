@@ -16314,6 +16314,61 @@ function openPhotoCrewEditor(dialog,card,order,afterClose){
 INLINE_INDEX_HTML = _photo_anchored_crew_editor_html(INLINE_INDEX_HTML)
 
 
+def _photo_crew_keyboard_html(html):
+    html=html.replace("dialog.classList.add('photo-crew-editing');\n let finished=false;", "dialog.classList.add('photo-crew-editing');\n const stopKeyboard=installPhotoCrewKeyboard(dialog,host);\n let finished=false;",1)
+    html=html.replace("finished=true;host.querySelectorAll('dialog[open]')", "finished=true;stopKeyboard();host.querySelectorAll('dialog[open]')",1)
+    return html.replace('</body>',r'''<style id="photo-crew-keyboard-style">
+/* Explicit hidden rule wins over the embedded editor's grid display. */
+.bc-photo-viewer .photo-crew-editor .gbu-crew-choice[hidden],
+.bc-photo-viewer .photo-crew-editor .dispatch-choice[hidden],
+.bc-photo-viewer .photo-crew-editor [data-crew-group][hidden]{display:none!important}
+.bc-photo-viewer .photo-crew-editor .gbu-crew-choice{position:relative;min-height:48px;height:auto;overflow:visible}
+.bc-photo-viewer .photo-crew-editor .gbu-crew-choice>span{position:static;white-space:normal;line-height:1.4;overflow-wrap:anywhere}
+.bc-photo-viewer .photo-crew-editor [data-crew-list]{align-items:stretch;grid-auto-rows:minmax(48px,auto);column-gap:8px}
+.bc-photo-viewer.photo-crew-editing{inset:auto 0 auto;top:var(--crew-viewport-top,12px);height:var(--crew-viewport-height,calc(100dvh - 24px));max-height:var(--crew-viewport-height,calc(100dvh - 24px));margin:0 auto}
+.bc-photo-viewer.photo-crew-keyboard .bc-expanded-card{grid-template-rows:34px minmax(70px,22%) minmax(0,1fr);gap:6px;padding:8px}
+.bc-photo-viewer.photo-crew-keyboard .bc-viewer-close{width:32px;height:32px;min-height:32px}
+.bc-photo-viewer .photo-crew-editor input[data-crew-search],
+.bc-photo-viewer .photo-crew-editor input[data-plan-find]{position:sticky;top:0;z-index:5;display:block;margin:0 0 6px;background:var(--panel);color:var(--text);font-size:16px!important;min-height:40px;scroll-margin-top:0}
+.bc-photo-viewer .photo-crew-editor .gbu-crew-footer{bottom:0;margin:0;padding:6px 0;background:var(--panel);font-size:12px}
+.bc-photo-viewer .photo-crew-editor .gbu-crew-footer p{margin:3px 0;font-size:12px}
+.bc-photo-viewer.photo-crew-keyboard .photo-crew-editor .gbu-crew-head,
+.bc-photo-viewer.photo-crew-keyboard .photo-crew-editor .photo-crew-editor-head{margin-bottom:3px}
+</style><script>
+function installPhotoCrewKeyboard(dialog,host){
+ const viewport=window.visualViewport;
+ const find=()=>host.querySelector('[data-crew-search],[data-plan-find]');
+ let searchFocus=null,disposed=false;
+ const update=()=>{
+  if(disposed||!dialog.open)return;
+  const height=viewport?.height||window.innerHeight,top=viewport?.offsetTop||0;
+  dialog.style.setProperty('--crew-viewport-height',Math.max(180,Math.floor(height-16))+'px');
+  dialog.style.setProperty('--crew-viewport-top',Math.floor(top+8)+'px');
+  const keyboard=document.activeElement===find();
+  if(dialog.classList.contains('photo-crew-keyboard')!==keyboard)dialog.classList.toggle('photo-crew-keyboard',keyboard);
+ };
+ const focus=event=>{if(event.target===find()){searchFocus=event.target;update();host.scrollTop=Math.max(0,event.target.offsetTop-host.offsetTop)}};
+ const blur=()=>queueMicrotask(update);
+ const down=event=>{
+  const search=find();searchFocus=document.activeElement===search?search:null;
+  if(searchFocus&&event.target.matches('input[type=checkbox],input[type=radio]'))event.preventDefault();
+ };
+ const click=event=>{
+  if(searchFocus?.isConnected&&event.target.closest('[data-crew-name],.dispatch-choice')){
+   searchFocus.focus({preventScroll:true});update();
+  }
+ };
+ viewport?.addEventListener('resize',update);viewport?.addEventListener('scroll',update);window.addEventListener('resize',update);
+ host.addEventListener('focusin',focus);host.addEventListener('focusout',blur);host.addEventListener('pointerdown',down);host.addEventListener('click',click);
+ update();
+ return ()=>{disposed=true;viewport?.removeEventListener('resize',update);viewport?.removeEventListener('scroll',update);window.removeEventListener('resize',update);host.removeEventListener('focusin',focus);host.removeEventListener('focusout',blur);host.removeEventListener('pointerdown',down);host.removeEventListener('click',click);dialog.classList.remove('photo-crew-keyboard');dialog.style.removeProperty('--crew-viewport-height');dialog.style.removeProperty('--crew-viewport-top')};
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML = _photo_crew_keyboard_html(INLINE_INDEX_HTML)
+
+
 def _isolated_preview_screen_html():
     html = INLINE_INDEX_HTML
     # No real Telegram SDK, credentials, database session or notifications.
