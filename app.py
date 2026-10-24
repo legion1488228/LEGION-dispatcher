@@ -16094,7 +16094,7 @@ def _dispatch_visible_crew_html(html):
     first = html.index('function dispatchMini(o){')
     last = html.index('\nfunction cancelDispatchPair()', first)
     html = html[:first] + r'''function dispatchDeleteButton(o){
- return `<button type="button" class="dispatch-delete-corner" data-plan-delete="${o.id}" title="Удалить заказ" aria-label="Удалить заказ №${o.number}" ${o.approved?'disabled':''}><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg></button>`;
+ return `<button type="button" class="dispatch-delete-corner" data-plan-delete="${o.id}" title="${o.approved?'Удаление недоступно: состав подтверждён в зарплате':'Удалить заказ'}" aria-label="${o.approved?'Удаление недоступно: состав подтверждён в зарплате':'Удалить заказ №'+o.number}" ${o.approved?'disabled':''}><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg></button>`;
 }
 function dispatchMini(o){
  const title=o.source==='gbu'?'ГБУ':String(o.organization||o.agent_name||'Частный');
@@ -16111,7 +16111,7 @@ function dispatchMini(o){
   if(key==='church'&&typeof o.church_required==='boolean')value=o.church_required?(value||'Да'):'Нет';
   return /^(морг|храм|церковь|кладбище|крематорий|кремация)(?:\s|:|$)/i.test(value)?value:label+' '+(value||'—');
  });
- return `<article class="dispatch-mini dispatch-detailed ${complete?'dispatch-complete':''} ${o.paired_order?'dispatch-paired':''}" data-plan-card="${o.id}"${dispatchPairStyle(o)}>${dispatchDeleteButton(o)}<button type="button" class="dispatch-card-main" data-plan-id="${o.id}" aria-label="Изменить заказ №${o.number} · ${esc(o.deceased_name)}">${head}<p class="dispatch-card-agent">Агент: ${esc(o.agent_name||'—')}</p><p class="dispatch-card-phone">${esc(phone||'Телефон не указан')}</p><div class="dispatch-card-meta"><span class="dispatch-card-category">${esc(o.category_label||'—')} · ${Number(o.team_size)} чел.</span></div><p class="dispatch-order-name"><b>Ум: ${esc(surname)}</b></p><div class="dispatch-card-times"><span>Выдача <b>${esc(o.issue_time||'—')}</b></span><span>Быть <b>${esc(o.arrival_time||'—')}</b></span></div><div class="dispatch-card-route">${route.map(stop=>`<p>${esc(stop)}</p>`).join('')}</div></button><section class="dispatch-inline-crew" aria-label="Состав заказа №${o.number}"><div class="dispatch-inline-status ${complete?'dispatch-done':''}"><span>Состав</span><b>${assigned}/${o.team_size}${complete?' ✓':''}</b></div><div class="dispatch-inline-people">${people.map(p=>`<p>${p.id===o.brigadier?.id?'<strong>':''}${esc(dispatchPerson(p))}${p.id===o.brigadier?.id?'</strong>':''}</p>`).join('')||'<p class="muted">Пока не назначен</p>'}</div><button type="button" class="dispatch-edit-inline" data-plan-crew-id="${o.id}" ${o.approved?'disabled':''}>${assigned?'Изменить состав':'Назначить состав'}</button></section><button type="button" class="dispatch-pair-inline" data-plan-pair="${o.id}" title="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Выбрать заказ для сдвоения'}" ${o.approved||o.category==='carryout'?'disabled':''}>${o.paired_order?'Сдвоен: '+esc(dispatchPairLabel(o.paired_order)):'Сдвоить заказ'}</button></article>`;
+ return `<article class="dispatch-mini dispatch-detailed ${complete?'dispatch-complete':''} ${o.paired_order?'dispatch-paired':''}" data-plan-card="${o.id}"${dispatchPairStyle(o)}>${dispatchDeleteButton(o)}<button type="button" class="dispatch-pair-corner ${o.paired_order?'is-paired':''}" data-plan-pair="${o.id}" aria-label="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Сдвоить заказ №'+o.number}" title="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Выбрать заказ для сдвоения'}" ${o.approved||o.category==='carryout'?'disabled':''}>Х2</button><button type="button" class="dispatch-card-main" data-plan-id="${o.id}" aria-label="Изменить заказ №${o.number} · ${esc(o.deceased_name)}">${head}<p class="dispatch-card-agent">Агент: ${esc(o.agent_name||'—')}</p><p class="dispatch-card-phone">${esc(phone||'Телефон не указан')}</p><div class="dispatch-card-meta"><span class="dispatch-card-category">${esc(o.category_label||'—')} · ${Number(o.team_size)} чел.</span></div><p class="dispatch-order-name"><b>Ум: ${esc(surname)}</b></p><div class="dispatch-card-times"><span>Выдача <b>${esc(o.issue_time||'—')}</b></span><span>Быть <b>${esc(o.arrival_time||'—')}</b></span></div><div class="dispatch-card-route">${route.map(stop=>`<p>${esc(stop)}</p>`).join('')}</div></button><section class="dispatch-inline-crew" aria-label="Состав заказа №${o.number}"><div class="dispatch-inline-status ${complete?'dispatch-done':''}"><span>Состав</span><b>${assigned}/${o.team_size}${complete?' ✓':''}</b></div><div class="dispatch-inline-people">${people.map(p=>`<p>${p.id===o.brigadier?.id?'<strong>':''}${esc(dispatchPerson(p))}${p.id===o.brigadier?.id?'</strong>':''}</p>`).join('')||'<p class="muted">Пока не назначен</p>'}</div><button type="button" class="dispatch-edit-inline" data-plan-crew-id="${o.id}" ${o.approved?'disabled':''}>${assigned?'Изменить состав':'Назначить состав'}</button></section></article>`;
 }
 ''' + html[last:]
     old = " qsa('[data-plan-crew-id]',root).forEach(b=>{const order=data.items.find(x=>x.id===Number(b.dataset.planCrewId));if(order.composition_complete)b.disabled=false;b.setAttribute('aria-expanded','false');b.onclick=()=>openDispatchCrew(order)});"
@@ -16329,19 +16329,30 @@ def _equal_dispatch_card_sizes_html(html):
     html = html.replace('function fitOrdersScreen(){\n', 'function fitOrdersScreen(){\n fitDispatchCardSizes();\n', 1)
     return html.replace('</body>', r'''<style id="equal-dispatch-card-sizes">
 #dispatchActionsView [data-plan-order-cards] .dispatch-mini{height:var(--dispatch-card-height,auto);min-height:var(--dispatch-card-height,0px);max-height:none;margin-bottom:9px}
-#dispatchActionsView [data-plan-order-cards] .dispatch-detailed{grid-template-rows:var(--dispatch-info-height,auto) minmax(0,1fr) 28px}
+#dispatchActionsView [data-plan-order-cards] .dispatch-detailed{grid-template-rows:var(--dispatch-info-height,auto) minmax(0,1fr)}
 #dispatchActionsView .dispatch-detailed .dispatch-card-main{align-content:start}
 #dispatchActionsView .dispatch-detailed .dispatch-card-main{grid-template-rows:var(--dispatch-detail-rows,none);align-items:start}
 #dispatchActionsView .dispatch-detailed .dispatch-card-route{grid-template-rows:var(--dispatch-route-rows,none);align-items:start}
 #dispatchActionsView .dispatch-inline-people{grid-template-rows:var(--dispatch-person-rows,repeat(6,17px));align-content:start;align-items:start}
 #dispatchActionsView .dispatch-detailed header{min-height:35px}
 #dispatchActionsView .dispatch-detailed .dispatch-card-agent{min-height:30px}
-#dispatchActionsView .dispatch-detailed .dispatch-card-route{min-height:45px;align-content:start}
+#dispatchActionsView .dispatch-detailed .dispatch-card-route{min-height:0;align-content:start}
 #dispatchActionsView .dispatch-inline-crew{grid-template-rows:auto minmax(112px,1fr) auto;align-self:stretch}
 #dispatchActionsView .dispatch-inline-people{display:grid;gap:2px;min-height:var(--dispatch-crew-height,112px);line-height:17px}
 #dispatchActionsView .dispatch-inline-people p{min-height:17px;margin:0}
 #dispatchActionsView .dispatch-edit-inline{align-self:end}
 #dispatchActionsView .dispatch-pair-inline{align-self:end}
+#dispatchActionsView .dispatch-mini{gap:4px}
+#dispatchActionsView .dispatch-mini .dispatch-card-main{gap:2px}
+#dispatchActionsView .dispatch-detailed .dispatch-card-main{align-content:start}
+#dispatchActionsView .dispatch-card-times{margin:1px 0;padding:4px 0;padding-right:0}
+#dispatchActionsView .dispatch-card-route{gap:1px;padding:0;margin:0}
+#dispatchActionsView .dispatch-card-route p{font-weight:700;line-height:1.2;margin:0;padding:0}
+#dispatchActionsView .dispatch-inline-crew{margin-top:0;gap:4px;grid-template-rows:auto minmax(112px,1fr) auto}
+#dispatchActionsView .dispatch-mini .dispatch-pair-corner{position:absolute;right:5px;top:43px;display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:34px!important;max-width:34px;min-width:34px;height:34px;min-height:34px;padding:0;border:1px solid var(--gold);border-radius:8px;background:var(--panel);color:var(--gold);font-size:12px;font-weight:750;line-height:1;z-index:2;touch-action:manipulation}
+#dispatchActionsView .dispatch-pair-corner.is-paired{background:var(--pair-tint,rgba(185,149,71,.15));border-color:var(--pair-line,var(--gold))}
+#dispatchActionsView .dispatch-pair-corner:disabled{opacity:.4}
+#dispatchActionsView .dispatch-detailed .dispatch-card-agent{padding-right:32px;box-sizing:border-box}
 </style><script>
 function fitDispatchCardSizes(){
  const root=qs('#dispatchActionsView');
