@@ -1313,6 +1313,9 @@ def gbu_staff_payroll(month: str, db: Session = Depends(get_db), user: TelegramU
         if profile:
             row.update(first_name=str(profile.full_name or '').split()[0] if profile.full_name else '—',
                        metro=getattr(profile, 'metro', '') or '', height_cm=getattr(profile, 'height_cm', None))
+    for note in db.scalars(select(GbuPayrollComment).where(GbuPayrollComment.month == month)):
+        if note.employee_id in people:
+            people[note.employee_id].setdefault('payroll_comments', {})[note.period] = {'text': note.text, 'version': note.version}
     return JSONResponse({'month':month,'employees':sorted(people.values(),key=lambda x:x['name'].casefold()),
         'orders':orders,'missing':missing,'total':sum(x['amount'] for x in people.values())},headers={'Cache-Control':'private, no-store'})
 
@@ -12508,7 +12511,7 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     'class="secondary" data-payroll-back>← Назад', 1)
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
 <style id="gbu-payroll-report-overlay-style">
-.gbu-payroll-report-dialog{box-sizing:border-box;width:calc(100% - 40px);max-width:520px;max-height:84dvh;overflow:auto;overscroll-behavior:contain;margin:auto;padding:14px;border:1px solid #b49a60;border-radius:18px;background:var(--panel);color:var(--text);box-shadow:0 12px 44px #0003}
+.gbu-payroll-report-dialog{box-sizing:border-box;width:calc(100% - 64px);max-width:400px;height:auto;min-height:0;max-height:84dvh;overflow:auto;overscroll-behavior:contain;margin:auto;padding:11px;border:1px solid #b49a60;border-radius:18px;background:var(--panel);color:var(--text);box-shadow:0 12px 44px #0003}
 .gbu-payroll-report-dialog::backdrop{background:#0005}
 .gbu-payroll-report-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 10px}
 .gbu-payroll-report-head h3{margin:0;font-size:18px;line-height:1.25}
@@ -16376,6 +16379,97 @@ function installPhotoCrewKeyboard(dialog,host){
 
 
 INLINE_INDEX_HTML = _photo_crew_keyboard_html(INLINE_INDEX_HTML)
+
+
+class GbuPayrollComment(Base):
+    __tablename__ = 'gbu_payroll_comments'
+    key = Column(String(100), primary_key=True)
+    employee_id = Column(Integer, nullable=False)
+    month = Column(String(7), nullable=False)
+    period = Column(String(6), nullable=False)
+    text = Column(String(2000), nullable=False, default='')
+    version = Column(Integer, nullable=False, default=1)
+
+
+class GbuPayrollCommentInput(BaseModel):
+    month: str = Field(pattern=r'^[1-9]\d{3}-(0[1-9]|1[0-2])$')
+    period: Literal['first', 'second']
+    text: str = Field(max_length=2000)
+    version: StrictInt = Field(ge=0)
+
+
+@app.put('/api/gbu-staff-payroll/comments/{employee_id}')
+def save_gbu_payroll_comment(employee_id: int, data: GbuPayrollCommentInput,
+        db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    if not _dispatcher_access(db, user.id):
+        raise HTTPException(403, 'Доступ только диспетчеру')
+    if not db.get(Employee, employee_id):
+        raise HTTPException(404, 'Сотрудник не найден')
+    key = f'{data.month}:{data.period}:{employee_id}'
+    row = db.get(GbuPayrollComment, key)
+    value = data.text.strip()
+    if row:
+        changed = db.execute(update(GbuPayrollComment).where(GbuPayrollComment.key == key,
+            GbuPayrollComment.version == data.version).values(text=value, version=data.version + 1))
+        if changed.rowcount != 1:
+            db.rollback()
+            raise HTTPException(409, 'Комментарий изменён. Откройте зарплату заново')
+    else:
+        if data.version != 0:
+            raise HTTPException(409, 'Откройте зарплату заново')
+        db.add(GbuPayrollComment(key=key, employee_id=employee_id, month=data.month,
+            period=data.period, text=value, version=1))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, 'Комментарий изменён. Откройте зарплату заново')
+    return {'text': value, 'version': data.version + 1}
+
+
+def _gbu_payroll_comments_html(html):
+    old="return {...employee,orders,exits:orders.length,amount:orders.reduce((sum,order)=>sum+Number(order.amount||0),0)};"
+    first=html.index('function gbuPayrollForPeriod(');last=html.index('\nfunction gbuPayrollRoleGroups(',first)
+    section=html[first:last].replace(old,"return {...employee,comment:employee.payroll_comments?.[period]||{text:'',version:0},orders,exits:orders.length,amount:orders.reduce((sum,order)=>sum+Number(order.amount||0),0)};",1)
+    html=html[:first]+section+html[last:]
+    # The final card renderer is separate from earlier historical table variants.
+    first=html.rindex('function gbuPayrollGroupsHtml(');last=html.index('\nfunction wireGbuPayrollPeople(',first)
+    section=html[first:last].replace('${esc(label.name)}</b>', '${esc(label.name)}${employee.comment?.text?\'<span class="gbu-comment-mark" title="Есть комментарий" aria-label="Есть комментарий">●</span>\':\'\'}</b>',1)
+    html=html[:first]+section+html[last:]
+    old="qs('[data-payroll-back]',report).onclick=()=>report.close();"
+    assert html.count(old)==1
+    html=html.replace(old,old+'\n  attachGbuPayrollComment(report,employee,month,period,root,data);',1)
+    return html.replace('</body>',r'''<style>
+.gbu-comment-mark{display:inline-block;margin-left:4px;color:#b18a3e;font-size:10px;vertical-align:middle}
+.gbu-payroll-comment{margin:5px 0 7px}.gbu-payroll-comment>button{min-height:36px;padding:6px 10px;border:1px solid var(--gold);border-radius:9px;color:var(--gold);background:var(--panel2);font-size:13px}
+.gbu-payroll-comment textarea{display:block;width:100%;box-sizing:border-box;min-height:85px;font-size:16px;margin:7px 0;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text)}
+.gbu-payroll-comment p{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}
+</style><script>
+function attachGbuPayrollComment(report,employee,month,period,root,data){
+ const box=document.createElement('section');box.className='gbu-payroll-comment';box.setAttribute('role','group');box.setAttribute('aria-label','Комментарий к зарплате');
+ const heading=report.querySelector('.gbu-payroll-person-report h3');heading.after(box);
+ let note=employee.comment||{text:'',version:0},busy=false;
+ function draw(edit=false){
+  box.innerHTML=`<button type="button" data-comment-toggle>Комментарий${note.text?' · есть':''}</button>${note.text?`<p>${esc(note.text)}</p>`:''}${edit?`<textarea maxlength="2000" aria-label="Текст комментария">${esc(note.text)}</textarea><button type="button" data-comment-save>Сохранить</button><p role="status"></p>`:''}`;
+  box.querySelector('[data-comment-toggle]').onclick=()=>{if(!busy){draw(!edit);box.querySelector('textarea')?.focus()}};
+  const save=box.querySelector('[data-comment-save]');if(save)save.onclick=async()=>{
+   if(busy)return;busy=true;box.querySelectorAll('button,textarea').forEach(el=>el.disabled=true);
+   try{
+    const saved=await api('/api/gbu-staff-payroll/comments/'+employee.id,{method:'PUT',body:JSON.stringify({month,period,text:box.querySelector('textarea').value,version:note.version})});
+    note=saved;employee.comment=saved;
+    qsa('[data-payroll-person]',root).filter(b=>Number(b.dataset.payrollPerson)===Number(employee.id)).forEach(b=>{
+     b.querySelectorAll('.gbu-comment-mark').forEach(mark=>mark.remove());
+     if(saved.text)b.querySelector('.gbu-payroll-person-name').insertAdjacentHTML('beforeend','<span class="gbu-comment-mark" title="Есть комментарий" aria-label="Есть комментарий">●</span>');
+    });
+    if(report.open)draw();
+   }catch(error){if(report.open){box.querySelector('[role=status]').textContent=error.message;box.querySelectorAll('button,textarea').forEach(el=>el.disabled=false)}}finally{busy=false}
+  };
+ }draw();
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML = _gbu_payroll_comments_html(INLINE_INDEX_HTML)
 
 
 def _isolated_preview_screen_html():
