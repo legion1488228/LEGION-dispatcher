@@ -9606,7 +9606,8 @@ def owner_brigade_control(work_date: date, db: Session = Depends(get_db),
             'second_photos': sum(bool(item['second_received']) for item in entries),
             'completed': sum(item['completed'] for item in entries)}
     totals['all'] = {field: totals['private'][field] + totals['gbu'][field] for field in totals['private']}
-    items.sort(key=dispatch_gbu_elite_priority)
+    # Preserve the contact-time order established above, including across sources.
+    # An order's category must not move it ahead of an earlier scheduled call.
     return JSONResponse({'work_date': work_date.isoformat(), 'items': items, 'totals': totals,
         'order_completion': dispatch_control_completion(db, work_date) or order_completion_data(db, work_date),
         'updated_at': datetime.now(MOSCOW).isoformat()},
