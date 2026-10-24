@@ -13832,6 +13832,7 @@ class DispatchBlankInput(BaseModel):
 
 class DispatchBlankDeleteInput(BaseModel):
     work_date: date
+    request_key: StrictStr | None = Field(default=None,max_length=64)
     source: Literal['private','gbu']
     number: StrictInt = Field(ge=1,le=1000)
 
@@ -14118,50 +14119,42 @@ def dispatch_workloads(db, day, exclude_order_id=None):
 
 
 def dispatch_slot_layout(db, day, rows):
-    mapping={};used={'private':set(),'gbu':set()}
-    for order in rows:
-        plan=db.get(DispatchPlan,order.id)
-        number=json.loads(plan.payload).get('slot_number') if plan else None
-        if type(number) is int and number>0 and number not in used[order.source]:
-            mapping[order.id]=number;used[order.source].add(number)
-    # Cancelled private orders keep their numbers; gaps are never offered as new slots.
-    for payload in db.scalars(select(DispatchPlan.payload).join(Order,Order.id==DispatchPlan.order_id).where(
-            Order.work_date==day,Order.source=='private',Order.status=='cancelled')):
-        number=json.loads(payload).get('slot_number')
-        if type(number) is int and number>0:used['private'].add(number)
-    for order in rows:
-        if order.id in mapping: continue
-        number=1
-        while number in used[order.source]: number+=1
-        mapping[order.id]=number;used[order.source].add(number)
-    # GBU numbers follow the visible category order, starting at one each day.
-    gbu_rows=sorted((order for order in rows if order.source=='gbu'),
-        key=lambda order:(dispatch_gbu_elite_priority(order),order.id))
-    for number,order in enumerate(gbu_rows,1): mapping[order.id]=number
-    used['gbu']=set(range(1,len(gbu_rows)+1))
-    empty={}
+    mapping={};empty={}
     for source in ('private','gbu'):
+        active=[o for o in rows if o.source==source and o.status!='cancelled']
+        active.sort(key=(lambda o:(dispatch_gbu_elite_priority(o),o.id)) if source=='gbu' else (lambda o:o.id))
+        for number,order in enumerate(active,1):mapping[order.id]=number
         state=db.get(DispatchBlankState,(day,source))
         saved=json.loads(state.payload) if state else {}
-        limit=max(5,int(saved.get('limit',5)),max(used[source],default=0))
-        removed=set(saved.get('removed',[]))
-        empty[source]=[n for n in range(1,limit+1) if n not in used[source] and n not in removed]
+        # Older states hid specific slot numbers; retain the number of visible
+        # cards, then label the survivors consecutively from one.
+        old_limit=max(5,int(saved.get('limit',5))) if 'compact_limit' not in saved else int(saved['compact_limit'])
+        total=max(len(active),old_limit-len(set(saved.get('removed',[]))))
+        empty[source]=list(range(len(active)+1,total+1))
     return mapping,empty
+
+
+def dispatch_compact_slot_count(db,day,source,total):
+    row=db.get(DispatchBlankState,(day,source))
+    saved=json.loads(row.payload) if row else {}
+    saved['compact_limit']=max(0,total);saved['removed']=[]
+    if not row:row=DispatchBlankState(work_date=day,source=source);db.add(row)
+    row.payload=json.dumps(saved,ensure_ascii=False)
+    return row,saved
 
 
 @app.delete('/api/dispatch-board/blank')
 def dispatch_delete_blank(data: DispatchBlankDeleteInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     dispatch_guard(db,user);dispatch_day_lock(db,data.work_date)
     row=db.get(DispatchBlankState,(data.work_date,data.source))
-    saved=json.loads(row.payload) if row else {'limit':5,'requests':{}}
+    saved=json.loads(row.payload) if row else {}
+    if data.request_key and data.request_key in saved.get('delete_requests',[]):return {'ok':True}
     orders=dispatch_rows(db,data.work_date)
     mapping,empty=dispatch_slot_layout(db,data.work_date,orders)
-    if any(o.source==data.source and mapping[o.id]==data.number for o in orders):
-        raise HTTPException(409,'Карточка уже заполнена. Обновите страницу')
-    if data.number in saved.get('removed',[]):return {'ok':True}
     if data.number not in empty[data.source]:raise HTTPException(409,'Карточка уже заполнена или недоступна. Обновите страницу')
-    saved.setdefault('removed',[]).append(data.number)
-    if not row:row=DispatchBlankState(work_date=data.work_date,source=data.source);db.add(row)
+    count=sum(o.source==data.source for o in orders)+len(empty[data.source])
+    row,saved=dispatch_compact_slot_count(db,data.work_date,data.source,count-1)
+    if data.request_key:saved.setdefault('delete_requests',[]).append(data.request_key)
     row.payload=json.dumps(saved,ensure_ascii=False);db.commit()
     return {'ok':True}
 
@@ -14175,10 +14168,10 @@ def dispatch_add_blank(data: DispatchBlankInput, db: Session = Depends(get_db), 
     if previous: return {'ok':True,'number':previous}
     mapping,empty=dispatch_slot_layout(db,data.work_date,dispatch_rows(db,data.work_date))
     numbers=[mapping[o.id] for o in dispatch_rows(db,data.work_date) if o.source==data.source]
-    number=max([5,saved.get('limit',5),*numbers,*empty[data.source]])+1
+    number=len(numbers)+len(empty[data.source])+1
     if number>1000: raise HTTPException(409,'Достигнут лимит карточек на день')
-    saved['limit']=number;saved.setdefault('requests',{})[data.request_key]=number
-    if not row: row=DispatchBlankState(work_date=data.work_date,source=data.source);db.add(row)
+    row,saved=dispatch_compact_slot_count(db,data.work_date,data.source,number)
+    saved.setdefault('requests',{})[data.request_key]=number
     row.payload=json.dumps(saved,ensure_ascii=False);db.commit()
     return {'ok':True,'number':number}
 
@@ -14479,8 +14472,12 @@ def dispatch_delete_order(order_id: int, data: DispatchRevision, db: Session = D
     if dispatch_pair_partner(db, order): dispatch_unlink_pair(db, order)
     plan=db.get(DispatchPlan,order.id)
     if order.source=='private' and plan and json.loads(plan.payload).get('private_intake'):
-        private_intake_order_notice(db,order,'ОТМЕНЁН. Номер сохранён.',data.revision,'cancel')
+        private_intake_order_notice(db,order,'ОТМЕНЁН. Нумерация оставшихся заказов обновлена.',data.revision,'cancel')
     for assignment in dispatch_assignments(db,order): db.delete(assignment)
+    active=dispatch_rows(db,order.work_date)
+    _,empty=dispatch_slot_layout(db,order.work_date,active)
+    count=sum(o.source==order.source for o in active)+len(empty[order.source])
+    dispatch_compact_slot_count(db,order.work_date,order.source,count-1)
     order.status='cancelled'
     db.commit()
     return {'ok':True,'id':order.id}
@@ -15367,11 +15364,12 @@ function dispatchColumnCards(data,source){
  return entries.sort((a,b)=>priority(a)-priority(b)||a.number-b.number).map(entry=>entry.order?dispatchMini(entry.order):`<article class="dispatch-mini dispatch-blank"><button type="button" class="dispatch-card-main" data-plan-blank="${entry.number}" data-plan-source="${source}"><header><b>№${entry.number}</b><span></span>📝</header><p>Заполнить заказ</p></button><footer><button type="button" data-plan-delete-blank="${entry.number}" data-plan-empty-source="${source}" aria-label="Удалить пустую карточку №${entry.number}">🗑</button></footer></article>`).join('');
 }
 function confirmDispatchBlankDelete(day,source,number){
+ const deleteKey=dispatchToken();
  showModal('Удалить пустую карточку?',`<div id="dispatchBlankDelete"><p>Действительно хотите удалить пустую карточку №${number} · ${source==='gbu'?'ГБУ':'Частный'}?</p><p data-blank-error role="status"></p><div class="dispatch-tools"><button type="button" data-blank-cancel>Отмена</button><button type="button" data-blank-confirm>Удалить</button></div></div>`);
  const root=qs('#dispatchBlankDelete');qs('[data-blank-cancel]',root).onclick=closeModal;
  qs('[data-blank-confirm]',root).onclick=async()=>{
   const button=qs('[data-blank-confirm]',root);if(button.disabled)return;button.disabled=true;
-  try{await api('/api/dispatch-board/blank',{method:'DELETE',body:JSON.stringify({work_date:day,source,number})});if(qs('#dispatchBlankDelete')===root)closeModal();if(state.selectedDate===day)await loadDispatchBoard()}
+  try{await api('/api/dispatch-board/blank',{method:'DELETE',body:JSON.stringify({work_date:day,source,number,request_key:deleteKey})});if(qs('#dispatchBlankDelete')===root)closeModal();if(state.selectedDate===day)await loadDispatchBoard()}
   catch(error){if(qs('#dispatchBlankDelete')===root){qs('[data-blank-error]',root).textContent=error.message;button.disabled=false}}
  };
 }
@@ -16679,7 +16677,8 @@ def private_intake_targets(db):
 
 def private_intake_info(db,order):
     plan=db.get(DispatchPlan,order.id);meta=json.loads(plan.payload) if plan else {}
-    return {'id':order.id,'number':meta.get('slot_number'),'agent_name':order.agent_name,
+    mapping,_=dispatch_slot_layout(db,order.work_date,dispatch_rows(db,order.work_date))
+    return {'id':order.id,'number':mapping.get(order.id,meta.get('slot_number')),'agent_name':order.agent_name,
         'work_date':str(order.work_date),'cancelled':order.status=='cancelled'}
 
 
@@ -16722,7 +16721,7 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
     if data.action=='start':
         if not data.agent_name.strip():raise HTTPException(422,'Введите агента')
         day=datetime.now(MOSCOW).date()+timedelta(days=1);dispatch_day_lock(db,day)
-        rows=list(db.scalars(select(Order).where(Order.work_date==day,Order.source=='private').order_by(Order.id)))
+        rows=list(db.scalars(select(Order).where(Order.work_date==day,Order.source=='private',Order.status!='cancelled').order_by(Order.id)))
         mapping,_=dispatch_slot_layout(db,day,rows)
         for old in rows:
             plan=db.get(DispatchPlan,old.id)
@@ -16778,9 +16777,13 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
             crew=dispatch_assignments(db,order)
             cancelled_leader=next((a.employee.tg_id for a in crew if a.role=='brigadier' and a.employee),None)
             for assignment in crew:db.delete(assignment)
+            active=dispatch_rows(db,order.work_date)
+            _,empty=dispatch_slot_layout(db,order.work_date,active)
+            count=sum(o.source=='private' for o in active)+len(empty['private'])
+            dispatch_compact_slot_count(db,order.work_date,'private',count-1)
             order.status='cancelled'
             if session and session.order_id==order.id:session.order_id=None
-            notice=f'<b>{escape(heading)}</b>\n<b>ОТМЕНЁН</b>\nНомер сохраняется за заказом.'
+            notice=f'<b>{escape(heading)}</b>\n<b>ОТМЕНЁН</b>\nНумерация оставшихся заказов обновлена.'
     result={'ok':True,**(private_intake_info(db,order) if order else {})}
     deliveries=[]
     if notice:
