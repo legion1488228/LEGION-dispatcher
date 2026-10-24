@@ -16692,6 +16692,8 @@ async def private_intake_deliver(db,event):
     for index in range(count):
         event=db.get(PrivateIntakeEvent,event_key);db.refresh(event,with_for_update=True)
         saved=json.loads(event.payload);target=saved['deliveries'][index]
+        if event_key.startswith('app:') and target['data'].get('chat_id',0)<0 and target['status']=='pending':
+            target['status']='skipped';event.payload=json.dumps(saved,ensure_ascii=False);db.commit();continue
         if target['status']!='pending':db.commit();continue
         target['status']='sending';event.payload=json.dumps(saved,ensure_ascii=False);db.commit()
         try:
@@ -16823,7 +16825,8 @@ def private_intake_order_notice(db,order,notice,revision,action):
     number=json.loads(plan.payload).get('slot_number') if plan else None
     key='app:'+dispatch_hash({'order':order.id,'revision':revision,'action':action})
     if db.get(PrivateIntakeEvent,key):return
-    recipients=set(private_intake_targets(db))
+    # Manual app edits may notify the assigned leader, but never the order inbox chat.
+    recipients=set()
     recipients.update(a.employee.tg_id for a in dispatch_assignments(db,order)
         if a.role=='brigadier' and a.employee and a.employee.tg_id)
     value=f"Частный №{number} · {order.work_date.strftime('%d.%m')} · {order.agent_name}\n{notice}"
