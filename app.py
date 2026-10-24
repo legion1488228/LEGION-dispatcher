@@ -4239,7 +4239,7 @@ def readiness_chat_messages(summary, settings, kind, work_date):
 
 @app.post("/api/readiness/chat/{kind}")
 async def send_readiness_chat_action(kind: Literal["summary", "reminders", "roshcha", "avral"],
-        db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+        work_date: date | None = None, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
     if kind == "roshcha":
         raise HTTPException(409, "Откройте «Выходной» и отметьте сотрудников без заказа.")
     now = datetime.utcnow()
@@ -4251,14 +4251,14 @@ async def send_readiness_chat_action(kind: Literal["summary", "reminders", "rosh
     if last and now - last < timedelta(seconds=30):
         raise HTTPException(429, "Отправка уже запускалась. Повторите через 30 секунд.")
     settings = json.loads(config.payload)
-    day = datetime.now(ZoneInfo("Europe/Moscow")).date() + timedelta(days=1)
+    day = work_date or (datetime.now(ZoneInfo("Europe/Moscow")).date() + timedelta(days=1))
     if kind in ("roshcha", "avral"):
         required = {"brigadier", "main", "cashless", "reserve"}
         configured = {g["group_code"] for g in settings["groups"]}
         missing = required - configured
         if missing:
             raise HTTPException(409, "Не подключены группы: " + ", ".join(GROUP_LABELS[c] for c in sorted(missing)))
-        broadcast_text = ("Завтра ❗️АВРАЛ❗️ОТПИСЫВАЕМСЯ О ГОТОВНОСТИ"
+        broadcast_text = (f"На {day.strftime('%d.%m.%Y')} ❗️АВРАЛ❗️ОТПИСЫВАЕМСЯ О ГОТОВНОСТИ"
                           if kind == "avral" else "❗️Кто не получил заказ-выходной❗️")
         messages = [(chat_id, [broadcast_text])
                     for chat_id in sorted({int(g["chat_id"]) for g in settings["groups"]
@@ -16856,3 +16856,21 @@ async def private_intake_daily_header(db,now=None):
             {'status':'pending','method':'sendMessage','data':{'chat_id':chat,
                 'text':'<b>'+private_intake_day_heading(day)+'</b>','parse_mode':'HTML'}}]},ensure_ascii=False)))
     db.commit()
+
+
+def _readiness_selected_day_html(html):
+    replacements={
+        'const selectedDay=state.selectedDate, day=nextReadinessDay(selectedDay);':'const selectedDay=state.selectedDate, day=selectedDay;',
+        "readinessTargetLabel(nextReadinessDay(day))":"readinessTargetLabel(day)",
+        'prepareReadinessDemand(nextReadinessDay(day));':'prepareReadinessDemand(day);',
+        '/api/readiness/history?work_date=${nextReadinessDay()}&limit=60':'/api/readiness/history?work_date=${state.selectedDate}&limit=60',
+        'api(`/api/readiness/chat/${kind}`,{method:':'api(`/api/readiness/chat/${kind}?work_date=${encodeURIComponent(state.selectedDate)}`,{method:',
+        "api('/api/readiness/chat/avral',{method:":"api('/api/readiness/chat/avral?work_date='+encodeURIComponent(state.selectedDate),{method:"
+    }
+    for old,new in replacements.items():
+        if html.count(old)!=1:raise ValueError('Selected readiness day anchor missing: '+old)
+        html=html.replace(old,new,1)
+    return html
+
+
+INLINE_INDEX_HTML=_readiness_selected_day_html(INLINE_INDEX_HTML)
