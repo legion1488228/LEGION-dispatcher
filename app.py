@@ -16067,6 +16067,106 @@ def _cabinet_carryout_photo_html(html):
 INLINE_INDEX_HTML = _cabinet_carryout_photo_html(INLINE_INDEX_HTML)
 
 
+@app.get('/api/owner/brigadier-cabinet/crew/{card_id}')
+def cabinet_readonly_crew(card_id: int, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    if not _can_use_owner_cabinet(db, user.id):
+        raise HTTPException(403, 'Кабинет недоступен')
+    card = db.scalar(select(NumberCardEvent).where(NumberCardEvent.id == card_id,
+        NumberCardEvent.tg_id == user.id, NumberCardEvent.source == 'gbu', _visible_number_card()))
+    if not card:
+        raise HTTPException(404, 'Заказ ГБУ не найден')
+    order = dispatch_order_for_card(db, card)
+    crew = []
+    if order:
+        for a in sorted(dispatch_assignments(db, order), key=lambda a: a.role != 'brigadier'):
+            p = a.employee
+            crew.append({'name': dispatch_crew_person(_employee_dict(p)), 'leader': a.role == 'brigadier'})
+    else:
+        record = db.get(GbuPayrollRoster, f'card:{card.chat_id}:{card.message_id}')
+        if record:
+            for m in json.loads(record.payload).get('crew', []):
+                crew.append({'name': m['name'], 'leader': m['role'] == 'brigadier'})
+    return JSONResponse({'crew': crew}, headers={'Cache-Control': 'private, no-store'})
+
+
+def _compact_photo_crew_html(html):
+    start = html.index('function bindGbuCrewDisclosure(dialog,card){')
+    end = html.index('\n</script>', start)
+    html = html[:start] + 'function bindGbuCrewDisclosure(dialog,card){}\n' + html[end:]
+    start = html.index('async function dispatchAttachControl(dialog,card){')
+    end = html.index('\n</script>', start)
+    html = html[:start] + r'''async function dispatchAttachControl(dialog,card){
+ if(card.source!=='gbu'||!['owner','assistant'].includes(state.bootstrap?.cabinet_kind))return;
+ const button=dialog.querySelector('[data-gbu-order-roster]');if(!button)return;
+ const panel=document.createElement('section');panel.className='bc-compact-crew';panel.hidden=true;panel.id='compactCrew'+card.id;
+ dialog.querySelector('.bc-viewer-title-row').append(panel);
+ button.setAttribute('aria-expanded','false');button.setAttribute('aria-controls',panel.id);
+ let busy=false;
+ const live=()=>dialog.open&&panel.isConnected;
+ const show=on=>{panel.hidden=!on;button.setAttribute('aria-expanded',String(on))};
+ async function refresh(){
+  if(busy)return;busy=true;panel.textContent='Загрузка состава…';
+  try{
+   const data=await api('/api/dispatch-board/card/'+card.id);if(!live())return;
+   const order=data.order;
+   if(!order){
+    const roster=await api('/api/gbu-staff-payroll/roster/'+card.id);if(!live())return;
+    const crew=roster.confirmed_crew||[];
+    panel.innerHTML=crew.map(m=>`<p>${m.role==='brigadier'?'<strong>':''}${esc(m.employee?dispatch_crew_person_js(m.employee):m.name)}${m.role==='brigadier'?'</strong>':''}</p>`).join('')||'<p>Состав не назначен</p>';
+    panel.insertAdjacentHTML('beforeend','<button type="button" data-crew-legacy>Изменить состав</button>');
+    panel.querySelector('[data-crew-legacy]').onclick=()=>{dialog.close();openGbuOrderRoster(card.id,()=>loadControl(),true)};return;
+   }
+   button.textContent=order.category_label+' · '+order.team_size+' чел. ▾';
+   const people=[order.brigadier,...(order.members||[])].filter(Boolean);
+   panel.innerHTML=people.map(p=>`<p>${p.id===order.brigadier?.id?'<strong>':''}${esc(dispatch_crew_person_js(p))}${p.id===order.brigadier?.id?'</strong>':''}</p>`).join('')||'<p>Состав не назначен</p>';
+   panel.insertAdjacentHTML('beforeend',`<small role="status">${order.approved?'Состав подтверждён':'Ожидает подтверждения'}</small><div class="bc-compact-crew-actions">${order.approved?'':`<button type="button" data-crew-confirm ${!order.composition_complete?'disabled':''}>Подтвердить</button><button type="button" data-crew-change>Изменить</button>`}</div>`);
+   const edit=panel.querySelector('[data-crew-change]');if(edit)edit.onclick=()=>{dialog.close();openDispatchCrew(order,true)};
+   const confirm=panel.querySelector('[data-crew-confirm]');if(confirm)confirm.onclick=async()=>{
+    if(busy)return;busy=true;panel.querySelectorAll('button').forEach(b=>b.disabled=true);
+    try{await api('/api/dispatch-board/orders/'+order.id+'/approve',{method:'POST',body:JSON.stringify({revision:order.revision})});busy=false;if(live())await refresh()}
+    catch(error){if(live()){panel.querySelector('[role=status]').textContent=error.message;panel.querySelectorAll('button').forEach(b=>b.disabled=false)}}finally{busy=false}
+   };
+  }catch(error){if(live()){panel.textContent=error.message;const retry=document.createElement('button');retry.textContent='Повторить';retry.onclick=refresh;panel.append(retry)}}finally{busy=false}
+ }
+ button.onclick=()=>{show(panel.hidden);if(!panel.hidden)refresh()};
+ dialog.addEventListener('click',e=>{if(!panel.hidden&&!panel.contains(e.target)&&!button.contains(e.target))show(false)});
+ dialog.addEventListener('keydown',e=>{if(e.key==='Escape'&&!panel.hidden){e.preventDefault();e.stopPropagation();show(false);button.focus()}},true);
+}
+function dispatch_crew_person_js(p){return [dispatchPerson(p),p.height_cm].filter(Boolean).join(' · ')}
+''' + html[end:]
+    html = html.replace('</body>', r'''<style>
+.bc-photo-viewer .bc-viewer-title-row{position:relative;overflow:visible}
+.bc-photo-viewer .bc-compact-crew[hidden]{display:none!important}
+.bc-photo-viewer .bc-compact-crew{position:absolute;right:0;top:100%;z-index:12;width:min(275px,calc(100vw - 70px));box-sizing:border-box;max-height:240px;overflow:auto;padding:9px 10px;border:1px solid var(--gold);border-radius:10px;background:var(--panel);box-shadow:0 5px 18px #0003;text-align:left;font-size:12px;line-height:1.4}
+.bc-compact-crew p{margin:0 0 3px!important;overflow-wrap:anywhere}.bc-compact-crew strong{font-weight:750}.bc-compact-crew small{display:block;margin-top:5px;color:var(--muted);font-size:11px}
+.bc-compact-crew-actions{display:flex;gap:5px;margin-top:6px}.bc-compact-crew button{min-height:32px;padding:5px 7px;font-size:11px;border:1px solid var(--gold);border-radius:7px;background:var(--panel2);color:var(--gold)}
+.cabinet-readonly-crew{margin:10px 0;padding:10px;border:1px solid var(--line);border-radius:10px;font-size:13px}.cabinet-readonly-crew p{margin:4px 0;overflow-wrap:anywhere}.cabinet-readonly-crew small{color:var(--muted)}
+</style><script>
+const crewOriginalDetail=ownerCabinetDetailHtml;
+ownerCabinetDetailHtml=function(card,data){
+ const result=crewOriginalDetail(card,data);
+ if(card.source!=='gbu')return result;
+ return result.replace('<div class="cabinet-stages">',`<section class="cabinet-readonly-crew" data-readonly-crew="${Number(card.id)}"><b>Назначенный состав</b><div role="status">Загрузка…</div></section><div class="cabinet-stages">`);
+};
+const crewOriginalRender=renderOwnerCabinet;
+renderOwnerCabinet=function(data){
+ crewOriginalRender(data);
+ const root=qs('#ownerCabinetContent'),panel=qs('[data-readonly-crew]',root);if(!panel)return;
+ const id=panel.dataset.readonlyCrew,uid=state.bootstrap?.user?.id;
+ const live=()=>panel.isConnected&&qs('[data-readonly-crew]',root)===panel&&state.bootstrap?.user?.id===uid;
+ const load=async()=>{
+  try{const response=await api('/api/owner/brigadier-cabinet/crew/'+id);if(!live())return;
+   panel.querySelector('[role=status]').innerHTML=response.crew.map(p=>`<p>${p.leader?'<strong>':''}${esc(p.name)}${p.leader?'</strong>':''}</p>`).join('')||'<p>Состав ещё не назначен</p>';
+  }catch(error){if(live()){const status=panel.querySelector('[role=status]');status.textContent='Не удалось загрузить состав. ';const b=document.createElement('button');b.type='button';b.textContent='Повторить';b.onclick=load;status.append(b)}}
+ };load();
+};
+</script></body>''', 1)
+    return html
+
+
+INLINE_INDEX_HTML = _compact_photo_crew_html(INLINE_INDEX_HTML)
+
+
 def _isolated_preview_screen_html():
     html = INLINE_INDEX_HTML
     # No real Telegram SDK, credentials, database session or notifications.
