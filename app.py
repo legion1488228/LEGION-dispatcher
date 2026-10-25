@@ -16913,3 +16913,73 @@ async function openPayrollOrderViewer(order,trigger,body,month,period){
 
 
 INLINE_INDEX_HTML=_payroll_missing_order_viewer_html(INLINE_INDEX_HTML)
+
+
+def _dispatch_editor_keyboard_html(html):
+    anchor="let chooseCrewAfterSave=false;\n const toggleChurch="
+    if html.count(anchor)!=1:raise ValueError('Dispatch editor keyboard anchor missing')
+    html=html.replace(anchor,"let chooseCrewAfterSave=false;\n installDispatchEditorViewport(form);\n const toggleChurch=",1)
+    html=html.replace("function showModal(title, body) {", "function showModal(title, body) {disposeDispatchEditorViewport();",1)
+    html=html.replace("function closeModal(){", "function closeModal(){disposeDispatchEditorViewport();",1)
+    return html.replace('</body>',r'''<style>
+#modal:has(#dispatchEditor){top:var(--order-editor-top,8px);bottom:auto;height:var(--order-editor-height,calc(100dvh - 16px));max-height:var(--order-editor-height,calc(100dvh - 16px));display:flex;flex-direction:column;overflow:hidden;padding:8px 10px;transform:none;left:8px;right:8px;width:auto;max-width:680px;margin:0 auto}
+#modal:has(#dispatchEditor)>.modal-head{flex:none;min-height:28px;margin-bottom:4px}
+#modal:has(#dispatchEditor)>.modal-head h3{font-size:16px}
+#modal:has(#dispatchEditor)>.modal-head .close-btn{width:28px;height:28px;min-height:28px}
+#modal #dispatchEditor{display:flex;flex-direction:column;flex:1;min-height:0;gap:0;overflow:hidden}
+#dispatchEditor .dispatch-editor-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px 7px;align-content:start;flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:0 2px 6px;scroll-padding:6px}
+#dispatchEditor .dispatch-editor-actions{flex:none;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 6px;padding-top:5px;border-top:1px solid var(--line);background:var(--panel)}
+#modal #dispatchEditor .dispatch-editor-actions button[type=submit]{margin:0;min-height:34px}
+#modal #dispatchEditor .dispatch-editor-actions [data-plan-crew]{grid-column:1/-1}
+#modal #dispatchEditor .dispatch-editor-actions .dispatch-crew-status{align-self:center}
+#modal #dispatchEditor .private-source-text{grid-column:1/-1;position:relative;max-height:80px;padding:6px;font-size:12px}
+#modal.order-editor-compact #dispatchEditor .dispatch-editor-fields{gap:3px 6px}
+#modal.order-editor-compact #dispatchEditor label{font-size:10px;gap:1px}
+#modal.order-editor-compact #dispatchEditor input,#modal.order-editor-compact #dispatchEditor select{height:30px;min-height:30px;padding:3px 5px;font-size:16px}
+#modal.order-editor-compact #dispatchEditor .dispatch-route-field{grid-template-columns:88px minmax(0,1fr)}
+#modal.order-editor-compact #dispatchEditor .dispatch-route-field select{font-size:10px}
+#modal.order-editor-compact #dispatchEditor .dispatch-arrival-hint,#modal.order-editor-compact #dispatchEditor .dispatch-crew-hint{display:none}
+#modal.order-editor-compact #dispatchEditor .dispatch-route-title{font-size:11px}
+</style><script>
+let disposeDispatchEditorViewport=()=>{};
+function installDispatchEditorViewport(form){
+ disposeDispatchEditorViewport();
+ const modal=qs('#modal'),viewport=window.visualViewport;
+ const fields=document.createElement('div'),actions=document.createElement('div');
+ fields.className='dispatch-editor-fields';actions.className='dispatch-editor-actions';
+ for(const child of [...form.children]){
+  (child.matches('button,.dispatch-crew-status,[data-plan-error]')?actions:fields).append(child);
+ }
+ form.append(fields,actions);
+ let frame=0,disposed=false;
+ const active=()=>!disposed&&form.isConnected&&!modal.classList.contains('hidden');
+ const update=()=>{
+  frame=0;if(!active())return;
+  const height=viewport?.height||window.innerHeight,top=viewport?.offsetTop||0;
+  modal.style.setProperty('--order-editor-top',Math.round(top+6)+'px');
+  modal.style.setProperty('--order-editor-height',Math.max(0,Math.floor(height-12))+'px');
+  modal.classList.toggle('order-editor-compact',height<600);
+  const input=document.activeElement;
+  if(fields.contains(input)){
+   const rect=input.getBoundingClientRect(),area=fields.getBoundingClientRect();
+   if(rect.bottom>area.bottom-5)fields.scrollTop+=rect.bottom-area.bottom+5;
+   else if(rect.top<area.top+5)fields.scrollTop+=rect.top-area.top-5;
+  }
+ };
+ const schedule=()=>{if(!frame&&!disposed)frame=requestAnimationFrame(update)};
+ viewport?.addEventListener('resize',schedule);viewport?.addEventListener('scroll',schedule);
+ window.addEventListener('resize',schedule);form.addEventListener('focusin',schedule);
+ update();
+ disposeDispatchEditorViewport=()=>{
+  disposed=true;cancelAnimationFrame(frame);
+  viewport?.removeEventListener('resize',schedule);viewport?.removeEventListener('scroll',schedule);
+  window.removeEventListener('resize',schedule);form.removeEventListener('focusin',schedule);
+  modal.classList.remove('order-editor-compact');
+  modal.style.removeProperty('--order-editor-top');modal.style.removeProperty('--order-editor-height');
+  disposeDispatchEditorViewport=()=>{};
+ };
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML=_dispatch_editor_keyboard_html(INLINE_INDEX_HTML)
