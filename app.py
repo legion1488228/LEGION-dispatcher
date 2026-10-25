@@ -4023,26 +4023,6 @@ def free_staff_messages(snapshot, ids, settings, day):
         for chat in sorted(chats):
             messages.append({"chat_id": chat, "label": group["label"],
                              "chunks": readiness_chat_chunks(lines), "done": 0})
-    # The brigadier chat gets one combined list, not a second brigadier-only list.
-    brigadier_chats = [chat for chat, codes in targets.items() if 'brigadier' in codes]
-    if not brigadier_chats or any(targets[chat] != {'brigadier'} for chat in brigadier_chats):
-        raise HTTPException(409, 'Не настроен отдельный чат бригадиров')
-    lines = [f"<b>📋 Свободные на {day.strftime('%d.%m')}</b>",
-             'Для замены утром — можно связаться напрямую.', '']
-    for code in ('brigadier', 'main', 'cashless', 'reserve'):
-        group = next((group for group in snapshot['groups'] if group['code'] == code), None)
-        people = sorted((person for person in group['people'] if person['id'] in selected),
-                        key=lambda person: (person['name'].casefold(), person['metro'].casefold(), person['id'])) if group else []
-        if not people:
-            continue
-        lines.append(f"<b>{escape(group['label'])} · {len(people)}</b>")
-        lines.extend(free_staff_person_lines(people, with_phones=True))
-        lines.append('')
-    lines.append(f'<b>Всего: {len(selected)}</b>')
-    messages = [m for m in messages if m['chat_id'] not in brigadier_chats]
-    for chat in sorted(brigadier_chats):
-        messages.append({'chat_id': chat, 'label': 'Бригадиры — общий список',
-                         'chunks': readiness_chat_chunks(lines), 'done': 0, 'combined_free_staff': True})
     return messages
 
 
@@ -4140,16 +4120,9 @@ async def send_free_staff(data: FreeStaffSelection, db: Session = Depends(get_db
         job = FreeStaffDispatch(request_id=data.request_id, payload=json.dumps(saved), created_by=user.id)
         db.add(job)
         db.flush()
+    # Pending jobs from older versions must not resend the combined phone directory.
+    saved['messages']=[message for message in saved['messages'] if not message.get('combined_free_staff')]
     for message in saved["messages"]:
-        if message.get('combined_free_staff'):
-            if message['done'] >= len(message['chunks']):
-                continue
-            try:
-                await publish_free_staff_group_list(db, day, message)
-                message['done'] = len(message['chunks'])
-            except Exception:
-                message['done'] = 0
-            continue
         while message["done"] < len(message["chunks"]):
             try:
                 ok = await send_telegram_message(message["chat_id"], message["chunks"][message["done"]])
