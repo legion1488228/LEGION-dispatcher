@@ -14642,6 +14642,7 @@ def dispatch_crew_person(person):
 def dispatch_message(order, number):
     source='ГБУ ⬛️' if order['source']=='gbu' else 'Частный'
     lines=[f'<b>Заказ: {source}</b>',
+        f'<b>Дата: {date.fromisoformat(str(order["work_date"])).strftime("%d.%m.%Y")}</b>',
         f'Агент: {escape(order["agent_name"])} · {escape(order["agent_phone"])}',
         f'<b>ум: {escape(order["deceased_name"])}</b>',
         f'{escape(order["category_label"])} · {order["team_size"]} чел.',
@@ -14709,6 +14710,7 @@ def dispatch_activate(data: DispatchActivationInput, db: Session = Depends(get_d
         raise HTTPException(403,'Доступ к кабинету изменён')
     order=db.get(Order,activation['order_id'])
     if not order or order.status in {'cancelled','draft'}:raise HTTPException(409,'Заказ отменён')
+    if order.work_date<datetime.now(MOSCOW).date():raise HTTPException(409,'Дата заказа уже прошла. Автопубликация номера заблокирована.')
     dispatch_day_lock(db,order.work_date)
     item=dispatch_order_data(db,order,0)
     if not dispatch_original_order_delivered(db,item['id'],item['work_date'],data.tg_id):
@@ -14818,6 +14820,8 @@ def dispatch_confirm_receipt(data: DispatchReceiptInput, db: Session = Depends(g
     order=db.get(Order,saved['order_id'])
     if not order or order.status in {'cancelled','draft'}:
         raise HTTPException(409,'Заказ отменён или изменён')
+    if order.work_date<datetime.now(MOSCOW).date():
+        raise HTTPException(409,'Дата заказа уже прошла. Подтверждение недоступно.')
     item=dispatch_order_data(db,order,0)
     leader=item.get('brigadier')
     if not leader or leader.get('tg_id')!=data.tg_id or item['revision']!=saved['revision']:
@@ -14842,6 +14846,17 @@ def dispatch_confirm_receipt(data: DispatchReceiptInput, db: Session = Depends(g
         meta['crew_receipt']=carried;plan.payload=json.dumps(meta,ensure_ascii=False)
     row.payload=json.dumps(saved,ensure_ascii=False);db.commit()
     return {'ok':True,'confirmed_at':saved['confirmed_at'],'activation_status':job.status}
+
+
+def dispatch_pending_order_valid(db,work_date,message):
+    day=date.fromisoformat(str(work_date))
+    if day<datetime.now(MOSCOW).date():return False
+    order=db.get(Order,message.get('order_id'))
+    if not order or order.work_date!=day or order.status in {'cancelled','draft'}:return False
+    item=dispatch_order_data(db,order,0)
+    return bool(not item.get('is_draft') and item.get('composition_complete')
+        and (item.get('brigadier') or {}).get('tg_id')==message.get('chat_id')
+        and item.get('revision')==message.get('revision'))
 
 
 async def dispatch_deliver_messages(db, work_date, messages):
@@ -14869,6 +14884,10 @@ async def dispatch_deliver_messages(db, work_date, messages):
         if message['status']=='sent': sent+=1;db.commit();continue
         if message['status'] in {'sending','unknown'}:
             failed.append(message['label']+' — проверьте доставку вручную');db.commit();continue
+        if message.get('kind')=='order' and not dispatch_pending_order_valid(db,work_date,message):
+            message['status']='skipped';message['skip_reason']='Заказ устарел или изменился получатель/состав'
+            row.payload=json.dumps(message,ensure_ascii=False)
+            failed.append(message['label']+' — заказ устарел, обновите страницу');db.commit();continue
         message['status']='sending';row.payload=json.dumps(message,ensure_ascii=False);db.commit()
         try:
             payload={'chat_id':message['chat_id'],'text':message['text'],'parse_mode':'HTML'}
@@ -14939,7 +14958,7 @@ async def dispatch_deliver_crew_change(db, key):
         db.commit();return saved.get('status')
     order=db.get(Order,saved['order_id'])
     item=dispatch_order_data(db,order,0) if order and order.status not in {'cancelled','draft'} else None
-    if (not item or (item.get('brigadier') or {}).get('tg_id')!=saved['chat_id']
+    if (row.work_date<datetime.now(MOSCOW).date() or not item or (item.get('brigadier') or {}).get('tg_id')!=saved['chat_id']
             or item['revision']!=saved.get('revision')
             or not dispatch_original_order_delivered(db,item['id'],item['work_date'],saved['chat_id'])):
         saved['status']='skipped';row.payload=json.dumps(saved,ensure_ascii=False);db.commit();return 'skipped'
@@ -14979,6 +14998,9 @@ async def dispatch_maintenance(db: Session = Depends(get_db)):
             job=db.get(DispatchDelivery,dispatch_auto_free_key(day))
             saved=json.loads(job.payload)
             if saved.get('status')=='done': db.commit();continue
+            if day<datetime.now(MOSCOW).date():
+                saved.update(status='done',skip_reason='Дата рассылки уже прошла')
+                job.payload=json.dumps(saved,ensure_ascii=False);db.commit();continue
             rows=dispatch_rows(db,day)
             completion=dispatch_control_completion(db,day)
             if not rows or any(o.status=='draft' for o in rows) or not completion or completion['closed']!=len(rows):
@@ -14998,7 +15020,9 @@ async def dispatch_maintenance(db: Session = Depends(get_db)):
                     for chunk in readiness_chat_chunks(lines):
                         messages.append({'chat_id':chat,'text':chunk,'label':group['label'],'status':'pending','kind':'auto_free'})
             if 'messages' in saved:
-                messages=saved['messages']
+                # Legacy batches could contain full orders. This job sends only group lists.
+                messages=[m for m in saved['messages'] if m.get('kind')=='auto_free' and int(m.get('chat_id',0))<0]
+                saved['messages']=messages;job.payload=json.dumps(saved,ensure_ascii=False)
             else:
                 saved['messages']=messages;job.payload=json.dumps(saved,ensure_ascii=False)
             result=await dispatch_deliver_messages(db,day,messages)
@@ -15016,6 +15040,7 @@ async def dispatch_maintenance(db: Session = Depends(get_db)):
 @app.post('/api/dispatch-board/send')
 async def dispatch_send(work_date: date, data: DispatchRevision, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     dispatch_guard(db,user);dispatch_day_lock(db,work_date)
+    if work_date<datetime.now(MOSCOW).date():raise HTTPException(409,'Нельзя отправить бригадирам заказы за прошедший день. Выберите нужную дату.')
     board=dispatch_board_data(db,work_date)
     if board['revision']!=data.revision: raise HTTPException(409,'Заказы или свободные изменились. Обновите страницу')
     if any(x.get('is_draft') for x in board['items']):
@@ -15028,7 +15053,9 @@ async def dispatch_send(work_date: date, data: DispatchRevision, db: Session = D
         if not leader.get('tg_id'): raise HTTPException(409,'У бригадира не указан Telegram ID')
         partner=dispatch_pair_partner(db,db.get(Order,item['id']))
         if partner: dispatch_pair_crews(db,db.get(Order,item['id']),partner)
-        if dispatch_receipt_info(db,item).get('status')!='confirmed':
+        receipt_status=dispatch_receipt_info(db,item).get('status')
+        if receipt_status=='unknown':raise HTTPException(409,'Доставка заказа не подтверждена. Проверьте сообщения у бригадира перед повторной отправкой.')
+        if receipt_status not in {'confirmed','sent'}:
             if not dispatch_original_order_delivered(db,item['id'],item['work_date'],leader['tg_id']):
                 plan=db.get(DispatchPlan,item['id'])
                 if plan:
