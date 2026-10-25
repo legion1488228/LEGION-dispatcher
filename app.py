@@ -16879,3 +16879,37 @@ def _readiness_selected_day_html(html):
 
 
 INLINE_INDEX_HTML=_readiness_selected_day_html(INLINE_INDEX_HTML)
+
+
+def _payroll_missing_order_viewer_html(html):
+    old="qsa('[data-payroll-roster]',body).forEach(b=>b.onclick=()=>openGbuOrderRoster(data.missing[Number(b.dataset.payrollRoster)].card_id,()=>openGbuPayroll(month,period)));"
+    new="qsa('[data-payroll-roster]',body).forEach(b=>b.onclick=()=>openPayrollOrderViewer(data.missing[Number(b.dataset.payrollRoster)],b,body,month,period));"
+    if html.count(old)!=1:raise ValueError('Payroll missing-order click binding missing')
+    html=html.replace(old,new,1)
+    return html.replace('</body>',r'''<script>
+async function openPayrollOrderViewer(order,trigger,body,month,period){
+ if(trigger.disabled)return;
+ trigger.disabled=true;
+ const live=()=>body.isConnected&&qs('#gbuPayrollBody')===body&&!qs('#modal').classList.contains('hidden');
+ try{
+  const data=await api('/api/owner/brigade-control?work_date='+encodeURIComponent(order.date),{cache:'no-store'});
+  if(!live())return;
+  const card=(data.items||[]).find(item=>Number(item.id)===Number(order.card_id));
+  if(!card)throw new Error('Заказ не найден. Обновите список зарплаты.');
+  openControlReportViewer(card,1,trigger);
+  const dialog=document.querySelector('.bc-photo-viewer');if(!dialog?.open)return;
+  let button=dialog.querySelector('[data-gbu-order-roster]');
+  if(!button){
+   button=document.createElement('button');button.type='button';button.className='bc-viewer-category';
+   button.dataset.gbuOrderRoster='';button.textContent='Состав ▾';
+   dialog.querySelector('.bc-viewer-title-row').append(button);
+   dispatchAttachControl(dialog,card);
+  }
+  button.click();
+  dialog.addEventListener('close',()=>{if(live())openGbuPayroll(month,period)},{once:true});
+ }catch(error){if(live())toast(error.message,5000)}finally{if(trigger.isConnected)trigger.disabled=false}
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML=_payroll_missing_order_viewer_html(INLINE_INDEX_HTML)
