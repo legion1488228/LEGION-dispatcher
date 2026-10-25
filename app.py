@@ -16983,3 +16983,31 @@ function installDispatchEditorViewport(form){
 
 
 INLINE_INDEX_HTML=_dispatch_editor_keyboard_html(INLINE_INDEX_HTML)
+
+
+def _gbu_agent_domestic_phone_html(html):
+    start=html.index('async function copyGbuAgentPhone(value){')
+    end=html.index('\nlet cashReminderSending=',start)
+    part=html[start:end]
+    changes={
+        "const phone=String(value??'').trim();":"const phone=gbuAgentDomesticPhone(value);",
+        "const phone=String(x.phone||'').trim();":"const phone=gbuAgentDomesticPhone(x.phone);",
+        "phone.value=agent.phone||'';":"phone.value=gbuAgentDomesticPhone(agent.phone);",
+        'placeholder="+7 999 123-45-67"':'placeholder="8 999 123-45-67"',
+        "const id=++request,q=encodeURIComponent(search.value.trim());":"const id=++request,query=search.value.trim(),digits=query.replace(/\\D/g,'');\n  const q=encodeURIComponent(/^[+0-9\\s()\\-]+$/.test(query)&&digits.length>1&&digits.startsWith('8')?'+7'+digits.slice(1):query);"
+    }
+    for old,new in changes.items():
+        if part.count(old)!=1:raise ValueError('GBU domestic phone anchor missing: '+old)
+        part=part.replace(old,new,1)
+    helper=r'''function gbuAgentDomesticPhone(value){
+ const raw=String(value??'').trim(),digits=raw.replace(/\D/g,'');
+ if(!/^[+0-9\s()\-]+$/.test(raw))return raw;
+ if(digits.length===11&&/^[78]/.test(digits))return '8'+digits.slice(1);
+ if(digits.length===10&&!raw.startsWith('+'))return '8'+digits;
+ return raw;
+}
+'''
+    return html[:start]+helper+part+html[end:]
+
+
+INLINE_INDEX_HTML=_gbu_agent_domestic_phone_html(INLINE_INDEX_HTML)
