@@ -14094,7 +14094,7 @@ def dispatch_workloads(db, day, exclude_order_id=None):
 def dispatch_slot_layout(db, day, rows):
     mapping={};empty={}
     for source in ('private','gbu'):
-        active=[o for o in rows if o.source==source and o.status!='cancelled']
+        active=[o for o in rows if o.work_date==day and o.source==source and o.status!='cancelled']
         active.sort(key=(lambda o:(dispatch_gbu_elite_priority(o),o.id)) if source=='gbu' else (lambda o:o.id))
         for number,order in enumerate(active,1):mapping[order.id]=number
         state=db.get(DispatchBlankState,(day,source))
@@ -16710,8 +16710,11 @@ def private_intake_targets(db):
 
 def private_intake_info(db,order):
     plan=db.get(DispatchPlan,order.id);meta=json.loads(plan.payload) if plan else {}
-    mapping,_=dispatch_slot_layout(db,order.work_date,dispatch_rows(db,order.work_date))
-    return {'id':order.id,'number':mapping.get(order.id,meta.get('slot_number')),'agent_name':order.agent_name,
+    rows=dispatch_rows(db,order.work_date)
+    mapping,_=dispatch_slot_layout(db,order.work_date,rows)
+    number=(private_intake_chat_numbers(db,order.work_date,rows).get(order.id,meta.get('chat_number'))
+        if meta.get('private_intake') else mapping.get(order.id,meta.get('slot_number')))
+    return {'id':order.id,'number':number,'agent_name':order.agent_name,
         'work_date':str(order.work_date),'cancelled':order.status=='cancelled'}
 
 
@@ -16771,14 +16774,17 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
             if plan:
                 meta=json.loads(plan.payload)
                 if not meta.get('slot_number'):meta['slot_number']=mapping[old.id];plan.payload=json.dumps(meta,ensure_ascii=False)
-        number=max(mapping.values(),default=0)+1
+        # Numbering belongs to the target work date, never to the operator's
+        # previous session, a saved slot, or orders from another day/source.
+        slot_number=private_intake_next_number(day,rows)
+        number=len(private_intake_chat_numbers(db,day,rows))+1
         if number>1000:raise HTTPException(409,'Лимит заказов на день')
         order=Order(public_id=_public_id(),source='private',work_date=day,issue_time=time(0,0),arrival_time=None,
             deceased_name='',route='',category='',team_size=0,organization=data.agent_name.strip(),notes='',kickback_rub=0,
             agent_name=data.agent_name.strip(),agent_phone=data.agent_phone.strip(),other_agent_phone='',status='draft')
         db.add(order);db.flush()
         db.add(DispatchPlan(order_id=order.id,request_key=dispatch_hash({'intake':key})[:32],payload=json.dumps({
-            'slot_number':number,'private_intake':True,'source_messages':[],
+            'slot_number':slot_number,'chat_number':number,'private_intake':True,'source_messages':[],
             'missing_fields':['category','team_size','deceased_name','issue_time']},ensure_ascii=False)))
         if not session:session=PrivateIntakeSession(tg_id=data.tg_id);db.add(session)
         session.order_id=order.id
@@ -16793,7 +16799,7 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
         if order.status=='cancelled':raise HTTPException(409,'Заказ отменён')
         plan=db.get(DispatchPlan,order.id)
         if not plan:raise HTTPException(409,'Заказ не поддерживает этот режим')
-        meta=json.loads(plan.payload);number=meta.get('slot_number')
+        meta=json.loads(plan.payload);number=private_intake_info(db,order)['number']
         heading=f'Частный №{number} · {order.work_date.strftime("%d.%m")} · {order.agent_name}'
         if data.action=='resume':
             if not session:session=PrivateIntakeSession(tg_id=data.tg_id);db.add(session)
@@ -16865,6 +16871,21 @@ def private_intake_order_notice(db,order,notice,revision,action):
     db.add(PrivateIntakeEvent(key=key,payload=json.dumps({'result':{'ok':True},'deliveries':[
         {'status':'pending','method':'sendMessage','data':{'chat_id':chat,'text':escape(value),'parse_mode':'HTML'}}
         for chat in sorted(recipients)]},ensure_ascii=False)))
+
+
+def private_intake_chat_numbers(db,day,rows):
+    # Group numbering ignores manual reservations, even on the same work date.
+    orders=[]
+    for order in sorted(rows,key=lambda o:o.id):
+        if order.work_date!=day or order.source!='private' or order.status=='cancelled':continue
+        plan=db.get(DispatchPlan,order.id)
+        if plan and json.loads(plan.payload).get('private_intake'):orders.append(order)
+    return {order.id:number for number,order in enumerate(orders,1)}
+
+
+def private_intake_next_number(day,rows):
+    return 1+sum(1 for order in rows if order.work_date==day
+        and order.source=='private' and order.status!='cancelled')
 
 
 def private_intake_day_heading(day):
