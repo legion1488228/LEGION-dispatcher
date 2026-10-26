@@ -16709,6 +16709,9 @@ def private_intake_targets(db):
 
 
 def private_intake_info(db,order):
+    # Sessions with autoflush disabled must persist the new DispatchPlan before
+    # reading its intake marker; otherwise the response falls back to app slots.
+    db.flush()
     plan=db.get(DispatchPlan,order.id);meta=json.loads(plan.payload) if plan else {}
     rows=dispatch_rows(db,order.work_date)
     mapping,_=dispatch_slot_layout(db,order.work_date,rows)
