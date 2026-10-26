@@ -16782,13 +16782,21 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
         slot_number=private_intake_next_number(day,rows)
         number=len(private_intake_chat_numbers(db,day,rows))+1
         if number>1000:raise HTTPException(409,'Лимит заказов на день')
-        order=Order(public_id=_public_id(),source='private',work_date=day,issue_time=time(0,0),arrival_time=None,
-            deceased_name='',route='',category='',team_size=0,organization=data.agent_name.strip(),notes='',kickback_rub=0,
-            agent_name=data.agent_name.strip(),agent_phone=data.agent_phone.strip(),other_agent_phone='',status='draft')
-        db.add(order);db.flush()
-        db.add(DispatchPlan(order_id=order.id,request_key=dispatch_hash({'intake':key})[:32],payload=json.dumps({
-            'slot_number':slot_number,'chat_number':number,'private_intake':True,'source_messages':[],
-            'missing_fields':['category','team_size','deceased_name','issue_time']},ensure_ascii=False)))
+        order=private_intake_reservation(db,day,rows,data.agent_name)
+        if order:
+            plan=db.get(DispatchPlan,order.id);meta=json.loads(plan.payload)
+            meta.update(private_intake=True,chat_number=number)
+            meta.setdefault('source_messages',[])
+            plan.payload=json.dumps(meta,ensure_ascii=False)
+            if not order.agent_phone and data.agent_phone.strip():order.agent_phone=data.agent_phone.strip()
+        else:
+            order=Order(public_id=_public_id(),source='private',work_date=day,issue_time=time(0,0),arrival_time=None,
+                deceased_name='',route='',category='',team_size=0,organization=data.agent_name.strip(),notes='',kickback_rub=0,
+                agent_name=data.agent_name.strip(),agent_phone=data.agent_phone.strip(),other_agent_phone='',status='draft')
+            db.add(order);db.flush()
+            db.add(DispatchPlan(order_id=order.id,request_key=dispatch_hash({'intake':key})[:32],payload=json.dumps({
+                'slot_number':slot_number,'chat_number':number,'private_intake':True,'source_messages':[],
+                'missing_fields':['category','team_size','deceased_name','issue_time']},ensure_ascii=False)))
         if not session:session=PrivateIntakeSession(tg_id=data.tg_id);db.add(session)
         session.order_id=order.id
         notice=f'<b><u>{number} заказ</u></b>: {escape(order.agent_name)} 👇'
@@ -16876,14 +16884,32 @@ def private_intake_order_notice(db,order,notice,revision,action):
         for chat in sorted(recipients)]},ensure_ascii=False)))
 
 
+def private_intake_reservation(db,day,rows,agent):
+    name=' '.join(agent.split()).casefold()
+    matches=[]
+    for order in rows:
+        if order.work_date!=day or order.source!='private' or order.status!='draft':continue
+        names={' '.join(str(value or '').split()).casefold() for value in (order.agent_name,order.organization)}
+        if name not in names:continue
+        plan=db.get(DispatchPlan,order.id)
+        if not plan or plan.approved_card_id:continue
+        meta=json.loads(plan.payload)
+        if meta.get('private_intake') or meta.get('source_messages') or dispatch_assignments(db,order):continue
+        matches.append(order)
+    if len(matches)>1:raise HTTPException(409,'Найдено несколько броней от этого агента на эту дату. Уточните их в приложении перед добавлением заказа.')
+    return matches[0] if matches else None
+
+
 def private_intake_chat_numbers(db,day,rows):
     # Group numbering ignores manual reservations, even on the same work date.
     orders=[]
     for order in sorted(rows,key=lambda o:o.id):
         if order.work_date!=day or order.source!='private' or order.status=='cancelled':continue
         plan=db.get(DispatchPlan,order.id)
-        if plan and json.loads(plan.payload).get('private_intake'):orders.append(order)
-    return {order.id:number for number,order in enumerate(orders,1)}
+        meta=json.loads(plan.payload) if plan else {}
+        if meta.get('private_intake'):orders.append((meta.get('chat_number') or len(orders)+1,order))
+    orders.sort(key=lambda entry:(entry[0],entry[1].id))
+    return {order.id:number for number,(_,order) in enumerate(orders,1)}
 
 
 def private_intake_next_number(day,rows):
