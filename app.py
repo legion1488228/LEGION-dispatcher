@@ -17230,3 +17230,81 @@ function dispatchSummaryPanel(data){
 
 
 INLINE_INDEX_HTML=_dispatch_summary_panel_html(INLINE_INDEX_HTML)
+
+
+def _gbu_payroll_missing_first_html(html):
+    start=html.index('async function openGbuPayroll(')
+    first=html.index('  body.innerHTML=`',start)
+    end=html.index('`;',first)
+    template=html[first:end]
+    marker='${data.missing.length?'
+    split=template.index(marker)
+    prefix='  body.innerHTML=`'
+    main=template[len(prefix):split]
+    missing=template[split:]
+    note='<p class="muted">Первое фото отмечено, но состав сотрудников не сохранён. Эти заказы пока не включены в начисления.</p>'
+    if missing.count(note)!=1:raise ValueError('Payroll missing note anchor missing')
+    missing=missing.replace(note,'',1)
+    html=html[:first]+prefix+missing+main+html[end:]
+    return html
+
+
+INLINE_INDEX_HTML=_gbu_payroll_missing_first_html(INLINE_INDEX_HTML)
+
+
+def _order_breakdown_copy_reconciliation_html(html):
+    old=" qs('#orderBreakdownBack').onclick=back;"
+    new=old+r'''
+ if(source==='gbu'){
+  const button=document.createElement('button');button.type='button';button.className='secondary order-reconciliation-copy';button.textContent='Сверка';button.setAttribute('aria-label','Скопировать сверку');
+  qs('#modal .modal-head').insertBefore(button,qs('#closeModal'));
+  button.onclick=()=>copyOrderReconciliation(orderReconciliationText(values,options),button);
+ }'''
+    if html.count(old)!=1:raise ValueError('Order breakdown copy anchor missing')
+    html=html.replace(old,new,1)
+    return html.replace('</body>',r'''<style>
+#modal:has(#orderCountBreakdown) .modal-head{gap:8px}
+#modal:has(#orderCountBreakdown) .modal-head h3{flex:1;min-width:0}
+#modal .order-reconciliation-copy{flex:0 0 auto;padding:7px 10px;min-height:34px;font-size:12px;color:var(--gold);border:1px solid var(--gold);border-radius:9px}
+</style><script>
+function reconciliationNoun(n,one,few,many){
+ const x=Math.abs(n)%100,y=x%10;return x>=11&&x<=14?many:y===1?one:y>=2&&y<=4?few:many;
+}
+function orderReconciliationText(values,options){
+ const {month,day,period,source,days}=options;
+ const mm=Number(month.slice(5,7)),last=Number(days)||new Date(Number(month.slice(0,4)),mm,0).getDate();
+ const from=period==='second'?16:1,to=period==='first'?15:last;
+ const range=day?`${Number(day.slice(8,10))}.${mm}`:`${from}.${mm}-${to}.${mm}`;
+ const selected=source==='all'?['private','gbu']:[source],counts={},labels={standard:'СТАНДАРТ',vip:'ВИП',elite:'ЭЛИТ',carryout:'ВЫНОС'};
+ let total=0,unknown=0;
+ selected.forEach(key=>{
+  const details=values.sources[key];total+=Number(details.total)||0;unknown+=Number(details.unallocated)||0;
+  Object.entries(details.counts||{}).forEach(([key,count])=>{counts[key]=(counts[key]||0)+(Number(count)||0)});
+ });
+ const blocks=['СВЕРКА',range];
+ Object.entries(labels).forEach(([category,label])=>{
+  const rows=Object.entries(counts).filter(([key,count])=>key.split(':')[0]===category&&count>0).sort(([a],[b])=>Number(b.split(':')[1])-Number(a.split(':')[1]));
+  if(!rows.length)return;
+  const count=rows.reduce((sum,[,n])=>sum+n,0);
+  blocks.push('',`${label} (${count} ${reconciliationNoun(count,'заказ','заказа','заказов')})`);
+  rows.forEach(([key,n])=>{const size=Number(key.split(':')[1]);blocks.push(`${n} ${reconciliationNoun(n,'заказ','заказа','заказов')} - ${size} чел${size===6?' (колода)':''}`)});
+ });
+ if(unknown>0)blocks.push('',`БЕЗ КАТЕГОРИИ (${unknown} ${reconciliationNoun(unknown,'заказ','заказа','заказов')})`);
+ blocks.push('',`итого ${total} ${reconciliationNoun(total,'заказ','заказа','заказов')}`,'',`${total} ${reconciliationNoun(total,'машина','машины','машин')}`);
+ return blocks.join('\n');
+}
+async function copyOrderReconciliation(text,button){
+ let copied=false;
+ try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(text);copied=true}}catch(error){}
+ if(!copied){
+  const modal=qs('#modal'),active=document.activeElement,top=modal.scrollTop,field=document.createElement('textarea');
+  field.value=text;field.readOnly=true;field.style.cssText='position:fixed;top:0;left:0;opacity:0;font-size:16px';modal.append(field);
+  try{field.focus({preventScroll:true});field.select();field.setSelectionRange(0,text.length);copied=Boolean(document.execCommand('copy'))}catch(error){}
+  finally{field.remove();if(active?.isConnected)active.focus({preventScroll:true});modal.scrollTop=top}
+ }
+ toast(copied?'Сверка скопирована':'Не удалось скопировать сверку. Нажмите ещё раз.');
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML=_order_breakdown_copy_reconciliation_html(INLINE_INDEX_HTML)
