@@ -17183,14 +17183,15 @@ INLINE_INDEX_HTML=_dispatch_scroll_and_source_copy_html(INLINE_INDEX_HTML)
 
 
 def _dispatch_pair_caption_html(html):
-    old='const head=`<header><b>№${o.number} · ${esc(title)}</b></header>`;'
-    new="""const paired=o.paired_order;
- const pairCaption=paired?`<small class="dispatch-pair-caption">Совмещён с №${esc(String(paired.number))} ${paired.source==='gbu'?'ГБУ':'частн.'}</small>`:'';
- const head=`<header><b>№${o.number} · ${esc(title)}</b>${pairCaption}</header>`;"""
-    if html.count(old)!=1:raise ValueError('Dispatch pair caption anchor missing')
+    old='>Х2</button><button type="button" class="dispatch-card-main"'
+    new='''>${o.paired_order?`<span class="dispatch-pair-plus">+</span><span class="dispatch-pair-number">№${esc(String(o.paired_order.number))}</span><span class="dispatch-pair-source">${o.paired_order.source==='gbu'?'ГБУ':'Частн.'}</span>`:'Х2'}</button><button type="button" class="dispatch-card-main"'''
+    if html.count(old)!=1:raise ValueError('Dispatch pair button anchor missing')
     html=html.replace(old,new,1)
     return html.replace('</head>',r'''<style>
-#dispatchActionsView .dispatch-mini header .dispatch-pair-caption{display:block;margin-top:3px;font-size:11px;line-height:1.3;font-weight:600;color:var(--text);white-space:normal;overflow-wrap:anywhere}
+#dispatchActionsView .dispatch-mini .dispatch-pair-corner.is-paired{height:50px;min-height:50px;flex-direction:column;gap:2px;padding:3px 0;white-space:nowrap}
+#dispatchActionsView .dispatch-pair-plus{font-size:13px;line-height:12px}
+#dispatchActionsView .dispatch-pair-number{font-size:12px;line-height:13px}
+#dispatchActionsView .dispatch-pair-source{font-size:9px;line-height:11px}
 </style></head>''',1)
 
 
