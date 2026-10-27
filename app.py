@@ -17279,14 +17279,14 @@ def _order_breakdown_copy_reconciliation_html(html):
     new=old+r'''
  if(source==='gbu'){
   const button=document.createElement('button');button.type='button';button.className='secondary order-reconciliation-copy';button.textContent='Сверка';button.setAttribute('aria-label','Скопировать сверку');
-  qs('#modal .modal-head').insertBefore(button,qs('#closeModal'));
+  const backButton=qs('#orderBreakdownBack'),toolbar=document.createElement('div');toolbar.className='order-breakdown-actions';backButton.before(toolbar);toolbar.append(backButton,button);
   button.onclick=()=>copyOrderReconciliation(orderReconciliationText(values,options),button);
  }'''
     if html.count(old)!=1:raise ValueError('Order breakdown copy anchor missing')
     html=html.replace(old,new,1)
     return html.replace('</body>',r'''<style>
-#modal:has(#orderCountBreakdown) .modal-head{gap:8px}
-#modal:has(#orderCountBreakdown) .modal-head h3{flex:1;min-width:0}
+#orderCountBreakdown .order-breakdown-actions{display:flex;align-items:center;justify-content:space-between;gap:8px}
+#orderCountBreakdown .order-breakdown-actions #orderBreakdownBack{min-width:0;margin:0}
 #modal .order-reconciliation-copy{flex:0 0 auto;padding:7px 10px;min-height:34px;font-size:12px;color:var(--gold);border:1px solid var(--gold);border-radius:9px}
 </style><script>
 function reconciliationNoun(n,one,few,many){
