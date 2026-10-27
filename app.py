@@ -17133,3 +17133,61 @@ def _gbu_agent_domestic_phone_html(html):
 
 
 INLINE_INDEX_HTML=_gbu_agent_domestic_phone_html(INLINE_INDEX_HTML)
+
+
+def _dispatch_scroll_and_source_copy_html(html):
+    old=" // Measure without the previous equal height, so changing width or removing"
+    new=""" const scrollNodes=[...new Set([document.scrollingElement,...qsa('*',root)])].filter(el=>el&&el.scrollTop>0);
+ const scrollPositions=scrollNodes.map(el=>[el,el.scrollTop,el.scrollLeft]);
+ // Measure without the previous equal height, so changing width or removing"""
+    if html.count(old)!=1:raise ValueError('Dispatch size measurement anchor missing')
+    html=html.replace(old,new,1)
+    old=" if(height)root.style.setProperty('--dispatch-card-height',height+'px');\n}"
+    if html.count(old)!=1:raise ValueError('Dispatch size restore anchor missing')
+    html=html.replace(old," if(height)root.style.setProperty('--dispatch-card-height',height+'px');\n for(const [el,top,left] of scrollPositions){el.scrollTop=top;el.scrollLeft=left}\n}",1)
+    anchor=' installDispatchEditorViewport(form);'
+    if html.count(anchor)!=1:raise ValueError('Dispatch copy source anchor missing')
+    html=html.replace(anchor,anchor+"\n installDispatchSourceCopy(form,order?.source_messages||[]);",1)
+    return html.replace('</body>',r'''<style>
+#dispatchActionsView{overflow-anchor:none}
+#dispatchEditor .private-source-text,#dispatchEditor .private-source-text p{user-select:text;-webkit-user-select:text;-webkit-touch-callout:default}
+#dispatchEditor .private-source-copy{float:right;position:sticky;top:0;min-height:30px;padding:4px 8px;margin:0 0 4px 8px;background:var(--panel);z-index:1;user-select:none}
+</style><script>
+function installDispatchSourceCopy(form,messages){
+ const section=form.querySelector('.private-source-text');if(!section)return;
+ const text=messages.map(m=>String(m.text||'')).filter(t=>t.trim()).join('\n\n');
+ if(!text)return;
+ const button=document.createElement('button');button.type='button';button.className='private-source-copy secondary';button.textContent='Скопировать';
+ section.prepend(button);
+ button.onclick=async()=>{
+  let copied=false;
+  try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(text);copied=true}}catch(error){}
+  if(!copied){
+   const active=document.activeElement,field=document.createElement('textarea');
+   field.value=text;field.readOnly=true;field.style.cssText='position:fixed;top:0;left:0;opacity:0;font-size:16px';
+   form.append(field);
+   try{field.focus({preventScroll:true});field.select();field.setSelectionRange(0,text.length);copied=!!document.execCommand('copy')}catch(error){}
+   finally{field.remove();if(active?.isConnected)active.focus({preventScroll:true})}
+  }
+  toast(copied?'Текст заказа скопирован':'Не удалось скопировать. Выделите текст в окошке и нажмите «Копировать».');
+ };
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML=_dispatch_scroll_and_source_copy_html(INLINE_INDEX_HTML)
+
+
+def _dispatch_pair_caption_html(html):
+    old='const head=`<header><b>№${o.number} · ${esc(title)}</b></header>`;'
+    new="""const paired=o.paired_order;
+ const pairCaption=paired?`<small class="dispatch-pair-caption">Совмещён с №${esc(String(paired.number))} ${paired.source==='gbu'?'ГБУ':'частн.'}</small>`:'';
+ const head=`<header><b>№${o.number} · ${esc(title)}</b>${pairCaption}</header>`;"""
+    if html.count(old)!=1:raise ValueError('Dispatch pair caption anchor missing')
+    html=html.replace(old,new,1)
+    return html.replace('</head>',r'''<style>
+#dispatchActionsView .dispatch-mini header .dispatch-pair-caption{display:block;margin-top:3px;font-size:11px;line-height:1.3;font-weight:600;color:var(--text);white-space:normal;overflow-wrap:anywhere}
+</style></head>''',1)
+
+
+INLINE_INDEX_HTML=_dispatch_pair_caption_html(INLINE_INDEX_HTML)
