@@ -17201,3 +17201,31 @@ INLINE_INDEX_HTML=INLINE_INDEX_HTML.replace('</head>',r'''<style>
 #modal #dispatchEditor>.private-source-text .private-source-copy{position:static}
 #dispatchEditor .dispatch-editor-fields{overflow-anchor:none;scroll-behavior:auto}
 </style></head>''',1)
+
+
+def _dispatch_summary_panel_html(html):
+    start=html.index('<div class="dispatch-overview">',html.index('async function loadDispatchBoard(){'))
+    end=html.index('<div class="dispatch-columns" data-plan-headings>',start)
+    html=html[:start]+'${dispatchSummaryPanel(data)}'+html[end:]
+    return html.replace('</body>',r'''<style>
+.dispatch-summary-panel{margin:8px 0 10px}
+.dispatch-summary-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.dispatch-summary-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--panel)}
+.dispatch-summary-stat{display:flex;flex-direction:column;justify-content:center;align-items:center;min-width:0;padding:12px 3px;gap:5px;text-align:center}
+.dispatch-summary-stat+ .dispatch-summary-stat{border-left:1px solid var(--line)}
+.dispatch-summary-stat b{font-size:clamp(17px,5vw,28px);line-height:1.15;white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--text)}
+.dispatch-summary-stat small{font-size:11px;line-height:1.2;color:var(--muted)}
+.dispatch-summary-free{background:rgba(185,149,71,.12)}
+.dispatch-summary-free b{color:var(--gold)}
+.dispatch-summary-actions{display:flex;justify-content:flex-end;margin-top:6px}
+.dispatch-summary-actions [data-plan-comment]{padding:5px 9px;min-height:30px;font-size:11px;border:1px solid var(--gold);border-radius:8px;background:transparent;color:var(--gold)}
+</style><script>
+function dispatchSummaryPanel(data){
+ const ready=Number(data.ready_staff)||0,gross=Number(data.requested_staff)||0,effective=Number(data.requested_staff_effective??gross)||0;
+ const free=dispatchStaffCount(ready-gross,ready-effective),total=(Number(data.counts?.private)||0)+(Number(data.counts?.gbu)||0);
+ return `<div class="dispatch-summary-panel"><div class="dispatch-summary-stats"><div class="dispatch-summary-pair"><div class="dispatch-summary-stat"><b data-plan-total-orders>${total}</b><small>Заказов</small></div><div class="dispatch-summary-stat"><b data-plan-requested>${dispatchStaffCount(gross,effective)}</b><small>Запрошено</small></div></div><div class="dispatch-summary-pair"><div class="dispatch-summary-stat"><b data-plan-ready>${ready}</b><small>Готовы</small></div><div class="dispatch-summary-stat dispatch-summary-free"><b data-plan-available>${free}</b><small>Свободные</small></div></div></div><div class="dispatch-summary-actions"><button type="button" data-plan-comment>Комментарий</button></div></div>`;
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML=_dispatch_summary_panel_html(INLINE_INDEX_HTML)
