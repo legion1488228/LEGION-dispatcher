@@ -8324,8 +8324,8 @@ class CabinetCashInput(BaseModel):
     request_id: str = Field(min_length=1, max_length=64)
     tg_id: StrictInt
     report_key: str = Field(pattern=r'^card:-?\d+:\d+$')
-    category: Literal['standard','vip','elite']
-    team_size: StrictInt = Field(ge=3, le=6)
+    category: Literal['standard','vip','elite','carryout']
+    team_size: StrictInt = Field(ge=2, le=6)
     commission: StrictInt = Field(ge=0, le=10000000)
     kickback: StrictInt = Field(ge=0, le=10000000)
     reserve: StrictInt = Field(ge=0, le=6)
@@ -8352,7 +8352,7 @@ def cabinet_finance_access(db, uid):
 def cabinet_cash_dict(row):
     return {'entry_key': f'cabinet:{row.event_id}:{row.tg_id}', 'source': 'cabinet',
         'event_id': row.event_id, 'work_date': row.work_date.isoformat(), 'surname': row.surname,
-        'category': row.category, 'category_label': {'standard':'Стандарт','vip':'Вип','elite':'Элит'}[row.category],
+        'category': row.category, 'category_label': {'standard':'Стандарт','vip':'Вип','elite':'Элит','carryout':'Вынос'}[row.category],
         'team_size': row.team_size, 'commission': row.commission, 'kickback': row.kickback,
         'reserve': row.reserve, 'cash': row.commission, 'version': row.version}
 
@@ -8411,7 +8411,8 @@ def cabinet_cash_save(data: CabinetCashInput, db: Session = Depends(get_db)):
     if card.source != 'private':
         raise HTTPException(422, 'Касса на этом этапе заполняется только для частного заказа')
     cabinet_check_assigned_values(db, card, {'category': data.category, 'team_size': data.team_size}, required=True)
-    if data.team_size not in (3, 4, 5, 6) or data.reserve > data.team_size:
+    allowed_sizes=(2,3,4) if data.category=='carryout' else (3,4,5,6)
+    if data.team_size not in allowed_sizes or data.reserve > data.team_size:
         raise HTTPException(422, 'Проверьте состав бригады и количество резерва')
     meta = cabinet_extra_state(db, card)
     if not meta.get('prepared') and not number_card_statuses(db, [card])[card.id]['closed']:
