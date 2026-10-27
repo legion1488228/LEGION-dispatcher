@@ -17181,19 +17181,32 @@ def _dispatch_scroll_and_source_copy_html(html):
 </style><script>
 function installDispatchSourceCopy(form,messages){
  const section=form.querySelector('.private-source-text');if(!section)return;
- const text=messages.map(m=>String(m.text||'')).filter(t=>t.trim()).join('\n\n');
- if(!text)return;
+ const fullText=messages.map(m=>String(m.text||'')).filter(t=>t.trim()).join('\n\n');
+ if(!fullText)return;
  const button=document.createElement('button');button.type='button';button.className='private-source-copy secondary';button.textContent='Скопировать';
- section.prepend(button);
+ const header=document.createElement('div'),content=document.createElement('div');
+ header.className='private-source-toolbar';content.className='private-source-content';
+ const heading=section.querySelector(':scope>b');
+ if(heading)header.append(heading);
+ for(const child of [...section.childNodes])content.append(child);
+ header.append(button);section.append(header,content);
+ button.title='Скопировать выделенный текст или всё сообщение';
+ button.addEventListener('pointerdown',event=>event.preventDefault());
+ button.addEventListener('mousedown',event=>event.preventDefault());
  button.onclick=async()=>{
+  const selection=window.getSelection?.();
+  const selected=selection&&!selection.isCollapsed&&content.contains(selection.anchorNode)&&content.contains(selection.focusNode)?selection.toString():'';
+  const text=selected.trim()?selected:fullText;
   let copied=false;
   try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(text);copied=true}}catch(error){}
   if(!copied){
    const active=document.activeElement,field=document.createElement('textarea');
+   const caretStart=active?.selectionStart,caretEnd=active?.selectionEnd,caretDirection=active?.selectionDirection;
+   const fields=form.querySelector('.dispatch-editor-fields'),scrollTop=fields?.scrollTop;
    field.value=text;field.readOnly=true;field.style.cssText='position:fixed;top:0;left:0;opacity:0;font-size:16px';
    form.append(field);
    try{field.focus({preventScroll:true});field.select();field.setSelectionRange(0,text.length);copied=!!document.execCommand('copy')}catch(error){}
-   finally{field.remove();if(active?.isConnected)active.focus({preventScroll:true})}
+   finally{field.remove();if(active?.isConnected){active.focus({preventScroll:true});if(typeof caretStart==='number')active.setSelectionRange(caretStart,caretEnd,caretDirection)}if(fields)fields.scrollTop=scrollTop}
   }
   toast(copied?'Текст заказа скопирован':'Не удалось скопировать. Выделите текст в окошке и нажмите «Копировать».');
  };
@@ -17362,4 +17375,13 @@ INLINE_INDEX_HTML=INLINE_INDEX_HTML.replace('</head>',r'''<style>
 #gbuPayrollBody [data-payroll-roster]{display:flex;flex-direction:column;justify-content:center;align-items:flex-start;gap:3px;box-sizing:border-box;width:100%;min-width:0;min-height:50px;height:auto;margin:0;padding:7px 8px;border:1px solid var(--line);border-radius:9px;font-size:12px;font-weight:700;line-height:1.2;text-align:left;white-space:normal;overflow-wrap:anywhere}
 #gbuPayrollBody [data-payroll-roster] small{display:block;font-size:10px;font-weight:400;line-height:1.25;color:var(--muted)}
 #gbuPayrollBody>h4:has(+.list>[data-payroll-roster]){margin:8px 0 6px;font-size:15px}
+</style></head>''',1)
+
+
+INLINE_INDEX_HTML=INLINE_INDEX_HTML.replace('</head>',r'''<style>
+#modal #dispatchEditor>.private-source-text{display:flex;flex-direction:column;overflow:hidden;padding:0;touch-action:auto;user-select:text;-webkit-user-select:text;-webkit-touch-callout:default}
+#dispatchEditor .private-source-toolbar{display:flex;flex:0 0 auto;align-items:center;justify-content:space-between;gap:6px;padding:4px 6px;border-bottom:1px solid var(--line);background:var(--panel)}
+#modal #dispatchEditor .private-source-toolbar .private-source-copy{float:none;position:static;margin:0;flex:0 0 auto;font-size:11px;min-height:28px;padding:3px 7px}
+#dispatchEditor .private-source-content{flex:1 1 auto;min-height:0;overflow:auto;padding:0 6px 5px;overscroll-behavior:contain;overflow-anchor:none;scroll-behavior:auto;user-select:text;-webkit-user-select:text;-webkit-touch-callout:default;touch-action:pan-y}
+#dispatchEditor .private-source-content p:first-child{border-top:0;margin-top:4px;padding-top:0}
 </style></head>''',1)
