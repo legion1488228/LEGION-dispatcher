@@ -17210,7 +17210,7 @@ def _dispatch_summary_panel_html(html):
     html=html[:start]+'${dispatchSummaryPanel(data)}'+html[end:]
     return html.replace('</body>',r'''<style>
 .dispatch-summary-panel{margin:8px 0 10px}
-.dispatch-summary-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.dispatch-summary-stats{display:grid;grid-template-columns:minmax(0,1fr) 26px minmax(0,1fr);gap:4px;align-items:stretch}
 .dispatch-summary-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--panel)}
 .dispatch-summary-stat{display:flex;flex-direction:column;justify-content:center;align-items:center;min-width:0;padding:12px 3px;gap:5px;text-align:center}
 .dispatch-summary-stat+ .dispatch-summary-stat{border-left:1px solid var(--line)}
@@ -17218,13 +17218,13 @@ def _dispatch_summary_panel_html(html):
 .dispatch-summary-stat small{font-size:11px;line-height:1.2;color:var(--muted)}
 .dispatch-summary-free{background:rgba(185,149,71,.12)}
 .dispatch-summary-free b{color:var(--gold)}
-.dispatch-summary-actions{display:flex;justify-content:flex-end;margin-top:6px}
-.dispatch-summary-actions [data-plan-comment]{padding:5px 9px;min-height:30px;font-size:11px;border:1px solid var(--gold);border-radius:8px;background:transparent;color:var(--gold)}
+.dispatch-summary-comment{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0;min-width:0;width:26px;padding:3px 0;font-size:9px;line-height:10px;border:1px solid var(--gold);border-radius:8px;background:transparent;color:var(--gold);touch-action:manipulation}
+.dispatch-summary-comment span{display:block}
 </style><script>
 function dispatchSummaryPanel(data){
  const ready=Number(data.ready_staff)||0,gross=Number(data.requested_staff)||0,effective=Number(data.requested_staff_effective??gross)||0;
  const free=dispatchStaffCount(ready-gross,ready-effective),total=(Number(data.counts?.private)||0)+(Number(data.counts?.gbu)||0);
- return `<div class="dispatch-summary-panel"><div class="dispatch-summary-stats"><div class="dispatch-summary-pair"><div class="dispatch-summary-stat"><b data-plan-total-orders>${total}</b><small>Заказов</small></div><div class="dispatch-summary-stat"><b data-plan-requested>${dispatchStaffCount(gross,effective)}</b><small>Запрошено</small></div></div><div class="dispatch-summary-pair"><div class="dispatch-summary-stat"><b data-plan-ready>${ready}</b><small>Готовы</small></div><div class="dispatch-summary-stat dispatch-summary-free"><b data-plan-available>${free}</b><small>Свободные</small></div></div></div><div class="dispatch-summary-actions"><button type="button" data-plan-comment>Комментарий</button></div></div>`;
+ return `<div class="dispatch-summary-panel"><div class="dispatch-summary-stats"><div class="dispatch-summary-pair"><div class="dispatch-summary-stat"><b data-plan-total-orders>${total}</b><small>Заказов</small></div><div class="dispatch-summary-stat"><b data-plan-requested>${dispatchStaffCount(gross,effective)}</b><small>Запрошено</small></div></div><button type="button" class="dispatch-summary-comment" data-plan-comment aria-label="Комментарий" title="Комментарий"><span aria-hidden="true">К</span><span aria-hidden="true">О</span><span aria-hidden="true">М</span><span aria-hidden="true">Е</span><span aria-hidden="true">Н</span><span aria-hidden="true">Т</span></button><div class="dispatch-summary-pair"><div class="dispatch-summary-stat"><b data-plan-ready>${ready}</b><small>Готовы</small></div><div class="dispatch-summary-stat dispatch-summary-free"><b data-plan-available>${free}</b><small>Свободные</small></div></div></div></div>`;
 }
 </script></body>''',1)
 
