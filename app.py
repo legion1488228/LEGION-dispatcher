@@ -17355,3 +17355,11 @@ INLINE_INDEX_HTML=INLINE_INDEX_HTML.replace('</head>',r'''<style>
 .dispatch-summary-comment{position:relative}
 .dispatch-summary-comment.has-comment::after{content:"";position:absolute;right:-3px;top:-3px;width:6px;height:6px;border-radius:50%;background:var(--gold);border:1px solid var(--panel);pointer-events:none}
 </style></head>''',1)
+
+
+INLINE_INDEX_HTML=INLINE_INDEX_HTML.replace('</head>',r'''<style>
+#gbuPayrollBody>.list:has(>[data-payroll-roster]){display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;padding:0;margin:6px 0 10px;border:0;border-radius:0;background:transparent;max-height:none;overflow:visible}
+#gbuPayrollBody [data-payroll-roster]{display:flex;flex-direction:column;justify-content:center;align-items:flex-start;gap:3px;box-sizing:border-box;width:100%;min-width:0;min-height:50px;height:auto;margin:0;padding:7px 8px;border:1px solid var(--line);border-radius:9px;font-size:12px;font-weight:700;line-height:1.2;text-align:left;white-space:normal;overflow-wrap:anywhere}
+#gbuPayrollBody [data-payroll-roster] small{display:block;font-size:10px;font-weight:400;line-height:1.25;color:var(--muted)}
+#gbuPayrollBody>h4:has(+.list>[data-payroll-roster]){margin:8px 0 6px;font-size:15px}
+</style></head>''',1)
