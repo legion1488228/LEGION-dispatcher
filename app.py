@@ -16736,6 +16736,8 @@ async def private_intake_deliver(db,event):
         target['status']='sending';event.payload=json.dumps(saved,ensure_ascii=False);db.commit()
         try:
             result=await free_staff_telegram_call(target['method'],target['data'])
+            if target['method']=='editMessageText' and result is True:
+                result={'message_id':target['data']['message_id']}
             if not isinstance(result,dict) or not result.get('message_id'):raise ValueError('Нет подтверждения')
             target.update(status='sent',message_id=result['message_id'])
         except Exception:
@@ -16813,13 +16815,22 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
         meta=json.loads(plan.payload);number=private_intake_info(db,order)['number']
         heading=f'Частный №{number} · {order.work_date.strftime("%d.%m")} · {order.agent_name}'
         if data.action=='resume':
+            refs=private_intake_edit_refs(db,order,meta)
+            if not refs:raise HTTPException(409,'Не найдено исходное сообщение брони в группе. Автоматически новое сообщение не создаётся.')
+            meta['edit_group_messages']=refs;meta['edit_source_messages']=[]
+            plan.payload=json.dumps(meta,ensure_ascii=False)
             if not session:session=PrivateIntakeSession(tg_id=data.tg_id);db.add(session)
             session.order_id=order.id;notice=None
         elif data.action=='append':
             if not data.text.strip() and not data.photo:raise HTTPException(422,'Пришлите текст или фотографию')
-            messages=meta.setdefault('source_messages',[])
+            messages=meta.setdefault('edit_source_messages',[]) if meta.get('edit_group_messages') else meta.setdefault('source_messages',[])
             if len(messages)>=100:raise HTTPException(409,'Лимит 100 сообщений на заказ')
             messages.append({'text':data.text,'photo':data.photo,'by':data.tg_id,'at':datetime.now(MOSCOW).isoformat()})
+            if meta.get('edit_group_messages'):
+                if data.photo:raise HTTPException(422,'В режиме изменения брони пришлите текст заказа. Фото добавляется при первоначальном вводе.')
+                if len('\n\n'.join(m['text'] for m in messages))>3500:raise HTTPException(422,'Текст изменения слишком длинный: максимум 3500 символов.')
+                meta.setdefault('source_messages_before_edit',meta.get('source_messages',[]))
+                meta['source_messages']=messages
             plan.payload=json.dumps(meta,ensure_ascii=False)
             notice=escape(data.text) if data.text else None
         elif data.action=='time':
@@ -16846,7 +16857,12 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
             notice=f'<b>{escape(heading)}</b>\n<b>ОТМЕНЁН</b>\nНумерация оставшихся заказов обновлена.'
     result={'ok':True,**(private_intake_info(db,order) if order else {})}
     deliveries=[]
-    if notice or data.photo:
+    if data.action=='append' and meta.get('edit_group_messages'):
+        value='\n\n'.join(m['text'] for m in meta['edit_source_messages'])
+        deliveries=[{'status':'pending','method':'editMessageText','data':{
+            'chat_id':ref['chat_id'],'message_id':ref['message_id'],'text':value}}
+            for ref in meta['edit_group_messages']]
+    elif notice or data.photo:
         import html as _html
         plain=_html.unescape(re.sub('<[^>]+>','',notice or ''))
         for chat in targets:
@@ -16882,6 +16898,22 @@ def private_intake_order_notice(db,order,notice,revision,action):
     db.add(PrivateIntakeEvent(key=key,payload=json.dumps({'result':{'ok':True},'deliveries':[
         {'status':'pending','method':'sendMessage','data':{'chat_id':chat,'text':escape(value),'parse_mode':'HTML'}}
         for chat in sorted(recipients)]},ensure_ascii=False)))
+
+
+def private_intake_edit_refs(db,order,meta):
+    if meta.get('edit_group_messages'):return meta['edit_group_messages']
+    texts={escape(m.get('text','')) for m in meta.get('source_messages',[]) if m.get('text')}
+    refs={}
+    for event in db.scalars(select(PrivateIntakeEvent)):
+        saved=json.loads(event.payload)
+        if saved.get('result',{}).get('id')!=order.id:continue
+        for delivery in saved.get('deliveries',[]):
+            payload=delivery.get('data',{});chat=payload.get('chat_id',0)
+            if (delivery.get('method')=='sendMessage' and delivery.get('status')=='sent'
+                    and chat<0 and payload.get('text') in texts and delivery.get('message_id')):
+                ref={'chat_id':chat,'message_id':delivery['message_id']}
+                if chat not in refs or ref['message_id']<refs[chat]['message_id']:refs[chat]=ref
+    return list(refs.values())
 
 
 def private_intake_reservation(db,day,rows,agent):
