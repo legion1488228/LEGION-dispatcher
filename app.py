@@ -5949,6 +5949,7 @@ async function openDayComment(day){
   try{
    const data=await api(`/api/day-comments/${day}`,{method:'PUT',body:JSON.stringify({text:input.value,version})});
    if(state.selectedDate===day&&state.bootstrap){state.bootstrap.day_comment=data;renderSummary()}
+   if(state.selectedDate===day)qsa('.dispatch-summary-comment').forEach(button=>{const has=Boolean(String(data.text||'').trim());button.classList.toggle('has-comment',has);button.setAttribute('aria-label',has?'Комментарий добавлен':'Комментарий')});
    if(active()){closeModal();toast(data.text?'Комментарий сохранён':'Комментарий очищен')}
   }catch(e){if(active())error.textContent=e.message}
   finally{if(active())setBusy(false)}
@@ -14177,7 +14178,10 @@ def dispatch_board_data(db, day):
         item['paired_order'] = {key:partner[key] for key in ('id','source','number','deceased_name','team_size')} if partner else None
         item['pair_color'] = pair_colors.get(item['id']) if partner else None
         item['receipt'] = dispatch_receipt_info(db,item,receipt_history)
+        item['receipt']['received_once'] = (item['receipt'].get('status') == 'confirmed'
+            or dispatch_received_once(item, receipt_history))
     return {'work_date': str(day), 'items': items, 'counts': numbers, 'free': free['groups'], 'empty_slots':empty,
+        'day_comment': day_comment_data(db, day),
         'order_completion': dispatch_control_completion(db, day) or order_completion_data(db, day),
         'ready_staff': readiness_summary_data(db, day)['totals']['ready_now'],
         'requested_staff_by_source': requested_staff, 'requested_staff': sum(requested_staff.values()),
@@ -14764,6 +14768,24 @@ def dispatch_order_messages(item):
     return [{'chat_id':item['brigadier']['tg_id'],'text':chunk,'label':item['brigadier']['display_name'],
         'status':'pending','kind':'order','order_id':item['id'],'revision':item['revision'],
         'confirmable':i==len(chunks)-1} for i,chunk in enumerate(chunks)]
+
+
+def dispatch_received_once(item, receipt_history):
+    """Receipt acknowledgement survives edits for this order, day and leader.
+
+    Keep the current revision receipt separate for crew confirmations and sends.
+    """
+    leader = item.get('brigadier') or {}
+    if not leader.get('tg_id') or item.get('is_draft'):
+        return False
+    history = [saved for saved in receipt_history
+        if saved.get('order_id') == item['id']
+        and saved.get('chat_id') == leader['tg_id']
+        and saved.get('status') in {'sent', 'sending', 'unknown'}]
+    original_sent = any(saved.get('kind') == 'order' and saved.get('confirmable')
+        for saved in history)
+    return original_sent and any(saved.get('kind') in {'order', 'crew_change'}
+        and saved.get('confirmable') and saved.get('confirmed_at') for saved in history)
 
 
 def dispatch_receipt_info(db, item, receipt_history=None):
@@ -17224,7 +17246,7 @@ def _dispatch_summary_panel_html(html):
 function dispatchSummaryPanel(data){
  const ready=Number(data.ready_staff)||0,gross=Number(data.requested_staff)||0,effective=Number(data.requested_staff_effective??gross)||0;
  const free=dispatchStaffCount(ready-gross,ready-effective),total=(Number(data.counts?.private)||0)+(Number(data.counts?.gbu)||0);
- return `<div class="dispatch-summary-panel"><div class="dispatch-summary-stats"><div class="dispatch-summary-pair"><div class="dispatch-summary-stat"><b data-plan-total-orders>${total}</b><small>Заказов</small></div><div class="dispatch-summary-stat"><b data-plan-requested>${dispatchStaffCount(gross,effective)}</b><small>Запрошено</small></div></div><button type="button" class="dispatch-summary-comment" data-plan-comment aria-label="Комментарий" title="Комментарий"><span aria-hidden="true">К</span><span aria-hidden="true">О</span><span aria-hidden="true">М</span><span aria-hidden="true">Е</span><span aria-hidden="true">Н</span><span aria-hidden="true">Т</span></button><div class="dispatch-summary-pair"><div class="dispatch-summary-stat"><b data-plan-ready>${ready}</b><small>Готовы</small></div><div class="dispatch-summary-stat dispatch-summary-free"><b data-plan-available>${free}</b><small>Свободные</small></div></div></div></div>`;
+ return `<div class="dispatch-summary-panel"><div class="dispatch-summary-stats"><div class="dispatch-summary-pair"><div class="dispatch-summary-stat"><b data-plan-total-orders>${total}</b><small>Заказов</small></div><div class="dispatch-summary-stat"><b data-plan-requested>${dispatchStaffCount(gross,effective)}</b><small>Запрошено</small></div></div><button type="button" class="dispatch-summary-comment${String(data.day_comment?.text||'').trim()?' has-comment':''}" data-plan-comment aria-label="${String(data.day_comment?.text||'').trim()?'Комментарий добавлен':'Комментарий'}" title="Комментарий"><span aria-hidden="true">К</span><span aria-hidden="true">О</span><span aria-hidden="true">М</span><span aria-hidden="true">Е</span><span aria-hidden="true">Н</span><span aria-hidden="true">Т</span></button><div class="dispatch-summary-pair"><div class="dispatch-summary-stat"><b data-plan-ready>${ready}</b><small>Готовы</small></div><div class="dispatch-summary-stat dispatch-summary-free"><b data-plan-available>${free}</b><small>Свободные</small></div></div></div></div>`;
 }
 </script></body>''',1)
 
@@ -17308,3 +17330,28 @@ async function copyOrderReconciliation(text,button){
 
 
 INLINE_INDEX_HTML=_order_breakdown_copy_reconciliation_html(INLINE_INDEX_HTML)
+
+
+def _dispatch_sticky_received_html(html):
+    first=html.index('function dispatchEveningHtml(data){')
+    last=html.index('function dispatchPerson(p){',first)
+    part=html[first:last]
+    part=part.replace("order.receipt?.status==='confirmed'", "dispatchReceivedOnce(order)")
+    old=" const label=order=>({confirmed:"
+    new=" const label=order=>dispatchReceivedOnce(order)?'✓ Заказ получил':({confirmed:"
+    if part.count(old)!=1:raise ValueError('Sticky receipt label anchor missing')
+    part=part.replace(old,new,1)
+    old='${label(order)}</span></p>'
+    new="""${label(order)}</span>${dispatchReceivedOnce(order)&&order.receipt?.status==='sent'?'<br><span class="muted">⌛ Ожидает подтверждения изменений</span>':''}</p>"""
+    if part.count(old)!=1:raise ValueError('Sticky receipt details anchor missing')
+    part=part.replace(old,new,1)
+    return html[:first]+"function dispatchReceivedOnce(order){return Boolean(order.receipt?.received_once||order.receipt?.status==='confirmed')}\n"+part+html[last:]
+
+
+INLINE_INDEX_HTML=_dispatch_sticky_received_html(INLINE_INDEX_HTML)
+
+
+INLINE_INDEX_HTML=INLINE_INDEX_HTML.replace('</head>',r'''<style>
+.dispatch-summary-comment{position:relative}
+.dispatch-summary-comment.has-comment::after{content:"";position:absolute;right:-3px;top:-3px;width:6px;height:6px;border-radius:50%;background:var(--gold);border:1px solid var(--panel);pointer-events:none}
+</style></head>''',1)
