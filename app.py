@@ -17069,7 +17069,9 @@ function installDispatchEditorViewport(form){
  const modal=qs('#modal'),viewport=window.visualViewport;
  const fields=document.createElement('div'),actions=document.createElement('div');
  fields.className='dispatch-editor-fields';actions.className='dispatch-editor-actions';
+ const source=form.querySelector('.private-source-text');
  for(const child of [...form.children]){
+  if(child===source)continue;
   (child.matches('button,.dispatch-crew-status,[data-plan-error]')?actions:fields).append(child);
  }
  form.append(fields,actions);
@@ -17077,24 +17079,26 @@ function installDispatchEditorViewport(form){
  const active=()=>!disposed&&form.isConnected&&!modal.classList.contains('hidden');
  const update=()=>{
   frame=0;if(!active())return;
+  const selection=window.getSelection?.();
+  if(source&&selection&&!selection.isCollapsed&&(source.contains(selection.anchorNode)||source.contains(selection.focusNode)))return;
   const height=viewport?.height||window.innerHeight,top=viewport?.offsetTop||0;
   modal.style.setProperty('--order-editor-top',Math.round(top+6)+'px');
   modal.style.setProperty('--order-editor-height',Math.max(0,Math.floor(height-12))+'px');
   modal.classList.toggle('order-editor-compact',height<600);
   const input=document.activeElement;
-  if(fields.contains(input)){
+  if(fields.contains(input)&&input.matches('input,textarea,select')&&!input.readOnly){
    const rect=input.getBoundingClientRect(),area=fields.getBoundingClientRect();
    if(rect.bottom>area.bottom-5)fields.scrollTop+=rect.bottom-area.bottom+5;
    else if(rect.top<area.top+5)fields.scrollTop+=rect.top-area.top-5;
   }
  };
  const schedule=()=>{if(!frame&&!disposed)frame=requestAnimationFrame(update)};
- viewport?.addEventListener('resize',schedule);viewport?.addEventListener('scroll',schedule);
+ viewport?.addEventListener('resize',schedule);
  window.addEventListener('resize',schedule);form.addEventListener('focusin',schedule);
  update();
  disposeDispatchEditorViewport=()=>{
   disposed=true;cancelAnimationFrame(frame);
-  viewport?.removeEventListener('resize',schedule);viewport?.removeEventListener('scroll',schedule);
+  viewport?.removeEventListener('resize',schedule);
   window.removeEventListener('resize',schedule);form.removeEventListener('focusin',schedule);
   modal.classList.remove('order-editor-compact');
   modal.style.removeProperty('--order-editor-top');modal.style.removeProperty('--order-editor-height');
@@ -17191,3 +17195,9 @@ def _dispatch_pair_caption_html(html):
 
 
 INLINE_INDEX_HTML=_dispatch_pair_caption_html(INLINE_INDEX_HTML)
+
+INLINE_INDEX_HTML=INLINE_INDEX_HTML.replace('</head>',r'''<style>
+#modal #dispatchEditor>.private-source-text{flex:0 0 auto;position:relative;top:auto;height:clamp(96px,22dvh,130px);min-height:96px;max-height:130px;box-sizing:border-box;overflow:auto;margin:0 0 6px;overscroll-behavior:contain;overflow-anchor:none;scroll-behavior:auto;-webkit-overflow-scrolling:auto;touch-action:pan-y}
+#modal #dispatchEditor>.private-source-text .private-source-copy{position:static}
+#dispatchEditor .dispatch-editor-fields{overflow-anchor:none;scroll-behavior:auto}
+</style></head>''',1)
