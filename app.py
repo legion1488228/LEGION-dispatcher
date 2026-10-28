@@ -17364,11 +17364,11 @@ def _order_breakdown_copy_reconciliation_html(html):
 #orderCountBreakdown .order-breakdown-actions{display:flex;align-items:center;justify-content:space-between;gap:8px}
 #orderCountBreakdown .order-breakdown-actions #orderBreakdownBack{min-width:0;margin:0}
 #modal .order-reconciliation-copy{flex:0 0 auto;min-width:120px;min-height:48px;padding:10px 16px;font-size:14px;font-weight:700;color:var(--gold);border:1px solid var(--gold);border-radius:11px}
-.order-reconciliation-popover{position:fixed;z-index:145;width:min(300px,calc(100vw - 24px));max-height:210px;padding:10px;background:var(--panel);color:var(--text);border:1px solid var(--gold);border-radius:13px;box-shadow:0 12px 36px rgba(0,0,0,.25);opacity:0;transform:translateY(-7px) scale(.97);transform-origin:top right;transition:opacity .2s ease,transform .2s ease;overflow:hidden}
+.order-reconciliation-popover{position:fixed;z-index:145;width:min(270px,calc(100vw - 20px));padding:7px;background:var(--panel);color:var(--text);border:1px solid var(--gold);border-radius:12px;box-shadow:0 12px 36px rgba(0,0,0,.25);opacity:0;transform:translateY(-7px) scale(.97);transform-origin:top right;transition:opacity .2s ease,transform .2s ease;overflow:visible}
 .order-reconciliation-popover.is-visible{opacity:1;transform:translateY(0) scale(1)}
 .order-reconciliation-popover.is-hiding{opacity:0;transform:translateY(-7px) scale(.94);pointer-events:none}
-.order-reconciliation-popover>b{display:block;margin-bottom:6px;color:var(--gold);font-size:13px}
-.order-reconciliation-popover>pre{max-height:158px;overflow:auto;margin:0;padding:8px;border-radius:9px;background:var(--bg);color:var(--text);font:11px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;-webkit-user-select:text;-webkit-touch-callout:default}
+.order-reconciliation-popover>b{display:block;margin-bottom:4px;color:var(--gold);font-size:12px;line-height:1.2}
+.order-reconciliation-popover>pre{overflow:visible;margin:0;padding:5px 6px;border-radius:8px;background:var(--bg);color:var(--text);font:10.5px/1.22 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;-webkit-user-select:text;-webkit-touch-callout:default}
 </style><script>
 function reconciliationNoun(n,one,few,many){
  const x=Math.abs(n)%100,y=x%10;return x>=11&&x<=14?many:y===1?one:y>=2&&y<=4?few:many;
