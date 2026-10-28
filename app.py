@@ -17644,3 +17644,19 @@ function dispatchRestoreScroll(root,snapshot){
 
 
 INLINE_INDEX_HTML = _dispatch_refresh_scroll_html(INLINE_INDEX_HTML)
+
+
+# Number free employees independently inside every expandable staff group.
+def _dispatch_free_staff_numbering_html(html):
+    old = "${g.people.map(p=>`<p>${esc(p.name)} ${esc(p.metro)} ${esc(p.height)}</p>`).join('')||'<p>Нет свободных</p>'}"
+    new = "${g.people.map((p,index)=>`<p class=\"dispatch-free-person\"><span>${index+1}.</span><span>${esc(p.name)} ${esc(p.metro)} ${esc(p.height)}</span></p>`).join('')||'<p>Нет свободных</p>'}"
+    if html.count(old) != 1:
+        raise RuntimeError('Free staff numbering anchor missing')
+    html = html.replace(old, new, 1)
+    return html.replace('</head>', r'''<style>
+.dispatch-free-person{display:grid;grid-template-columns:18px minmax(0,1fr);align-items:start;column-gap:3px}
+.dispatch-free-person>span:first-child{font-variant-numeric:tabular-nums;text-align:right}
+</style></head>''', 1)
+
+
+INLINE_INDEX_HTML = _dispatch_free_staff_numbering_html(INLINE_INDEX_HTML)
