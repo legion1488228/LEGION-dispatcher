@@ -17364,13 +17364,11 @@ def _order_breakdown_copy_reconciliation_html(html):
 #orderCountBreakdown .order-breakdown-actions{display:flex;align-items:center;justify-content:space-between;gap:8px}
 #orderCountBreakdown .order-breakdown-actions #orderBreakdownBack{min-width:0;margin:0}
 #modal .order-reconciliation-copy{flex:0 0 auto;min-width:120px;min-height:48px;padding:10px 16px;font-size:14px;font-weight:700;color:var(--gold);border:1px solid var(--gold);border-radius:11px}
-.order-reconciliation-preview{position:fixed;inset:0;z-index:140;display:grid;place-items:center;padding:18px;background:rgba(0,0,0,.5);backdrop-filter:blur(3px)}
-.order-reconciliation-preview>section{display:flex;flex-direction:column;width:min(100%,480px);max-height:min(78vh,680px);padding:15px;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:18px;box-shadow:0 18px 60px rgba(0,0,0,.28)}
-.order-reconciliation-preview header{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:10px}
-.order-reconciliation-preview header b{display:block;font-size:17px}.order-reconciliation-preview header small{display:block;margin-top:3px;color:var(--muted);font-size:11px}
-.order-reconciliation-preview header button{flex:0 0 auto;width:38px;height:38px;padding:0;border:0;border-radius:11px;background:var(--panel2);color:var(--text);font-size:24px}
-.order-reconciliation-preview pre{flex:1;min-height:0;overflow:auto;margin:0 0 12px;padding:13px;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--text);font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;-webkit-user-select:text;-webkit-touch-callout:default}
-.order-reconciliation-preview [data-reconciliation-preview-done]{width:100%;min-height:46px}
+.order-reconciliation-popover{position:fixed;z-index:145;width:min(300px,calc(100vw - 24px));max-height:210px;padding:10px;background:var(--panel);color:var(--text);border:1px solid var(--gold);border-radius:13px;box-shadow:0 12px 36px rgba(0,0,0,.25);opacity:0;transform:translateY(-7px) scale(.97);transform-origin:top right;transition:opacity .2s ease,transform .2s ease;overflow:hidden}
+.order-reconciliation-popover.is-visible{opacity:1;transform:translateY(0) scale(1)}
+.order-reconciliation-popover.is-hiding{opacity:0;transform:translateY(-7px) scale(.94);pointer-events:none}
+.order-reconciliation-popover>b{display:block;margin-bottom:6px;color:var(--gold);font-size:13px}
+.order-reconciliation-popover>pre{max-height:158px;overflow:auto;margin:0;padding:8px;border-radius:9px;background:var(--bg);color:var(--text);font:11px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;-webkit-user-select:text;-webkit-touch-callout:default}
 </style><script>
 function reconciliationNoun(n,one,few,many){
  const x=Math.abs(n)%100,y=x%10;return x>=11&&x<=14?many:y===1?one:y>=2&&y<=4?few:many;
@@ -17410,16 +17408,20 @@ async function copyOrderReconciliation(text,button){
  }
  button.disabled=false;
  if(!copied)toast('Не удалось скопировать автоматически. Текст можно выделить в открытом окне.');
- showOrderReconciliationCopyPreview(text,copied);
+ showOrderReconciliationCopyPopover(text,copied,button);
 }
-function showOrderReconciliationCopyPreview(text,copied){
- qs('#orderReconciliationPreview')?.remove();
- const layer=document.createElement('div');layer.id='orderReconciliationPreview';layer.className='order-reconciliation-preview';
- layer.innerHTML=`<section role="dialog" aria-modal="true" aria-labelledby="orderReconciliationPreviewTitle"><header><div><b id="orderReconciliationPreviewTitle">${copied?'✓ Сверка скопирована':'Сверка подготовлена'}</b><small>${copied?'Текст находится в буфере обмена':'Выделите и скопируйте текст вручную'}</small></div><button type="button" data-reconciliation-preview-close aria-label="Закрыть">×</button></header><pre>${esc(text)}</pre><button type="button" class="primary" data-reconciliation-preview-done>Готово</button></section>`;
- document.body.append(layer);
- const close=()=>layer.remove();
- qsa('[data-reconciliation-preview-close],[data-reconciliation-preview-done]',layer).forEach(control=>control.onclick=close);
- layer.onclick=event=>{if(event.target===layer)close()};
+let orderReconciliationPopoverTimer=0;
+function showOrderReconciliationCopyPopover(text,copied,button){
+ clearTimeout(orderReconciliationPopoverTimer);qs('#orderReconciliationPopover')?.remove();
+ const panel=document.createElement('aside');panel.id='orderReconciliationPopover';panel.className='order-reconciliation-popover';panel.setAttribute('role','status');panel.setAttribute('aria-live','polite');
+ panel.innerHTML=`<b>${copied?'✓ Сверка скопирована':'Сверка подготовлена'}</b><pre>${esc(text)}</pre>`;
+ document.body.append(panel);
+ const rect=button.getBoundingClientRect(),gap=7,width=panel.offsetWidth,height=panel.offsetHeight;
+ const left=Math.max(12,Math.min(window.innerWidth-width-12,rect.right-width));
+ let top=rect.bottom+gap;if(top+height>window.innerHeight-12)top=Math.max(12,rect.top-height-gap);
+ panel.style.left=left+'px';panel.style.top=top+'px';requestAnimationFrame(()=>panel.classList.add('is-visible'));
+ const close=()=>{if(!panel.isConnected)return;panel.classList.remove('is-visible');panel.classList.add('is-hiding');setTimeout(()=>panel.remove(),220)};
+ panel.onclick=close;orderReconciliationPopoverTimer=setTimeout(close,5000);
 }
 </script></body>''',1)
 
