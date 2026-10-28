@@ -16788,7 +16788,8 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
     if data.action=='list':
         tomorrow=datetime.now(MOSCOW).date()+timedelta(days=1)
         rows=list(db.scalars(select(Order).where(Order.source=='private',Order.work_date>=tomorrow-timedelta(days=1),Order.work_date<=tomorrow+timedelta(days=7)).order_by(Order.work_date,Order.id)))
-        return {'ok':True,'items':[private_intake_info(db,o) for o in rows]}
+        return {'ok':True,'items':[private_intake_info(db,o) for o in rows],
+            'next_number':len(private_intake_chat_numbers(db,tomorrow,[o for o in rows if o.work_date==tomorrow]))+1}
     targets=private_intake_targets(db)
     if not targets and data.action!='finish':raise HTTPException(409,'Не настроен чат сверки ЛЕГИОН. Проверьте настройки чатов.')
     order=None
