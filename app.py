@@ -17227,13 +17227,14 @@ function installDispatchSourceCopy(form,messages){
  if(heading)header.append(heading);
  for(const child of [...section.childNodes])content.append(child);
  header.append(button);section.append(header,content);
+ const sourceSelection=installDispatchSourceSelection(content,header,button,fullText);
  button.title='Скопировать выделенный текст или всё сообщение';
  button.addEventListener('pointerdown',event=>event.preventDefault());
  button.addEventListener('mousedown',event=>event.preventDefault());
  button.onclick=async()=>{
   const selection=window.getSelection?.();
   const selected=selection&&!selection.isCollapsed&&content.contains(selection.anchorNode)&&content.contains(selection.focusNode)?selection.toString():'';
-  const text=selected.trim()?selected:fullText;
+  const text=sourceSelection.text()||(selected.trim()?selected:fullText);
   let copied=false;
   try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(text);copied=true}}catch(error){}
   if(!copied){
@@ -17245,6 +17246,7 @@ function installDispatchSourceCopy(form,messages){
    try{field.focus({preventScroll:true});field.select();field.setSelectionRange(0,text.length);copied=!!document.execCommand('copy')}catch(error){}
    finally{field.remove();if(active?.isConnected){active.focus({preventScroll:true});if(typeof caretStart==='number')active.setSelectionRange(caretStart,caretEnd,caretDirection)}if(fields)fields.scrollTop=scrollTop}
   }
+  if(copied)sourceSelection.finish();
   toast(copied?'Текст заказа скопирован':'Не удалось скопировать. Выделите текст в окошке и нажмите «Копировать».');
  };
 }
@@ -17452,3 +17454,51 @@ def private_intake_queue_update(db,order,meta,text):
         'confirmable':True,'text':escape(value),'status':'pending','ack_label':'✅ Изменения принял'},ensure_ascii=False)))
     meta['crew_receipt']={'notice_key':key,'tg_id':leader['tg_id'],'revision':item['revision']}
     db.get(DispatchPlan,order.id).payload=json.dumps(meta,ensure_ascii=False)
+
+
+INLINE_INDEX_HTML=INLINE_INDEX_HTML.replace('</body>',r'''<style>
+#dispatchEditor .private-source-toolbar{flex-wrap:wrap}
+#dispatchEditor .private-source-toolbar>b{margin-right:auto;font-size:11px}
+#dispatchEditor .private-source-select{flex:0 0 auto;min-height:28px;padding:3px 6px;font-size:11px;line-height:1.2}
+#dispatchEditor .private-source-select[aria-pressed="true"]{color:var(--gold);border-color:var(--gold)}
+#dispatchEditor .private-source-content.is-selecting,#dispatchEditor .private-source-content.is-selecting *{touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+#dispatchEditor .private-source-token.is-selected{background:#b9d8ff;color:#172b48;border-radius:2px}
+</style><script>
+function installDispatchSourceSelection(content,header,copyButton,fullText){
+ const toggle=document.createElement('button');toggle.type='button';toggle.className='secondary private-source-select';toggle.textContent='Выделить';toggle.setAttribute('aria-pressed','false');
+ toggle.title='Выделить слова без выхода из поля ввода';header.insertBefore(toggle,copyButton);
+ let enabled=false,original=[],tokens=[],anchor=-1,end=-1,dragging=false;
+ const selectedText=()=>anchor<0?'':tokens.slice(Math.min(anchor,end),Math.max(anchor,end)+1).map(t=>t.textContent).join('').trimEnd();
+ const paint=()=>tokens.forEach((t,i)=>t.classList.toggle('is-selected',i>=Math.min(anchor,end)&&i<=Math.max(anchor,end)&&anchor>=0));
+ const finish=()=>{
+  if(enabled){const top=content.scrollTop;content.replaceChildren(...original);content.scrollTop=top}
+  enabled=false;dragging=false;anchor=end=-1;tokens=[];content.classList.remove('is-selecting');
+  toggle.textContent='Выделить';toggle.setAttribute('aria-pressed','false');copyButton.textContent='Скопировать';
+ };
+ toggle.addEventListener('pointerdown',event=>event.preventDefault());
+ toggle.addEventListener('mousedown',event=>event.preventDefault());
+ toggle.onclick=()=>{
+  if(enabled){finish();return}
+  original=[...content.childNodes];const top=content.scrollTop;
+  tokens=(fullText.match(/\s+|\S+\s*/g)||[]).map((text,index)=>{const span=document.createElement('span');span.className='private-source-token';span.dataset.sourceIndex=String(index);span.textContent=text;return span});
+  content.replaceChildren(...tokens);content.scrollTop=top;enabled=true;content.classList.add('is-selecting');toggle.textContent='Отмена';toggle.setAttribute('aria-pressed','true');
+ };
+ const indexAt=(event)=>{
+  const node=document.elementFromPoint(event.clientX,event.clientY)?.closest('.private-source-token');
+  return node&&content.contains(node)?Number(node.dataset.sourceIndex):-1;
+ };
+ content.addEventListener('pointerdown',event=>{
+  if(!enabled)return;event.preventDefault();event.stopPropagation();
+  const index=indexAt(event);if(index<0)return;
+  anchor=end=index;dragging=true;content.setPointerCapture?.(event.pointerId);paint();copyButton.textContent='Копировать';
+ });
+ content.addEventListener('pointermove',event=>{
+  if(!enabled||!dragging)return;event.preventDefault();
+  const index=indexAt(event);if(index>=0){end=index;paint()}
+ });
+ const release=event=>{if(!enabled)return;event.preventDefault();dragging=false;if(content.hasPointerCapture?.(event.pointerId))content.releasePointerCapture(event.pointerId)};
+ content.addEventListener('pointerup',release);content.addEventListener('pointercancel',release);
+ content.addEventListener('contextmenu',event=>{if(enabled)event.preventDefault()});
+ return {text:selectedText,finish};
+}
+</script></body>''',1)
