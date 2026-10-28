@@ -17363,7 +17363,14 @@ def _order_breakdown_copy_reconciliation_html(html):
     return html.replace('</body>',r'''<style>
 #orderCountBreakdown .order-breakdown-actions{display:flex;align-items:center;justify-content:space-between;gap:8px}
 #orderCountBreakdown .order-breakdown-actions #orderBreakdownBack{min-width:0;margin:0}
-#modal .order-reconciliation-copy{flex:0 0 auto;padding:7px 10px;min-height:34px;font-size:12px;color:var(--gold);border:1px solid var(--gold);border-radius:9px}
+#modal .order-reconciliation-copy{flex:0 0 auto;min-width:120px;min-height:48px;padding:10px 16px;font-size:14px;font-weight:700;color:var(--gold);border:1px solid var(--gold);border-radius:11px}
+.order-reconciliation-preview{position:fixed;inset:0;z-index:140;display:grid;place-items:center;padding:18px;background:rgba(0,0,0,.5);backdrop-filter:blur(3px)}
+.order-reconciliation-preview>section{display:flex;flex-direction:column;width:min(100%,480px);max-height:min(78vh,680px);padding:15px;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:18px;box-shadow:0 18px 60px rgba(0,0,0,.28)}
+.order-reconciliation-preview header{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:10px}
+.order-reconciliation-preview header b{display:block;font-size:17px}.order-reconciliation-preview header small{display:block;margin-top:3px;color:var(--muted);font-size:11px}
+.order-reconciliation-preview header button{flex:0 0 auto;width:38px;height:38px;padding:0;border:0;border-radius:11px;background:var(--panel2);color:var(--text);font-size:24px}
+.order-reconciliation-preview pre{flex:1;min-height:0;overflow:auto;margin:0 0 12px;padding:13px;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--text);font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;-webkit-user-select:text;-webkit-touch-callout:default}
+.order-reconciliation-preview [data-reconciliation-preview-done]{width:100%;min-height:46px}
 </style><script>
 function reconciliationNoun(n,one,few,many){
  const x=Math.abs(n)%100,y=x%10;return x>=11&&x<=14?many:y===1?one:y>=2&&y<=4?few:many;
@@ -17392,6 +17399,7 @@ function orderReconciliationText(values,options){
  return blocks.join('\n');
 }
 async function copyOrderReconciliation(text,button){
+ button.disabled=true;
  let copied=false;
  try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(text);copied=true}}catch(error){}
  if(!copied){
@@ -17400,7 +17408,18 @@ async function copyOrderReconciliation(text,button){
   try{field.focus({preventScroll:true});field.select();field.setSelectionRange(0,text.length);copied=Boolean(document.execCommand('copy'))}catch(error){}
   finally{field.remove();if(active?.isConnected)active.focus({preventScroll:true});modal.scrollTop=top}
  }
- toast(copied?'Сверка скопирована':'Не удалось скопировать сверку. Нажмите ещё раз.');
+ button.disabled=false;
+ if(!copied)toast('Не удалось скопировать автоматически. Текст можно выделить в открытом окне.');
+ showOrderReconciliationCopyPreview(text,copied);
+}
+function showOrderReconciliationCopyPreview(text,copied){
+ qs('#orderReconciliationPreview')?.remove();
+ const layer=document.createElement('div');layer.id='orderReconciliationPreview';layer.className='order-reconciliation-preview';
+ layer.innerHTML=`<section role="dialog" aria-modal="true" aria-labelledby="orderReconciliationPreviewTitle"><header><div><b id="orderReconciliationPreviewTitle">${copied?'✓ Сверка скопирована':'Сверка подготовлена'}</b><small>${copied?'Текст находится в буфере обмена':'Выделите и скопируйте текст вручную'}</small></div><button type="button" data-reconciliation-preview-close aria-label="Закрыть">×</button></header><pre>${esc(text)}</pre><button type="button" class="primary" data-reconciliation-preview-done>Готово</button></section>`;
+ document.body.append(layer);
+ const close=()=>layer.remove();
+ qsa('[data-reconciliation-preview-close],[data-reconciliation-preview-done]',layer).forEach(control=>control.onclick=close);
+ layer.onclick=event=>{if(event.target===layer)close()};
 }
 </script></body>''',1)
 
