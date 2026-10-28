@@ -17557,3 +17557,18 @@ def _compact_dispatch_pairs_html(html):
 
 
 INLINE_INDEX_HTML=_compact_dispatch_pairs_html(INLINE_INDEX_HTML)
+
+
+# Rank employees by their earnings within each payroll role and selected period.
+def _gbu_payroll_descending_html(html):
+    first = html.index('function gbuPayrollRoleGroups(')
+    last = html.index('\nfunction gbuPayrollGroupsHtml(', first)
+    block = html[first:last]
+    old = '}).filter(employee=>employee.exits>0);'
+    new = "}).filter(employee=>employee.exits>0).sort((a,b)=>Number(b.amount)-Number(a.amount)||String(a.name||'').localeCompare(String(b.name||''),'ru'));"
+    if old not in block:
+        raise RuntimeError('GBU payroll employee sorting anchor missing')
+    return html[:first] + block.replace(old, new, 1) + html[last:]
+
+
+INLINE_INDEX_HTML = _gbu_payroll_descending_html(INLINE_INDEX_HTML)
