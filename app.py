@@ -17502,3 +17502,58 @@ function installDispatchSourceSelection(content,header,copyButton,fullText){
  return {text:selectedText,finish};
 }
 </script></body>''',1)
+
+
+def _compact_dispatch_pairs_html(html):
+    first=html.index('function fitDispatchCardSizes(){')
+    last=html.index('\n}\n',first)+3
+    html=html[:first]+r'''function fitDispatchCardSizes(){
+ const root=qs('#dispatchActionsView');
+ if(!root||!root.classList.contains('active'))return;
+ const cards=qsa('[data-plan-order-cards] .dispatch-mini',root);
+ if(!cards.length)return;
+ const scrollNodes=[...new Set([document.scrollingElement,...qsa('*',root)])].filter(el=>el&&el.scrollTop>0);
+ const scrollPositions=scrollNodes.map(el=>[el,el.scrollTop,el.scrollLeft]);
+ const keys=['--dispatch-card-height','--dispatch-info-height','--dispatch-crew-height','--dispatch-detail-rows','--dispatch-route-rows','--dispatch-person-rows'];
+ for(const el of [root,...cards])for(const key of keys)el.style.removeProperty(key);
+ const columns=qsa('[data-plan-order-cards]>.dispatch-column',root).map(column=>qsa(':scope>.dispatch-mini',column));
+ const maxHeight=items=>Math.ceil(Math.max(0,...items.map(el=>el.getBoundingClientRect().height)));
+ for(let index=0;index<Math.max(0,...columns.map(column=>column.length));index++){
+  const pair=columns.map(column=>column[index]).filter(Boolean);
+  const set=(key,value)=>pair.forEach(card=>card.style.setProperty(key,value));
+  const alignRows=(containers,count,key,minimum=0)=>{
+   if(!containers.length)return;
+   const heights=Array.from({length:count},(_,row)=>Math.max(minimum,maxHeight(containers.map(el=>el.children[row]).filter(Boolean))));
+   set(key,heights.map(height=>height+'px').join(' '));
+  };
+  const info=pair.flatMap(card=>qsa('.dispatch-card-main',card)).filter(el=>el.closest('.dispatch-detailed'));
+  const people=pair.flatMap(card=>qsa('.dispatch-inline-people',card));
+  const count=Math.max(1,...people.map(el=>el.children.length),...pair.map(card=>Number(dispatchBoard?.items?.find(order=>String(order.id)===card.dataset.planCard)?.team_size)||0));
+  alignRows(pair.flatMap(card=>qsa('.dispatch-card-route',card)),3,'--dispatch-route-rows');
+  alignRows(people,count,'--dispatch-person-rows',17);
+  alignRows(info,7,'--dispatch-detail-rows');
+  const infoHeight=maxHeight(info),crewHeight=Math.max(count*17+Math.max(0,count-1)*2,maxHeight(people));
+  if(infoHeight)set('--dispatch-info-height',infoHeight+'px');
+  if(people.length)set('--dispatch-crew-height',crewHeight+'px');
+  const height=maxHeight(pair);
+  if(height)set('--dispatch-card-height',height+'px');
+ }
+ for(const [el,top,left] of scrollPositions){el.scrollTop=top;el.scrollLeft=left}
+}
+''' +html[last:]
+    return html.replace('</body>',r'''<style>
+#dispatchActionsView [data-plan-order-cards] .dispatch-mini{padding:7px!important;gap:3px}
+#dispatchActionsView .dispatch-detailed header{min-height:0;padding-right:38px}
+#dispatchActionsView .dispatch-detailed .dispatch-card-agent{min-height:0;padding-right:38px}
+#dispatchActionsView .dispatch-detailed .dispatch-card-phone,#dispatchActionsView .dispatch-detailed .dispatch-card-meta,#dispatchActionsView .dispatch-detailed .dispatch-order-name{padding-right:38px}
+#dispatchActionsView .dispatch-inline-crew{grid-template-rows:auto minmax(0,1fr) auto;gap:4px}
+#dispatchActionsView .dispatch-inline-people{min-height:var(--dispatch-crew-height,0px);grid-template-rows:var(--dispatch-person-rows,none);gap:2px}
+#dispatchActionsView .dispatch-card-route{gap:2px}
+#dispatchActionsView .dispatch-card-category{padding:2px 5px}
+#dispatchActionsView .dispatch-card-meta{margin:1px 0}
+#dispatchActionsView .dispatch-inline-status{padding:3px 5px}
+#dispatchActionsView .dispatch-edit-inline{min-height:32px;padding:5px 3px}
+</style></body>''',1)
+
+
+INLINE_INDEX_HTML=_compact_dispatch_pairs_html(INLINE_INDEX_HTML)
