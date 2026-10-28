@@ -16789,7 +16789,7 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
         tomorrow=datetime.now(MOSCOW).date()+timedelta(days=1)
         rows=list(db.scalars(select(Order).where(Order.source=='private',Order.work_date>=tomorrow-timedelta(days=1),Order.work_date<=tomorrow+timedelta(days=7)).order_by(Order.work_date,Order.id)))
         return {'ok':True,'items':[private_intake_info(db,o) for o in rows],
-            'next_number':len(private_intake_chat_numbers(db,tomorrow,[o for o in rows if o.work_date==tomorrow]))+1}
+            'next_number':private_intake_prompt_number(db,tomorrow,rows)}
     targets=private_intake_targets(db)
     if not targets and data.action!='finish':raise HTTPException(409,'Не настроен чат сверки ЛЕГИОН. Проверьте настройки чатов.')
     order=None
@@ -16806,9 +16806,16 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
         # Numbering belongs to the target work date, never to the operator's
         # previous session, a saved slot, or orders from another day/source.
         slot_number=private_intake_next_number(day,rows)
-        number=len(private_intake_chat_numbers(db,day,rows))+1
+        candidates=private_intake_reservations(db,day,rows,data.agent_name)
+        if data.order_id:
+            order=next((o for o in candidates if o.id==data.order_id),None)
+            if not order:raise HTTPException(409,'Бронь уже изменена или заполнена. Обновите список заказов.')
+        elif len(candidates)>1:
+            return {'ok':False,'reservations':[{'id':o.id,'number':mapping[o.id],
+                'agent_name':o.organization or o.agent_name} for o in sorted(candidates,key=lambda o:mapping[o.id])]}
+        else:order=candidates[0] if candidates else None
+        number=mapping[order.id] if order else slot_number
         if number>1000:raise HTTPException(409,'Лимит заказов на день')
-        order=private_intake_reservation(db,day,rows,data.agent_name)
         if order:
             plan=db.get(DispatchPlan,order.id);meta=json.loads(plan.payload)
             meta.update(private_intake=True,chat_number=number)
@@ -16952,32 +16959,37 @@ def private_intake_edit_refs(db,order,meta):
     return list(refs.values())
 
 
-def private_intake_reservation(db,day,rows,agent):
-    name=' '.join(agent.split()).casefold()
+def private_intake_agent_key(value):
+    # A pasted phone is contact data, not part of the agent's identity.
+    value=re.sub(r'(?<!\d)(?:\+7|8|7)[\s(.-]*(?:\d[\s().-]*){10}(?!\d)', '', str(value or ''))
+    return ' '.join(value.split()).strip(' ,;:').casefold()
+
+
+def private_intake_reservations(db,day,rows,agent=None):
+    name=private_intake_agent_key(agent) if agent is not None else None
     matches=[]
     for order in rows:
         if order.work_date!=day or order.source!='private' or order.status!='draft':continue
-        names={' '.join(str(value or '').split()).casefold() for value in (order.agent_name,order.organization)}
-        if name not in names:continue
+        if name is not None and name not in {private_intake_agent_key(order.agent_name),private_intake_agent_key(order.organization)}:continue
         plan=db.get(DispatchPlan,order.id)
         if not plan or plan.approved_card_id:continue
         meta=json.loads(plan.payload)
         if meta.get('private_intake') or meta.get('source_messages') or dispatch_assignments(db,order):continue
         matches.append(order)
-    if len(matches)>1:raise HTTPException(409,'Найдено несколько броней от этого агента на эту дату. Уточните их в приложении перед добавлением заказа.')
-    return matches[0] if matches else None
+    return matches
 
 
 def private_intake_chat_numbers(db,day,rows):
-    # Group numbering ignores manual reservations, even on the same work date.
-    orders=[]
-    for order in sorted(rows,key=lambda o:o.id):
-        if order.work_date!=day or order.source!='private' or order.status=='cancelled':continue
-        plan=db.get(DispatchPlan,order.id)
-        meta=json.loads(plan.payload) if plan else {}
-        if meta.get('private_intake'):orders.append((meta.get('chat_number') or len(orders)+1,order))
-    orders.sort(key=lambda entry:(entry[0],entry[1].id))
-    return {order.id:number for number,(_,order) in enumerate(orders,1)}
+    # App reservations and chat orders share one display numbering per day.
+    active=[o for o in rows if o.work_date==day and o.source=='private' and o.status!='cancelled']
+    mapping,_=dispatch_slot_layout(db,day,active)
+    return {o.id:mapping[o.id] for o in active}
+
+
+def private_intake_prompt_number(db,day,rows):
+    mapping=private_intake_chat_numbers(db,day,rows)
+    pending=private_intake_reservations(db,day,rows)
+    return min((mapping[o.id] for o in pending),default=max(mapping.values(),default=0)+1)
 
 
 def private_intake_next_number(day,rows):
