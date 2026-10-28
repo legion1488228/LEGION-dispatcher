@@ -14065,6 +14065,8 @@ def dispatch_order_data(db, order, number):
     data['paired_order_id'] = partner.id if partner else None
     data['revision'] = dispatch_hash({k: data[k] for k in ('id','source','work_date','issue_time','deceased_name',
         'category','team_size','organization','agent_name','agent_phone','route','notes','destination_type','church_required','brigadier','members','route_fields','approved','is_draft','paired_order_id')})
+    if meta.get('source_revision'):
+        data['revision']=dispatch_hash({'order_revision':data['revision'],'source_revision':meta['source_revision']})
     return data
 
 
@@ -14989,7 +14991,7 @@ async def dispatch_deliver_crew_change(db, key):
     try:
         result=await free_staff_telegram_call('sendMessage',{
             'chat_id':saved['chat_id'],'text':saved['text'],'parse_mode':'HTML',
-            **({'reply_markup':{'inline_keyboard':[[{'text':'✅ Замену принял',
+            **({'reply_markup':{'inline_keyboard':[[{'text':saved.get('ack_label','✅ Замену принял'),
                 'callback_data':'dispatchack:'+key}]]}} if saved.get('confirmable') else {})})
         if not isinstance(result,dict) or not result.get('message_id'): raise ValueError('Нет подтверждения')
         saved.update(status='sent',message_id=result['message_id'])
@@ -16715,13 +16717,15 @@ class PrivateIntakeEvent(Base):
 
 class PrivateIntakeInput(BaseModel):
     tg_id: StrictInt
-    action: Literal['start','append','finish','list','time','cancel','resume']
+    action: Literal['start','append','finish','list','time','cancel','resume','reply']
     request_key: StrictStr=Field(min_length=1,max_length=100)
     agent_name: StrictStr=Field(default='',max_length=200)
     agent_phone: StrictStr=Field(default='',max_length=50)
     text: StrictStr=Field(default='',max_length=4096)
     order_id: StrictInt | None=None
     photo: StrictStr=Field(default='',max_length=500)
+    reply_chat_id: StrictInt | None=None
+    reply_message_id: StrictInt | None=None
 
 
 def private_intake_targets(db):
@@ -16740,7 +16744,8 @@ def private_intake_info(db,order):
     mapping,_=dispatch_slot_layout(db,order.work_date,rows)
     number=(private_intake_chat_numbers(db,order.work_date,rows).get(order.id,meta.get('chat_number'))
         if meta.get('private_intake') else mapping.get(order.id,meta.get('slot_number')))
-    return {'id':order.id,'number':number,'agent_name':order.agent_name,
+    return {'id':order.id,'number':number,'agent_name':order.organization or order.agent_name or 'Без агента',
+        'is_reservation':not bool(meta.get('source_messages')),
         'work_date':str(order.work_date),'cancelled':order.status=='cancelled'}
 
 
@@ -16775,6 +16780,7 @@ async def private_intake_deliver(db,event):
 @app.post('/api/bot/private-intake',dependencies=[Depends(_bot_key)])
 async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
     if not dispatch_can_access(db,data.tg_id):raise HTTPException(403,'Только владелец и диспетчеры')
+    original_hash=dispatch_hash(data.model_dump())
     key=str(data.tg_id)+':'+data.request_key
     # Serialize one operator's retries and current-order changes, then lock the work day.
     if db.get_bind().dialect.name=='postgresql':
@@ -16782,7 +16788,7 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
     event=db.get(PrivateIntakeEvent,key)
     if event:
         saved=json.loads(event.payload)
-        if saved['input_hash']!=dispatch_hash(data.model_dump()):raise HTTPException(409,'Запрос уже использован')
+        if saved['input_hash']!=original_hash:raise HTTPException(409,'Запрос уже использован')
         db.commit();return await private_intake_deliver(db,event)
     session=db.get(PrivateIntakeSession,data.tg_id)
     if data.action=='list':
@@ -16791,7 +16797,15 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
         return {'ok':True,'items':[private_intake_info(db,o) for o in rows],
             'next_number':private_intake_prompt_number(db,tomorrow,rows)}
     targets=private_intake_targets(db)
+    if data.action=='reply' and data.reply_chat_id not in targets:return {'ok':True,'ignored':True}
     if not targets and data.action!='finish':raise HTTPException(409,'Не настроен чат сверки ЛЕГИОН. Проверьте настройки чатов.')
+    group_reply=data.action=='reply'
+    if group_reply:
+        if data.reply_chat_id not in targets or not data.reply_message_id:
+            raise HTTPException(403,'Ответ доступен только в чате заказов ЛЕГИОН')
+        oid=private_intake_reply_order(db,data.reply_chat_id,data.reply_message_id)
+        if oid is None:return {'ok':True,'ignored':True}
+        data=data.model_copy(update={'action':'append','order_id':oid})
     order=None
     if data.action=='start':
         if not data.agent_name.strip():raise HTTPException(422,'Введите агента')
@@ -16832,7 +16846,7 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
                 'missing_fields':['category','team_size','deceased_name','issue_time']},ensure_ascii=False)))
         if not session:session=PrivateIntakeSession(tg_id=data.tg_id);db.add(session)
         session.order_id=order.id
-        notice=f'<b><u>{number} заказ</u></b>: {escape(order.agent_name)} 👇'
+        notice=f'<b><u>{number} заказ</u></b>: {escape(order.organization or order.agent_name or "Без агента")} 👇'
     elif data.action=='finish':
         if session:session.order_id=None
         notice=None
@@ -16845,13 +16859,21 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
         if not plan:raise HTTPException(409,'Заказ не поддерживает этот режим')
         meta=json.loads(plan.payload);number=private_intake_info(db,order)['number']
         heading=f'Частный №{number} · {order.work_date.strftime("%d.%m")} · {order.agent_name}'
+        if order.work_date<datetime.now(MOSCOW).date() and data.action in {'resume','append','time'}:
+            raise HTTPException(409,'Дата заказа уже прошла')
         if data.action=='resume':
             refs=private_intake_edit_refs(db,order,meta)
-            if not refs:raise HTTPException(409,'Не найдено исходное сообщение брони в группе. Автоматически новое сообщение не создаётся.')
-            meta['edit_group_messages']=refs
+            if not refs and any(m.get('text','').strip() for m in meta.get('source_messages',[])):
+                raise HTTPException(409,'Доставка предыдущего текста не подтверждена. Проверьте сообщение в группе.')
+            notice=None
+            if not meta.get('private_intake'):
+                notice=f'<b><u>{number} заказ</u></b>: {escape(order.organization or order.agent_name or "Без агента")} 👇'
+            meta.update(private_intake=True,chat_number=number)
+            meta.setdefault('source_messages',[])
+            if refs:meta['edit_group_messages']=refs
             plan.payload=json.dumps(meta,ensure_ascii=False)
             if not session:session=PrivateIntakeSession(tg_id=data.tg_id);db.add(session)
-            session.order_id=order.id;notice=None
+            session.order_id=order.id
         elif data.action=='append':
             if not data.text.strip() and not data.photo:raise HTTPException(422,'Пришлите текст или фотографию')
             messages=meta.setdefault('source_messages',[])
@@ -16863,16 +16885,18 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
             if len(messages)>=100:raise HTTPException(409,'Лимит 100 сообщений на заказ')
             messages.append({'text':data.text,'photo':data.photo,'by':data.tg_id,'at':datetime.now(MOSCOW).isoformat()})
             if len(private_intake_join_text(messages))>3500:raise HTTPException(422,'Общий текст заказа слишком длинный: максимум 3500 символов. Дополнение не сохранено.')
+            meta['source_revision']=int(meta.get('source_revision',0))+1
             plan.payload=json.dumps(meta,ensure_ascii=False)
+            private_intake_queue_update(db,order,meta,private_intake_join_text(messages))
             notice=escape(data.text) if data.text else None
         elif data.action=='time':
             if not re.fullmatch(r'([01]\d|2[0-3]):[0-5]\d',data.text):raise HTTPException(422,'Время в формате 09:30')
-            if dispatch_assignments(db,order):raise HTTPException(409,'У заказа назначен состав. Измените время в приложении и уведомите бригадира.')
             dispatch_editable(db,order,dispatch_order_data(db,order,0)['revision'])
             old=order.issue_time.strftime('%H:%M');order.issue_time=time.fromisoformat(data.text)
             order.arrival_time=(datetime.combine(order.work_date,order.issue_time)-timedelta(minutes=30)).time()
             meta['missing_fields']=[f for f in meta.get('missing_fields',[]) if f!='issue_time'];plan.payload=json.dumps(meta,ensure_ascii=False)
             notice=f'<b>{escape(heading)}</b>\nВремя выдачи изменено: {old} → {data.text}'
+            private_intake_queue_update(db,order,meta,f'Время выдачи изменено: {old} → {data.text}')
         elif data.action=='cancel':
             card=dispatch_match_card(db,order)
             if plan.approved_card_id or (card and effective_order_photo(db,card)['first_received']):raise HTTPException(409,'После фото или подтверждения зарплаты отмена здесь недоступна')
@@ -16911,7 +16935,7 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
         if data.action=='cancel' and cancelled_leader:
             deliveries.append({'status':'pending','method':'sendMessage','data':{
                 'chat_id':cancelled_leader,'text':escape(plain),'parse_mode':'HTML'}})
-    event=PrivateIntakeEvent(key=key,payload=json.dumps({'input_hash':dispatch_hash(data.model_dump()),'result':result,'deliveries':deliveries},ensure_ascii=False))
+    event=PrivateIntakeEvent(key=key,payload=json.dumps({'input_hash':original_hash,'result':result,'deliveries':deliveries},ensure_ascii=False))
     db.add(event);db.commit()
     return await private_intake_deliver(db,event)
 
@@ -17398,3 +17422,33 @@ INLINE_INDEX_HTML=INLINE_INDEX_HTML.replace('</head>',r'''<style>
 #dispatchEditor .private-source-content{flex:1 1 auto;min-height:0;overflow:auto;padding:0 6px 5px;overscroll-behavior:contain;overflow-anchor:none;scroll-behavior:auto;user-select:text;-webkit-user-select:text;-webkit-touch-callout:default;touch-action:pan-y}
 #dispatchEditor .private-source-content p:first-child{border-top:0;margin-top:4px;padding-top:0}
 </style></head>''',1)
+
+
+def private_intake_reply_order(db,chat_id,message_id):
+    matches=set()
+    for row in db.scalars(select(PrivateIntakeEvent)):
+        saved=json.loads(row.payload);oid=saved.get('result',{}).get('id')
+        if not oid:continue
+        for delivery in saved.get('deliveries',[]):
+            data=delivery.get('data',{})
+            if (delivery.get('status')=='sent' and data.get('chat_id')==chat_id
+                    and (delivery.get('message_id') or data.get('message_id'))==message_id):
+                matches.add(oid)
+    if len(matches)>1:raise HTTPException(409,'Не удалось однозначно определить заказ')
+    return next(iter(matches),None)
+
+
+def private_intake_queue_update(db,order,meta,text):
+    db.flush()
+    item=dispatch_order_data(db,order,0)
+    leader=item.get('brigadier') or {}
+    if (order.work_date<datetime.now(MOSCOW).date() or not item.get('composition_complete')
+            or not leader.get('tg_id') or not dispatch_original_order_delivered(db,order.id,order.work_date,leader['tg_id'])):
+        return
+    key='cce0'+secrets.token_hex(22)
+    value=f"В заказе произошли изменения\nЧастный · {order.organization or order.agent_name} · {order.work_date.strftime('%d.%m')}\n\n{text or 'Добавлена фотография. Откройте карточку заказа.'}"
+    db.add(DispatchDelivery(fingerprint=key,work_date=order.work_date,payload=json.dumps({
+        'kind':'crew_change','chat_id':leader['tg_id'],'order_id':order.id,'revision':item['revision'],
+        'confirmable':True,'text':escape(value),'status':'pending','ack_label':'✅ Изменения принял'},ensure_ascii=False)))
+    meta['crew_receipt']={'notice_key':key,'tg_id':leader['tg_id'],'revision':item['revision']}
+    db.get(DispatchPlan,order.id).payload=json.dumps(meta,ensure_ascii=False)
