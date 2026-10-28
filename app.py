@@ -5422,6 +5422,29 @@ def order_completion_data(db: Session, work_date: date):
             'closed': sum(x['closed'] for x in counts.values())}
 
 
+def order_completion_missing_number_orders(db: Session, work_date: date):
+    orders = dispatch_rows(db, work_date)
+    # Precise daily numbers and assigned brigadiers are available only for
+    # orders managed by the dispatcher board.
+    if not any(db.get(DispatchPlan, order.id) for order in orders):
+        return []
+    numbers, _ = dispatch_slot_layout(db, work_date, orders)
+    missing = []
+    for order in orders:
+        if dispatch_match_card(db, order):
+            continue
+        data = dispatch_order_data(db, order, numbers[order.id])
+        brigadier = data.get('brigadier') or {}
+        missing.append({
+            'source': order.source,
+            'number': data['number'],
+            'surname': data.get('deceased_name') or '',
+            'brigadier_tg_id': brigadier.get('tg_id'),
+            'brigadier_name': brigadier.get('display_name') or brigadier.get('full_name') or '',
+        })
+    return missing
+
+
 @app.get('/api/bot/order-completion', dependencies=[Depends(_bot_key)])
 def bot_order_completion(work_date: date, db: Session = Depends(get_db)):
     result = order_completion_data(db, work_date)
@@ -5436,6 +5459,7 @@ def bot_order_completion(work_date: date, db: Session = Depends(get_db)):
         'phone':brigadier_phone8(row.phone),'work_date':work_date.isoformat(),
         'sent_at':row.sent_at.isoformat(),
         'on_contact':bool(states.get(row.id))} for row in rows]
+    result['missing_number_orders'] = order_completion_missing_number_orders(db, work_date)
     overrides = {o.event_id: o for o in db.scalars(select(OrderPhotoOverride).where(
         OrderPhotoOverride.event_id.in_([r.id for r in rows])))} if rows else {}
     result['photo_overrides'] = {
