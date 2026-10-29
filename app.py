@@ -17943,3 +17943,61 @@ body.owner-header-controls #app>#unifiedHeaderControls{display:flex!important}
 
 
 INLINE_INDEX_HTML = _readiness_month_header_html(INLINE_INDEX_HTML)
+
+
+# Present the readiness title and its target day as one compact context card.
+# The month picker remains a separate control on the right and the reminder
+# action stays in the existing three-button toolbar above it.
+def _readiness_context_block_html(html):
+    return html.replace('</body>', r'''<style id="readiness-context-block-style">
+body.dashboard-compact #employeeReadiness .readiness-section-heading{
+ display:grid!important;grid-template-columns:minmax(0,1fr) auto;
+ align-items:stretch!important;gap:6px!important;margin:0 0 8px!important
+}
+body.dashboard-compact #employeeReadiness .readiness-context-card{
+ min-width:0;display:flex;align-items:center;justify-content:space-between;
+ gap:10px;padding:7px 10px;border:1px solid var(--line);border-radius:11px;
+ background:var(--panel);color:var(--text)
+}
+body.dashboard-compact #employeeReadiness .readiness-context-copy{
+ min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:2px
+}
+body.dashboard-compact #employeeReadiness .readiness-context-copy #readinessTitle{
+ margin:0!important;font-size:16px!important;font-weight:750;line-height:1.15;
+ width:auto;white-space:nowrap
+}
+body.dashboard-compact #employeeReadiness .readiness-context-copy small{
+ display:block;color:var(--muted);font-size:9px;line-height:1.2;white-space:nowrap
+}
+body.dashboard-compact #employeeReadiness .readiness-context-card #readinessDayLabel{
+ flex:0 0 auto;display:inline-block;margin:0!important;padding:5px 7px;
+ border:1px solid var(--gold2);border-radius:8px;background:var(--panel2);
+ color:var(--gold2);font-size:10px!important;line-height:1.15;white-space:nowrap
+}
+body.dashboard-compact #employeeReadiness .readiness-section-heading>.dispatch-month-picker{
+ align-self:stretch;min-height:0;height:auto;max-width:145px
+}
+@media(max-width:380px){
+ body.dashboard-compact #employeeReadiness .readiness-section-heading{gap:4px!important}
+ body.dashboard-compact #employeeReadiness .readiness-context-card{gap:6px;padding:6px 7px}
+ body.dashboard-compact #employeeReadiness .readiness-context-copy #readinessTitle{font-size:14px!important}
+ body.dashboard-compact #employeeReadiness .readiness-context-copy small{font-size:8px}
+ body.dashboard-compact #employeeReadiness .readiness-context-card #readinessDayLabel{font-size:9px!important;padding:4px 5px}
+ body.dashboard-compact #employeeReadiness .readiness-section-heading>.dispatch-month-picker{max-width:126px!important}
+}
+</style>
+<script>
+(()=>{
+ const heading=document.querySelector('#employeeReadiness .readiness-section-heading');
+ const title=heading?.querySelector('#readinessTitle');
+ const day=heading?.querySelector('#readinessDayLabel');
+ if(!heading||!title||!day||heading.querySelector('.readiness-context-card'))return;
+ const card=document.createElement('div');card.className='readiness-context-card';
+ const copy=document.createElement('div');copy.className='readiness-context-copy';
+ const note=document.createElement('small');note.textContent='Отписка сотрудников';
+ copy.append(title,note);card.append(copy,day);heading.prepend(card);
+})();
+</script></body>''', 1)
+
+
+INLINE_INDEX_HTML = _readiness_context_block_html(INLINE_INDEX_HTML)
