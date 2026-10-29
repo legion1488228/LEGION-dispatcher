@@ -4953,6 +4953,37 @@ class NumberReassignInput(BaseModel):
     keep_contact: bool = False
 
 
+def queue_number_reassignment(db, rows, old_tg_id, new_tg_id, keep_contact, requested_by):
+    """Create one durable transfer job without changing the Telegram card identity."""
+    rows = sorted(rows, key=lambda row: row.id)
+    target=db.scalar(select(Employee).where(Employee.tg_id==new_tg_id, Employee.active.is_(True),
+        Employee.group_code=='brigadier', _visible_employee()))
+    if not target or not target.phone or new_tg_id==old_tg_id:
+        raise HTTPException(422,'Выберите другого действующего бригадира с номером телефона')
+    if not rows or len({r.work_date for r in rows})!=1 or any(
+            r.tg_id!=old_tg_id or db.get(NumberCardDeletion,r.id) for r in rows):
+        raise HTTPException(409,'Заказы изменились. Откройте список заново')
+    pending=[db.get(NumberReassignment,r.id) for r in rows]
+    if any(job and job.status=='pending' for job in pending):
+        same=next((job for job in pending if job and job.status=='pending'),None)
+        payload=json.loads(same.payload) if same else {}
+        if payload.get('new_tg_id')==new_tg_id:
+            return payload.get('token') or same.token
+        raise HTTPException(409,'Замена этих заказов уже выполняется')
+    token=secrets.token_hex(16)
+    payload={'token':token,'old_tg_id':old_tg_id,'new_tg_id':new_tg_id,
+        'label':_employee_dict(target)['display_name'],'phone':brigadier_phone8(target.phone),
+        'keep_contact':bool(keep_contact),'requested_by':requested_by,
+        'work_date':rows[0].work_date.isoformat(),'cards':[{
+            'event_id':r.id,'chat_id':r.chat_id,'message_id':r.message_id,'source':r.source,
+            'surname':r.surname} for r in rows]}
+    for r in rows:
+        job=db.get(NumberReassignment,r.id)
+        if not job: job=NumberReassignment(event_id=r.id);db.add(job)
+        job.token=token;job.payload=json.dumps(payload,ensure_ascii=False);job.status='pending';job.error=''
+    return token
+
+
 @app.get('/api/number-reassign/brigadiers')
 def reassignment_candidates(db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
     return {'items': [_employee_dict(e) for e in db.scalars(select(Employee).where(
@@ -4964,26 +4995,9 @@ def reassignment_candidates(db: Session = Depends(get_db), user: TelegramUser = 
 def request_number_reassignment(data: NumberReassignInput, db: Session=Depends(get_db), user: TelegramUser=Depends(require_admin)):
     ids=sorted(set(data.event_ids))
     rows=db.scalars(select(NumberCardEvent).where(NumberCardEvent.id.in_(ids)).order_by(NumberCardEvent.id).with_for_update()).all()
-    target=db.scalar(select(Employee).where(Employee.tg_id==data.new_tg_id, Employee.active.is_(True),
-        Employee.group_code=='brigadier', _visible_employee()))
-    if not target or not target.phone or data.new_tg_id==data.old_tg_id:
-        raise HTTPException(422,'Выберите другого действующего бригадира с номером телефона')
-    if len(rows)!=len(ids) or len({r.work_date for r in rows})!=1 or any(
-            r.tg_id!=data.old_tg_id or db.get(NumberCardDeletion,r.id) for r in rows):
+    if len(rows)!=len(ids):
         raise HTTPException(409,'Заказы изменились. Откройте список заново')
-    if any((job:=db.get(NumberReassignment,r.id)) and job.status=='pending' for r in rows):
-        raise HTTPException(409,'Замена этих заказов уже выполняется')
-    token=secrets.token_hex(16)
-    payload={'token':token,'old_tg_id':data.old_tg_id,'new_tg_id':data.new_tg_id,
-        'label':_employee_dict(target)['display_name'],'phone':brigadier_phone8(target.phone),
-        'keep_contact':data.keep_contact,'requested_by':user.id,
-        'work_date':rows[0].work_date.isoformat(),'cards':[{
-            'event_id':r.id,'chat_id':r.chat_id,'message_id':r.message_id,'source':r.source,
-            'surname':r.surname} for r in rows]}
-    for r in rows:
-        job=db.get(NumberReassignment,r.id)
-        if not job: job=NumberReassignment(event_id=r.id);db.add(job)
-        job.token=token;job.payload=json.dumps(payload,ensure_ascii=False);job.status='pending';job.error=''
+    token=queue_number_reassignment(db,rows,data.old_tg_id,data.new_tg_id,data.keep_contact,user.id)
     db.commit()
     return {'token':token,'status':'pending'}
 
@@ -14046,6 +14060,40 @@ def dispatch_match_card(db, order, crew=None):
     return None
 
 
+@app.get('/api/bot/number-cards/reconcile-duplicates', dependencies=[Depends(_bot_key)])
+def dispatch_duplicate_number_cards(db: Session = Depends(get_db)):
+    """Return only unambiguous, unlinked duplicate cards created during a crew replacement."""
+    today=datetime.now(MOSCOW).date()
+    cards=list(db.scalars(select(NumberCardEvent).where(
+        NumberCardEvent.work_date.between(today-timedelta(days=1),today+timedelta(days=14)),
+        _visible_number_card()).order_by(NumberCardEvent.id)))
+    linked={}
+    for plan in db.scalars(select(DispatchPlan)):
+        card_id=json.loads(plan.payload).get('number_card_id')
+        if type(card_id) is int: linked[card_id]=plan.order_id
+    normalize=lambda value:' '.join(str(value or '').casefold().replace('ё','е').split())
+    groups={}
+    for card in cards:
+        groups.setdefault((card.work_date,card.source,normalize(card.surname)),[]).append(card)
+    items=[]
+    for (day,source,name),same in groups.items():
+        canonical=[card for card in same if card.id in linked]
+        if len(same)<2 or len(canonical)!=1 or not name: continue
+        order=db.get(Order,linked[canonical[0].id])
+        if not order or order.status=='cancelled' or order.work_date!=day or order.source!=source: continue
+        # Delete automatically only when this surname belongs to exactly one board order.
+        matches=[row for row in dispatch_rows(db,day) if row.source==source and row.status!='cancelled'
+            and normalize(row.deceased_name)==name]
+        if len(matches)!=1 or matches[0].id!=order.id: continue
+        for card in same:
+            if card.id in linked or db.get(NumberReassignment,card.id): continue
+            deletion=cabinet_order_deletion_info(db,card)
+            if deletion['can_delete']:
+                items.append({'event_id':card.id,'tg_id':card.tg_id,'chat_id':card.chat_id,
+                    'message_id':card.message_id,'work_date':day.isoformat()})
+    return {'items':items}
+
+
 def dispatch_destination_type(value, destination):
     if value in ('cemetery', 'cremation'): return value
     return 'cremation' if re.search(r'крематор|кремаци', str(destination or ''), re.I) else 'cemetery'
@@ -14536,6 +14584,7 @@ async def dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session 
     before=dispatch_order_data(db,order,0)
     receipt_before=dispatch_receipt_info(db,before)
     current=dispatch_assignments(db,order)
+    current_card=dispatch_match_card(db,order,current)
     previous={a.employee_id for a in current}
     previous_leaders={a.employee_id for a in current if a.role=='brigadier'}
     people=list(db.scalars(select(Employee).where(Employee.id.in_(ids),or_(
@@ -14582,6 +14631,15 @@ async def dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session 
     after=dispatch_order_data(db,order,0)
     plan=db.get(DispatchPlan,order.id)
     meta=json.loads(plan.payload)
+    old_tg_id=(before.get('brigadier') or {}).get('tg_id')
+    new_tg_id=(after.get('brigadier') or {}).get('tg_id')
+    reassignment_token=None
+    if current_card and old_tg_id and new_tg_id and old_tg_id!=new_tg_id:
+        # Keep the existing group post and transfer its ownership. The bot edits
+        # this exact message instead of publishing another number card.
+        meta['number_card_id']=current_card.id
+        reassignment_token=queue_number_reassignment(
+            db,[current_card],old_tg_id,new_tg_id,False,user.id)
     notice=dispatch_queue_crew_change(db,before,after) if previous else None
     if notice:
         # A new replacement always requires its own acknowledgement, even A→B→A.
@@ -14595,7 +14653,7 @@ async def dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session 
     plan.payload=json.dumps(meta,ensure_ascii=False)
     db.commit()
     notice_status=await dispatch_deliver_crew_change(db,notice) if notice else None
-    return {'ok':True,'crew_notice_status':notice_status}
+    return {'ok':True,'crew_notice_status':notice_status,'number_reassignment':reassignment_token}
 
 
 
@@ -14752,7 +14810,12 @@ def dispatch_activate(data: DispatchActivationInput, db: Session = Depends(get_d
     if not dispatch_original_order_delivered(db,item['id'],item['work_date'],data.tg_id):
         raise HTTPException(409,'Сам заказ ещё не отправлен бригадиру. Автопубликация номера заблокирована.')
     plan=db.get(DispatchPlan,order.id)
-    carried=json.loads(plan.payload).get('crew_receipt',{}) if plan else {}
+    plan_meta=json.loads(plan.payload) if plan else {}
+    carried=plan_meta.get('crew_receipt',{})
+    linked_card_id=plan_meta.get('number_card_id')
+    transfer=db.get(NumberReassignment,linked_card_id) if type(linked_card_id) is int else None
+    if transfer and transfer.status=='pending':
+        raise HTTPException(409,'Карточка номера переносится новому бригадиру. Повторите через несколько секунд.')
     crew_only_change=(carried.get('revision')==item['revision']
         and carried.get('tg_id')==data.tg_id and (carried.get('activation_confirmed_at') or carried.get('confirmed_at'))
         and activation['revision'] in carried.get('previous_revisions',[]))
@@ -17862,10 +17925,11 @@ body.owner-header-controls #app>#unifiedHeaderControls{display:flex!important}
  const month=document.querySelector('.dispatch-month-picker');
  const heading=document.querySelector('#employeeReadiness .readiness-section-heading');
  const title=heading?.querySelector('#readinessTitle');
+ const day=heading?.querySelector('#readinessDayLabel');
  const ownerRow=document.querySelector('#unifiedHeaderControls');
  const management=document.querySelector('#ownerManagementTop');
  const refresh=document.querySelector('#refreshBtn');
- if(month&&title)title.insertAdjacentElement('afterend',month);
+ if(month&&day)day.insertAdjacentElement('afterend',month);
  if(ownerRow&&management&&refresh)ownerRow.append(management,refresh);
 })();
 </script></body>''', 1)
