@@ -14077,16 +14077,23 @@ def dispatch_duplicate_number_cards(db: Session = Depends(get_db)):
         groups.setdefault((card.work_date,card.source,normalize(card.surname)),[]).append(card)
     items=[]
     for (day,source,name),same in groups.items():
-        canonical=[card for card in same if card.id in linked]
-        if len(same)<2 or len(canonical)!=1 or not name: continue
-        order=db.get(Order,linked[canonical[0].id])
-        if not order or order.status=='cancelled' or order.work_date!=day or order.source!=source: continue
-        # Delete automatically only when this surname belongs to exactly one board order.
+        if len(same)<2 or not name: continue
+        # Group posts contain only the surname, while an imported order may
+        # contain the deceased person's full name. Compare their first words.
+        surname=name.split()[0]
         matches=[row for row in dispatch_rows(db,day) if row.source==source and row.status!='cancelled'
-            and normalize(row.deceased_name)==name]
-        if len(matches)!=1 or matches[0].id!=order.id: continue
+            and normalize(row.deceased_name).split()[:1]==[surname]]
+        if len(matches)!=1: continue
+        order=matches[0]
+        canonical=[card for card in same if linked.get(card.id)==order.id]
+        if not canonical:
+            leader=next((a.employee for a in dispatch_assignments(db,order)
+                if a.role=='brigadier' and a.employee and a.employee.tg_id),None)
+            canonical=[card for card in same if leader and card.tg_id==leader.tg_id]
+        if len(canonical)!=1: continue
         for card in same:
-            if card.id in linked or db.get(NumberReassignment,card.id): continue
+            transfer=db.get(NumberReassignment,card.id)
+            if card.id==canonical[0].id or card.id in linked or (transfer and transfer.status=='pending'): continue
             deletion=cabinet_order_deletion_info(db,card)
             if deletion['can_delete']:
                 items.append({'event_id':card.id,'tg_id':card.tg_id,'chat_id':card.chat_id,
