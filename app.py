@@ -14705,6 +14705,11 @@ class DispatchReceiptInput(BaseModel):
     message_id: StrictInt = Field(ge=1)
 
 
+class DispatchPrivateCleanupInput(BaseModel):
+    tg_id: StrictInt = Field(gt=0)
+    report_key: StrictStr = Field(pattern=r'^card:-?\d+:\d+$', max_length=180)
+
+
 class DispatchActivationInput(BaseModel):
     job_id: StrictStr = Field(pattern=r'^[a-f0-9]{64}$')
     tg_id: StrictInt
@@ -14895,6 +14900,61 @@ def dispatch_confirm_receipt(data: DispatchReceiptInput, db: Session = Depends(g
         meta['crew_receipt']=carried;plan.payload=json.dumps(meta,ensure_ascii=False)
     row.payload=json.dumps(saved,ensure_ascii=False);db.commit()
     return {'ok':True,'confirmed_at':saved['confirmed_at'],'activation_status':job.status}
+
+
+@app.post('/api/bot/dispatch-board/private-cleanup', dependencies=[Depends(_bot_key)])
+def dispatch_private_cleanup(data: DispatchPrivateCleanupInput, db: Session = Depends(get_db)):
+    """Return this brigadier's current and earlier order messages for deletion."""
+    _, chat_id, message_id = data.report_key.split(':')
+    card = db.scalar(select(NumberCardEvent).where(
+        NumberCardEvent.chat_id == int(chat_id),
+        NumberCardEvent.message_id == int(message_id),
+        NumberCardEvent.tg_id == data.tg_id,
+    ))
+    if not card:
+        return {'ok': True, 'messages': []}
+
+    cutoff = card.work_date
+    completed_order_id = None
+    for plan in db.scalars(select(DispatchPlan)):
+        try:
+            linked_card_id = json.loads(plan.payload or '{}').get('number_card_id')
+        except (TypeError, ValueError):
+            continue
+        if linked_card_id == card.id:
+            completed_order_id = plan.order_id
+            order = db.get(Order, plan.order_id)
+            if order:
+                cutoff = order.work_date
+            break
+
+    messages = []
+    seen = set()
+    for delivery in db.scalars(select(DispatchDelivery).where(
+            DispatchDelivery.work_date <= cutoff).order_by(
+                DispatchDelivery.work_date, DispatchDelivery.fingerprint)):
+        try:
+            saved = json.loads(delivery.payload or '{}')
+        except (TypeError, ValueError):
+            continue
+        message_id_value = saved.get('message_id')
+        if (saved.get('kind') not in {'order', 'crew_change'}
+                or saved.get('chat_id') != data.tg_id
+                or type(message_id_value) is not int or message_id_value < 1):
+            continue
+        # Keep other orders for later today visible. Their own cards disappear
+        # when those orders receive a final tea report.
+        if (delivery.work_date == cutoff
+                and saved.get('order_id') != completed_order_id):
+            continue
+        target = (data.tg_id, message_id_value)
+        if target in seen:
+            continue
+        seen.add(target)
+        messages.append({'chat_id': target[0], 'message_id': target[1]})
+
+    return {'ok': True, 'messages': messages, 'cutoff': cutoff.isoformat(),
+            'completed_order_id': completed_order_id}
 
 
 def dispatch_pending_order_valid(db,work_date,message):
