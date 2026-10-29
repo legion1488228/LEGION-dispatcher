@@ -17741,3 +17741,134 @@ def _dispatch_free_staff_numbering_html(html):
 
 
 INLINE_INDEX_HTML = _dispatch_free_staff_numbering_html(INLINE_INDEX_HTML)
+
+
+# Keep the application header identical on every page: dates first, then the
+# month selector.  The owner-only management and refresh actions live in that
+# second row and are visible only inside the owner's own cabinet.
+def _unified_page_header_html(html):
+    date_strip = '<section class="date-strip" id="dateStrip"></section>'
+    if html.count(date_strip) != 1:
+        raise RuntimeError('Unified header date strip anchor missing')
+    html = html.replace(
+        date_strip,
+        date_strip + '\n    <div id="unifiedHeaderControls" class="unified-header-controls"></div>',
+        1,
+    )
+
+    render_anchor = '  const v = currentViewId();'
+    if html.count(render_anchor) != 1:
+        raise RuntimeError('Unified header view anchor missing')
+    html = html.replace(
+        render_anchor,
+        """  const v = currentViewId();
+  const ownerHeaderControls=v==='ownerCabinetView'&&state.bootstrap?.cabinet_kind==='owner'&&state.bootstrap?.is_owner===true;
+  document.body.classList.toggle('owner-header-controls',ownerHeaderControls);
+  const ownerHeaderManagement=qs('#ownerManagementTop'),ownerHeaderRefresh=qs('#refreshBtn');
+  if(ownerHeaderManagement)ownerHeaderManagement.hidden=!ownerHeaderControls;
+  if(ownerHeaderRefresh){ownerHeaderRefresh.hidden=!ownerHeaderControls;ownerHeaderRefresh.classList.toggle('hidden',!ownerHeaderControls)}""",
+        1,
+    )
+
+    return html.replace('</body>', r'''<style id="unified-page-header-style">
+/* Telegram already supplies the permanent app title.  Do not repeat a page
+   name inside the web app; every page starts with the same date strip. */
+#app>.topbar{display:none!important}
+#app>#dateStrip{margin-top:0!important}
+#app>.unified-header-controls{
+ box-sizing:border-box;display:flex;align-items:center;justify-content:flex-end;
+ gap:6px;min-height:42px;padding:4px 8px 7px;margin:0;background:var(--bg)
+}
+#app>.unified-header-controls .dispatch-month-picker{
+ position:relative!important;display:inline-flex!important;align-items:center;
+ box-sizing:border-box;max-width:min(190px,calc(100vw - 92px));min-height:34px;
+ margin:0!important;padding:6px 9px!important;border:1px solid var(--line);
+ border-radius:10px;background:var(--panel2);color:var(--gold2);font-size:12px;
+ line-height:1.2;white-space:nowrap;overflow:hidden;isolation:isolate
+}
+#app>.unified-header-controls .dispatch-month-picker #dispatchMonth{
+ position:absolute!important;inset:0!important;display:block!important;
+ box-sizing:border-box;width:100%!important;max-width:100%!important;
+ min-width:0!important;height:100%!important;min-height:0!important;
+ margin:0!important;padding:0!important;border:0!important;opacity:0;
+ appearance:none;-webkit-appearance:none;cursor:pointer
+}
+#app>.unified-header-controls #ownerManagementTop,
+#app>.unified-header-controls #refreshBtn{
+ position:relative;box-sizing:border-box;flex:0 0 34px;width:34px;height:34px;
+ min-width:34px;min-height:34px;margin:0;padding:0;border-radius:10px;
+ align-items:center;justify-content:center;font-size:22px;line-height:1
+}
+body:not(.owner-header-controls) #unifiedHeaderControls #ownerManagementTop,
+body:not(.owner-header-controls) #unifiedHeaderControls #refreshBtn{display:none!important}
+body.owner-header-controls #unifiedHeaderControls #ownerManagementTop:not([hidden]),
+body.owner-header-controls #unifiedHeaderControls #refreshBtn:not([hidden]):not(.hidden){display:inline-flex!important}
+@media(max-width:380px){
+ #app>.unified-header-controls{gap:5px;padding-inline:6px}
+ #app>.unified-header-controls .dispatch-month-picker{max-width:calc(100vw - 84px);padding-inline:7px!important;font-size:11px}
+ #app>.unified-header-controls #ownerManagementTop,#app>.unified-header-controls #refreshBtn{flex-basis:32px;width:32px;height:32px;min-width:32px;min-height:32px}
+}
+</style>
+<script>
+(()=>{
+ const row=document.querySelector('#unifiedHeaderControls');
+ const month=document.querySelector('.dispatch-month-picker');
+ const management=document.querySelector('#ownerManagementTop');
+ const refresh=document.querySelector('#refreshBtn');
+ if(!row||!month||!management||!refresh)return;
+ row.append(month,management,refresh);
+ const sync=()=>{
+  const view=typeof currentViewId==='function'?currentViewId():'';
+  const owner=view==='ownerCabinetView'&&state?.bootstrap?.cabinet_kind==='owner'&&state?.bootstrap?.is_owner===true;
+  document.body.classList.toggle('owner-header-controls',owner);
+  management.hidden=!owner;
+  refresh.hidden=!owner;refresh.classList.toggle('hidden',!owner);
+ };
+ document.addEventListener('visibilitychange',sync);
+ sync();
+})();
+</script></body>''', 1)
+
+
+INLINE_INDEX_HTML = _unified_page_header_html(INLINE_INDEX_HTML)
+
+
+# The month belongs to the readiness heading.  The separate row below the
+# dates is reserved for the owner's management/refresh controls in his own
+# cabinet and disappears everywhere else.
+def _readiness_month_header_html(html):
+    return html.replace('</body>', r'''<style id="readiness-month-header-style">
+body:not(.owner-header-controls) #app>#unifiedHeaderControls{display:none!important}
+body.owner-header-controls #app>#unifiedHeaderControls{display:flex!important}
+#employeeReadiness .readiness-section-heading>.dispatch-month-picker{
+ position:relative!important;display:inline-flex!important;align-items:center;
+ box-sizing:border-box;flex:0 0 auto;max-width:150px;min-height:34px;
+ margin:0!important;padding:6px 9px!important;border:1px solid var(--line);
+ border-radius:10px;background:var(--panel2);color:var(--gold2);
+ font-size:11px;line-height:1.2;white-space:nowrap;overflow:hidden;isolation:isolate
+}
+#employeeReadiness .readiness-section-heading>.dispatch-month-picker #dispatchMonth{
+ position:absolute!important;inset:0!important;display:block!important;
+ box-sizing:border-box;width:100%!important;max-width:100%!important;min-width:0!important;
+ height:100%!important;min-height:0!important;margin:0!important;padding:0!important;
+ border:0!important;opacity:0;appearance:none;-webkit-appearance:none;cursor:pointer
+}
+@media(max-width:380px){
+ #employeeReadiness .readiness-section-heading>.dispatch-month-picker{max-width:130px;padding:5px 7px!important;font-size:10px}
+}
+</style>
+<script>
+(()=>{
+ const month=document.querySelector('.dispatch-month-picker');
+ const heading=document.querySelector('#employeeReadiness .readiness-section-heading');
+ const title=heading?.querySelector('#readinessTitle');
+ const ownerRow=document.querySelector('#unifiedHeaderControls');
+ const management=document.querySelector('#ownerManagementTop');
+ const refresh=document.querySelector('#refreshBtn');
+ if(month&&title)title.insertAdjacentElement('afterend',month);
+ if(ownerRow&&management&&refresh)ownerRow.append(management,refresh);
+})();
+</script></body>''', 1)
+
+
+INLINE_INDEX_HTML = _readiness_month_header_html(INLINE_INDEX_HTML)
