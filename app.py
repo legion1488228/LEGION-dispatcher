@@ -930,6 +930,23 @@ def _employee_dict(emp: Employee, workload: int = 0, readiness_status: str | Non
     }
 
 
+def _order_external_member_count(order: Order, db: Session) -> int:
+    """Number of anonymous workers supplied by another organization.
+
+    They fill places in this order, but intentionally have no Employee rows,
+    readiness records, workload or payroll entries.
+    """
+    model = globals().get('DispatchPlan')
+    if model is None:
+        return 0
+    plan = db.get(model, order.id)
+    try:
+        value = json.loads(plan.payload or '{}').get('external_member_count', 0) if plan else 0
+    except (ValueError, TypeError, AttributeError):
+        value = 0
+    return min(max(0, order.team_size - 1), value if type(value) is int else 0)
+
+
 def _order_dict(order: Order, db: Session, include_candidates: bool = False):
     daily_number = None
     if order.source == "gbu":
@@ -952,6 +969,7 @@ def _order_dict(order: Order, db: Session, include_candidates: bool = False):
     ).scalars().all()
     brig = next((a.employee for a in assignments if a.role == "brigadier" and a.employee and a.employee.tg_id not in HIDDEN_TG_IDS), None)
     members = [a.employee for a in assignments if a.role == "member" and a.employee and a.employee.tg_id not in HIDDEN_TG_IDS]
+    external_member_count = _order_external_member_count(order, db)
     return {
         "id": order.id,
         "public_id": order.public_id,
@@ -979,8 +997,9 @@ def _order_dict(order: Order, db: Session, include_candidates: bool = False):
         "brigadier": _employee_dict(brig) if brig else None,
         "members": [_employee_dict(x) for x in members],
         "member_target": max(0, order.team_size - 1),
-        "member_count": len(members),
-        "composition_complete": brig is not None and len(members) == order.team_size - 1,
+        "external_member_count": external_member_count,
+        "member_count": len(members) + external_member_count,
+        "composition_complete": brig is not None and len(members) + external_member_count == order.team_size - 1,
         "created_at": order.created_at.isoformat(),
         "updated_at": order.updated_at.isoformat() if order.updated_at else None,
         "contact_time": order.contact_time,
@@ -13876,6 +13895,7 @@ class DispatchCrewInput(BaseModel):
     brigadier_id: StrictInt
     member_ids: list[StrictInt] = Field(max_length=5)
     second_order_employee_ids: list[StrictInt] = Field(default_factory=list, max_length=6)
+    external_member_count: StrictInt = Field(default=0, ge=0, le=5)
     allow_partial: StrictBool = False
 
 
@@ -13996,11 +14016,12 @@ def dispatch_set_pair_meta(db, order, partner_id, color=None):
 def dispatch_pair_crews(db, order, partner, candidate=None):
     def crew(value):
         rows = dispatch_assignments(db, value)
-        return next((a.employee_id for a in rows if a.role == 'brigadier'), None), {a.employee_id for a in rows}
-    leader, people = candidate if candidate is not None else crew(order)
-    other_leader, other_people = crew(partner)
+        return (next((a.employee_id for a in rows if a.role == 'brigadier'), None),
+            {a.employee_id for a in rows}, _order_external_member_count(value, db))
+    leader, people, external = candidate if candidate is not None else crew(order)
+    other_leader, other_people, other_external = crew(partner)
     if ((leader and other_leader and leader != other_leader)
-            or len(set(people) | other_people) > max(order.team_size, partner.team_size)):
+            or len(set(people) | other_people) + max(external, other_external) > max(order.team_size, partner.team_size)):
         raise HTTPException(409, 'Для сдвоенных заказов нужен общий состав и один бригадир. Проверьте назначения.')
 
 
@@ -14139,11 +14160,11 @@ def dispatch_order_data(db, order, number):
     data['destination_type'] = dispatch_destination_type(meta.get('destination_type'),
         data['route_fields'].get('cemetery') or order.route)
     data['church_required'] = dispatch_church_required(meta.get('church_required'), data['route_fields'].get('church'))
-    data['assigned_count'] = int(bool(data['brigadier'])) + len(data['members'])
+    data['assigned_count'] = int(bool(data['brigadier'])) + data['member_count']
     partner = dispatch_pair_partner(db, order)
     data['paired_order_id'] = partner.id if partner else None
     data['revision'] = dispatch_hash({k: data[k] for k in ('id','source','work_date','issue_time','deceased_name',
-        'category','team_size','organization','agent_name','agent_phone','route','notes','destination_type','church_required','brigadier','members','route_fields','approved','is_draft','paired_order_id')})
+        'category','team_size','organization','agent_name','agent_phone','route','notes','destination_type','church_required','brigadier','members','external_member_count','route_fields','approved','is_draft','paired_order_id')})
     if meta.get('source_revision'):
         data['revision']=dispatch_hash({'order_revision':data['revision'],'source_revision':meta['source_revision']})
     return data
@@ -14472,9 +14493,9 @@ def dispatch_update(order_id: int, data: DispatchPlanInput, db: Session = Depend
     missing = dispatch_validate_plan(data)
     if dispatch_pair_partner(db, order) and (missing or data.team_size != order.team_size or data.category == 'carryout'):
         raise HTTPException(409, 'Сначала разъедините заказы перед изменением количества или сохранением черновика')
-    if missing and dispatch_assignments(db, order):
+    if missing and (dispatch_assignments(db, order) or _order_external_member_count(order, db)):
         raise HTTPException(409, 'Сначала снимите состав перед сохранением неполного заказа')
-    if data.team_size != order.team_size and dispatch_assignments(db, order):
+    if data.team_size != order.team_size and (dispatch_assignments(db, order) or _order_external_member_count(order, db)):
         raise HTTPException(409, 'Сначала снимите назначенный состав перед изменением количества')
     for field in ('agent_name','agent_phone','organization','category','team_size','issue_time','deceased_name'):
         value = getattr(data, field)
@@ -14586,7 +14607,10 @@ async def dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session 
     if order.status=='draft':
         raise HTTPException(409,'Сначала дополните заказ: категорию, количество, фамилию и время')
     ids=[data.brigadier_id]+data.member_ids
-    if not 1<=len(ids)<=order.team_size or len(set(ids))!=len(ids) or (not data.allow_partial and len(ids)!=order.team_size):
+    total_size=len(ids)+data.external_member_count
+    if (not 1<=total_size<=order.team_size or len(set(ids))!=len(ids)
+            or data.external_member_count>order.team_size-1
+            or (not data.allow_partial and total_size!=order.team_size)):
         raise HTTPException(422,'Проверьте количество сотрудников и отсутствие повторов')
     before=dispatch_order_data(db,order,0)
     receipt_before=dispatch_receipt_info(db,before)
@@ -14605,7 +14629,7 @@ async def dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session 
             or not profiles[data.brigadier_id].tg_id)):
         raise HTTPException(409,'Проверьте бригадира, его Telegram ID и сотрудников')
     partner = dispatch_pair_partner(db, order)
-    if partner: dispatch_pair_crews(db, order, partner, (data.brigadier_id, set(ids)))
+    if partner: dispatch_pair_crews(db, order, partner, (data.brigadier_id, set(ids), data.external_member_count))
     for other in dispatch_rows(db,order.work_date):
         if other.id==order.id or other.source!=order.source: continue
         if other.deceased_name.strip().casefold()==order.deceased_name.strip().casefold() and any(
@@ -14630,7 +14654,10 @@ async def dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session 
         if pid not in previous:
             db.add(Assignment(order_id=order.id,employee_id=pid,role='brigadier' if pid==data.brigadier_id else 'member',created_by_tg_id=user.id))
     if not plan:
-        db.add(DispatchPlan(order_id=order.id,request_key=secrets.token_hex(16),payload='{}'))
+        plan=DispatchPlan(order_id=order.id,request_key=secrets.token_hex(16),payload='{}');db.add(plan)
+    meta=json.loads(plan.payload)
+    meta['external_member_count']=data.external_member_count
+    plan.payload=json.dumps(meta,ensure_ascii=False)
     order.status='assigning'
     db.flush()
     # Reload relationships after changing assignments so the revision includes the new crew.
@@ -14671,6 +14698,9 @@ def dispatch_clear_crew(order_id: int, data: DispatchRevision, db: Session = Dep
     if not order: raise HTTPException(404,'Заказ не найден')
     dispatch_day_lock(db,order.work_date);dispatch_editable(db,order,data.revision)
     for row in dispatch_assignments(db,order): db.delete(row)
+    plan=db.get(DispatchPlan,order.id)
+    if plan:
+        meta=json.loads(plan.payload);meta.pop('external_member_count',None);plan.payload=json.dumps(meta,ensure_ascii=False)
     order.status='new';db.commit();return {'ok':True}
 
 
@@ -14713,14 +14743,16 @@ def dispatch_approve(order_id: int, data: DispatchRevision, db: Session = Depend
     crew=[]
     assignments=dispatch_assignments(db,order)
     locked=list(db.scalars(select(Employee).where(Employee.id.in_([a.employee_id for a in assignments])).order_by(Employee.id).with_for_update()))
-    if len(locked)!=order.team_size or any(not p.active or p.tg_id in HIDDEN_TG_IDS for p in locked):
+    external_member_count=detail['external_member_count']
+    if len(locked)+external_member_count!=order.team_size or any(not p.active or p.tg_id in HIDDEN_TG_IDS for p in locked):
         raise HTTPException(409,'Список сотрудников изменился')
     for a in sorted(assignments,key=lambda a:a.role!='brigadier'):
         p=a.employee
         crew.append({'id':p.id,'name':_employee_dict(p)['display_name'],'role':a.role,
             'amount':gbu_staff_pay(order.category,a.role=='brigadier',p.full_name,p.metro)})
     db.add(GbuPayrollRoster(report_key=key,work_date=order.work_date,payload=json.dumps({
-        'category':order.category,'crew':crew,'dispatch_order_id':order.id},ensure_ascii=False),created_by=user.id))
+        'category':order.category,'crew':crew,'external_member_count':external_member_count,
+        'dispatch_order_id':order.id},ensure_ascii=False),created_by=user.id))
     if not plan:
         plan=DispatchPlan(order_id=order.id,request_key=secrets.token_hex(16),payload='{}');db.add(plan)
     plan.approved_card_id=card.id
@@ -14761,6 +14793,8 @@ def dispatch_message(order, number):
     lines+=['','Состав:']
     for p in [order['brigadier']]+order['members']:
         lines.append(escape(dispatch_crew_person(p)))
+    if order.get('external_member_count'):
+        lines.append(f'Сторонняя организация — {order["external_member_count"]} чел.')
     return '\n'.join(lines)
 
 
@@ -15092,7 +15126,9 @@ def dispatch_crew_change_text(before, after):
     new={p['id']:p for p in [after.get('brigadier'),*after.get('members',[])] if p}
     removed=[p for pid,p in old.items() if pid not in new]
     added=[p for pid,p in new.items() if pid not in old]
-    if not removed and not added: return None
+    old_external=int(before.get('external_member_count') or 0)
+    new_external=int(after.get('external_member_count') or 0)
+    if not removed and not added and old_external==new_external: return None
     source='ГБУ' if after['source']=='gbu' else 'Частный'
     lines=['<b>В заказе произошли изменения</b>',
         escape(f"{source} · {after['deceased_name']} · {after['work_date']}")]
@@ -15100,6 +15136,10 @@ def dispatch_crew_change_text(before, after):
         lines+=['','<b>Забрали:</b>']+[escape(dispatch_crew_person(p)) for p in removed]
     if added:
         lines+=['','<b>Дали:</b>']+[escape(dispatch_crew_person(p)) for p in added]
+    if new_external<old_external:
+        lines+=['','<b>Забрали:</b>',f'Сторонняя организация — {old_external-new_external} чел.']
+    if new_external>old_external:
+        lines+=['','<b>Дали:</b>',f'Сторонняя организация — {new_external-old_external} чел.']
     return '\n'.join(lines)
 
 
@@ -16427,11 +16467,19 @@ def cabinet_readonly_crew(card_id: int, db: Session = Depends(get_db), user: Tel
         for a in sorted(dispatch_assignments(db, order), key=lambda a: a.role != 'brigadier'):
             p = a.employee
             crew.append({'name': dispatch_crew_person(_employee_dict(p)), 'leader': a.role == 'brigadier'})
+        external_member_count = _order_external_member_count(order, db)
+        if external_member_count:
+            crew.append({'name': f'Сторонняя организация · {external_member_count} чел.',
+                'leader': False, 'external': True})
     else:
         record = db.get(GbuPayrollRoster, f'card:{card.chat_id}:{card.message_id}')
         if record:
-            for m in json.loads(record.payload).get('crew', []):
+            saved = json.loads(record.payload)
+            for m in saved.get('crew', []):
                 crew.append({'name': m['name'], 'leader': m['role'] == 'brigadier'})
+            if saved.get('external_member_count'):
+                crew.append({'name': f'Сторонняя организация · {saved["external_member_count"]} чел.',
+                    'leader': False, 'external': True})
     return JSONResponse({'crew': crew}, headers={'Cache-Control': 'private, no-store'})
 
 
@@ -17178,7 +17226,7 @@ def private_intake_next_number(day,rows):
 def private_intake_day_heading(day):
     weekdays=('ПОНЕДЕЛЬНИК','ВТОРНИК','СРЕДА','ЧЕТВЕРГ','ПЯТНИЦА','СУББОТА','ВОСКРЕСЕНЬЕ')
     months=('января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря')
-    return f'Заказы на завтра ({weekdays[day.weekday()]}) {day.day} {months[day.month-1]}'
+    return f'Заказы на завтра\n❗️{day.day} {months[day.month-1]}❗️\n{weekdays[day.weekday()].capitalize()}'
 
 
 async def private_intake_daily_header(db,now=None):
@@ -18001,3 +18049,68 @@ body.dashboard-compact #employeeReadiness .readiness-section-heading>.dispatch-m
 
 
 INLINE_INDEX_HTML = _readiness_context_block_html(INLINE_INDEX_HTML)
+
+
+# Anonymous workers from a partner organization fill places only in the
+# selected order.  They are deliberately kept out of the employee directory,
+# readiness, workload and payroll, while remaining visible to the dispatcher
+# and the brigadier.
+def _external_organization_crew_html(html):
+    start = html.index('async function openDispatchCrew(order,edit=false,photoHost=null){')
+    end = html.index('\nconst dispatchOriginalNumbers=', start)
+    section = html[start:end]
+
+    def replace_once(old, new):
+        nonlocal section
+        if section.count(old) != 1:
+            raise ValueError('External crew editor anchor missing: ' + old[:90])
+        section = section.replace(old, new, 1)
+
+    replace_once(
+        "let leader=people.find(p=>p.assigned_brigadier)?.id||order.brigadier?.id||null,selected=new Set([...old].filter(id=>id!==leader)),second=new Set();let step=leader?2:1;",
+        "let leader=people.find(p=>p.assigned_brigadier)?.id||order.brigadier?.id||null,selected=new Set([...old].filter(id=>id!==leader)),second=new Set(),externalCount=Number(order.external_member_count||0);let step=leader?2:1;",
+    )
+    replace_once(
+        "</div>${step===2?'<small>Сначала сотрудники с разницей в росте до 3 см, затем остальные.</small>':''}<p class=\"dispatch-selected\" data-plan-selected></p>",
+        "</div>${step===2?`<small>Сначала сотрудники с разницей в росте до 3 см, затем остальные.</small><section class=\"dispatch-external-crew\"><header><b>Сторонняя организация</b><small>Отметьте места, которые займут приглашённые люди</small></header><div>${Array.from({length:need},(_,i)=>`<label><input type=\"checkbox\" name=\"external_member\" value=\"${i+1}\" ${i<externalCount?'checked':''}><span>Сторонний сотрудник ${i+1}</span></label>`).join('')}</div></section>`:''}<p class=\"dispatch-selected\" data-plan-selected></p>",
+    )
+    replace_once(
+        "'Выбрано '+(selected.size+1)+'/'+order.team_size;next.disabled=!leader||selected.size>need;if(step===2)next.textContent=(selected.size===need?'Назначить состав ':'Сохранить состав ')+(selected.size+1)+'/'+order.team_size;",
+        "'Выбрано '+(selected.size+externalCount+1)+'/'+order.team_size;next.disabled=!leader||selected.size+externalCount>need;if(step===2)next.textContent=(selected.size+externalCount===need?'Назначить состав ':'Сохранить состав ')+(selected.size+externalCount+1)+'/'+order.team_size;",
+    )
+    replace_once(
+        "qsa('input[type=checkbox]',root).forEach(box=>box.disabled=!box.checked&&(people.find(p=>p.id===Number(box.value)).archived||selected.size>=need||people.find(p=>p.id===Number(box.value)).workload>=2&&!old.has(Number(box.value))))",
+        "qsa('input[name=\"member\"]',root).forEach(box=>box.disabled=!box.checked&&(people.find(p=>p.id===Number(box.value)).archived||selected.size+externalCount>=need||people.find(p=>p.id===Number(box.value)).workload>=2&&!old.has(Number(box.value))));qsa('input[name=\"external_member\"]',root).forEach(box=>box.disabled=!box.checked&&selected.size+externalCount>=need)",
+    )
+    replace_once(
+        "qsa('input[type=radio],input[type=checkbox]',root).forEach(box=>box.onchange=()=>{const id=Number(box.value);if(step===1){leader=id;selected.delete(id)}else box.checked?selected.add(id):selected.delete(id);update()});",
+        "qsa('input[type=radio],input[name=\"member\"]',root).forEach(box=>box.onchange=()=>{const id=Number(box.value);if(step===1){leader=id;selected.delete(id)}else box.checked?selected.add(id):selected.delete(id);update()});qsa('input[name=\"external_member\"]',root).forEach(box=>box.onchange=()=>{externalCount=qsa('input[name=\"external_member\"]:checked',root).length;draw()});",
+    )
+    replace_once(
+        "second_order_employee_ids:[...second],allow_partial:true",
+        "second_order_employee_ids:[...second],external_member_count:externalCount,allow_partial:true",
+    )
+    html = html[:start] + section + html[end:]
+
+    # Show the aggregate outside-organization row everywhere a saved crew is
+    # rendered.  Individual names are intentionally not invented or persisted.
+    html = html.replace(
+        "${people.map(p=>`<p>${p.id===o.brigadier?.id?'<strong>':''}${esc(dispatchPerson(p))}${p.id===o.brigadier?.id?'</strong>':''}</p>`).join('')||'<p class=\"muted\">Пока не назначен</p>'}",
+        "${people.map(p=>`<p>${p.id===o.brigadier?.id?'<strong>':''}${esc(dispatchPerson(p))}${p.id===o.brigadier?.id?'</strong>':''}</p>`).join('')}${o.external_member_count?`<p class=\"dispatch-external-person\">Сторонняя организация · ${o.external_member_count} чел.</p>`:''}${!people.length&&!o.external_member_count?'<p class=\"muted\">Пока не назначен</p>':''}",
+        1,
+    )
+    html = html.replace(
+        "panel.innerHTML=people.map(p=>`<p>${p.id===order.brigadier?.id?'<strong>':''}${esc(dispatch_crew_person_js(p))}${p.id===order.brigadier?.id?'</strong>':''}</p>`).join('')||'<p>Состав не назначен</p>';",
+        "panel.innerHTML=people.map(p=>`<p>${p.id===order.brigadier?.id?'<strong>':''}${esc(dispatch_crew_person_js(p))}${p.id===order.brigadier?.id?'</strong>':''}</p>`).join('')+(order.external_member_count?`<p class=\"dispatch-external-person\">Сторонняя организация · ${order.external_member_count} чел.</p>`:'')||'<p>Состав не назначен</p>';",
+        1,
+    )
+    return html.replace('</body>', r'''<style id="external-organization-crew-style">
+.dispatch-external-crew{margin:10px 0;padding:9px;border:1px solid var(--gold);border-radius:10px;background:rgba(185,149,71,.08)}
+.dispatch-external-crew>header{display:flex;flex-direction:column;gap:2px;margin-bottom:7px}.dispatch-external-crew>header small{color:var(--muted);font-size:11px}
+.dispatch-external-crew>div{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.dispatch-external-crew label{display:flex;align-items:center;gap:7px;min-height:38px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12px}
+.dispatch-external-crew input{width:20px;height:20px;flex:0 0 20px}.dispatch-external-person{color:var(--gold2);font-weight:650}
+@media(max-width:380px){.dispatch-external-crew>div{grid-template-columns:1fr}}
+</style></body>''', 1)
+
+
+INLINE_INDEX_HTML = _external_organization_crew_html(INLINE_INDEX_HTML)
