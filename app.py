@@ -18312,24 +18312,36 @@ function addGbuRecoveryButton(body,month,period){queueMicrotask(()=>{
 function gbuRecoverySearch(employees,query){
  const clean=s=>String(s).toLowerCase().replace(/ё/g,'е').replace(/[^а-яa-z0-9]+/g,' ').trim();
  const terms=clean(query).split(/\s+/).filter(Boolean);
- return employees.filter(p=>terms.every(term=>clean(p.name).includes(term)));
+ if(terms.join('').length<3)return [];
+ return employees.filter(p=>terms.every(term=>clean(p.name).split(/\s+/).some(word=>word.startsWith(term))));
 }
 async function openGbuRecovery(month,period){
  showModal('Восстановление 7 заказов','<div id="gbuRecovery">Загрузка…</div>');const root=qs('#gbuRecovery');
  try{
  const data=await api('/api/gbu-staff-payroll/recovery-oct2026');if(qs('#gbuRecovery')!==root)return;
- root.innerHTML='<p>Проверьте сотрудников. Первый в каждом составе — бригадир. Зарплата будет начислена за 1–2 октября 2026 года.</p>'+data.orders.map((o,i)=>`<section style="margin:12px 0"><b>${esc(o.date)} · ${esc(o.surname)} · ${o.category==='elite'?'Элит':'Стандарт'} · 4 чел.${o.saved?' · восстановлен':''}</b>${o.names.map((name,j)=>`<label style="display:block">${j+1}. ${esc(name)}${j===0?' · бригадир':''}<input type="search" data-recovery-search placeholder="Поиск: имя, метро, рост" aria-label="Поиск сотрудника ${j+1}" ${o.saved?'disabled':''} style="display:block;width:100%;font-size:16px;margin:5px 0"><select data-recovery-order="${i}" ${o.saved?'disabled':''} style="width:100%"><option value="">Выберите сотрудника</option>${data.employees.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></label>`).join('')}</section>`).join('')+'<p data-recovery-status role="status"></p><button type="button" class="primary" data-recovery-save>Восстановить и начислить</button>';
+ root.innerHTML='<p>Проверьте сотрудников. Первый в каждом составе — бригадир. Зарплата будет начислена за 1–2 октября 2026 года.</p>'+data.orders.map((o,i)=>`<section style="margin:12px 0"><b>${esc(o.date)} · ${esc(o.surname)} · ${o.category==='elite'?'Элит':'Стандарт'} · 4 чел.${o.saved?' · восстановлен':''}</b>${o.names.map((name,j)=>`<label style="display:block">${j+1}. ${esc(name)}${j===0?' · бригадир':''}<input type="search" data-recovery-search placeholder="Введите минимум 3 буквы" aria-label="Поиск сотрудника ${j+1}" ${o.saved?'disabled':''} style="display:block;width:100%;font-size:16px;margin:5px 0"><select data-recovery-order="${i}" ${o.saved?'disabled':''} style="width:100%"><option value="">Выберите сотрудника</option>${data.employees.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></label>`).join('')}</section>`).join('')+'<p data-recovery-status role="status"></p><button type="button" class="primary" data-recovery-save>Восстановить и начислить</button>';
  const normalize=s=>String(s).toLowerCase().replace(/ё/g,'е').replace(/[^а-яa-z ]/g,' ').replace(/\s+/g,' ').trim();
  qsa('[data-recovery-order]',root).forEach((select,k)=>{const name=data.orders[Math.floor(k/4)].names[k%4],n=normalize(name);const matches=data.employees.filter(p=>normalize(p.name)===n);if(matches.length===1)select.value=matches[0].id;});
- qsa('[data-recovery-search]',root).forEach(input=>{
- const select=input.nextElementSibling;
- input.oninput=()=>{
-  const selected=select.value,rows=gbuRecoverySearch(data.employees,input.value);
-  const current=data.employees.find(p=>String(p.id)===selected);
-  if(current&&!rows.some(p=>String(p.id)===selected))rows.unshift(current);
-  select.innerHTML='<option value="">'+(rows.length?'Выберите сотрудника':'Ничего не найдено')+'</option>'+rows.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('');
-  select.value=selected;
- };
+ qsa('[data-recovery-search]',root).forEach((input,k)=>{
+ const select=input.nextElementSibling,list=document.createElement('div');
+ list.id='gbuRecoverySuggestions'+k;list.className='gbu-recovery-suggestions';list.hidden=true;
+ list.setAttribute('role','group');list.setAttribute('aria-label','Найденные сотрудники');input.after(list);
+ input.setAttribute('aria-controls',list.id);input.setAttribute('aria-expanded','false');input.autocomplete='off';
+ const show=on=>{list.hidden=!on;input.setAttribute('aria-expanded',String(on))};
+ function draw(){
+  if(input.disabled)return;
+  const query=input.value.trim();if(query.replace(/[^а-яa-z0-9]/gi,'').length<3){show(false);return}
+  const rows=gbuRecoverySearch(data.employees,query);
+  list.innerHTML=rows.map(p=>`<button type="button" data-recovery-pick="${p.id}">${esc(p.name)}</button>`).join('')||'<p role="status">Ничего не найдено</p>';
+  qsa('[data-recovery-pick]',list).forEach(button=>{
+   button.onpointerdown=e=>e.preventDefault();
+   button.onclick=e=>{e.preventDefault();select.value=button.dataset.recoveryPick;input.value=button.textContent;show(false);input.blur()};
+  });show(true);
+ }
+ input.oninput=()=>{select.value='';draw()};input.onfocus=draw;
+ input.onkeydown=e=>{if(e.key==='Escape'){show(false)}else if(e.key==='ArrowDown'&&!list.hidden){e.preventDefault();list.querySelector('button')?.focus()}};
+ select.onchange=()=>{const person=data.employees.find(p=>String(p.id)===select.value);input.value=person?.name||'';show(false)};
+ input.parentElement.addEventListener('focusout',()=>setTimeout(()=>{if(!input.parentElement.contains(document.activeElement))show(false)},0));
  });
  const save=qs('[data-recovery-save]',root);save.onclick=async()=>{
  const crews=data.orders.map((o,i)=>qsa(`[data-recovery-order="${i}"]`,root).map(s=>Number(s.value)));
@@ -18339,7 +18351,13 @@ async function openGbuRecovery(month,period){
  };
  }catch(e){if(root.isConnected)root.textContent=e.message}
 }
-</script></body>""",1)
+</script><style>
+#gbuRecovery .gbu-recovery-suggestions{max-height:200px;overflow-y:auto;border:1px solid var(--gold);border-radius:10px;margin:3px 0 6px;background:var(--panel)}
+#gbuRecovery .gbu-recovery-suggestions[hidden]{display:none}
+#gbuRecovery .gbu-recovery-suggestions button{display:block;width:100%;text-align:left;min-height:44px;padding:9px 10px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:var(--panel);color:var(--text);font-size:16px}
+#gbuRecovery .gbu-recovery-suggestions button:focus{background:var(--panel2)}
+#gbuRecovery .gbu-recovery-suggestions p{padding:8px;margin:0;color:var(--muted);font-size:14px}
+</style></body>""",1)
 
 
 INLINE_INDEX_HTML=_gbu_recovery_button_html(INLINE_INDEX_HTML)
