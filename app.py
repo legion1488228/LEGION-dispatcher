@@ -1322,11 +1322,9 @@ def gbu_staff_payroll(month: str, db: Session = Depends(get_db), user: TelegramU
     if not re.fullmatch(r'[1-9]\d{3}-(0[1-9]|1[0-2])',month):
         raise HTTPException(422,'Выберите месяц')
     people={};orders=[];missing=[]
-    for card in gbu_payroll_cards(db,month):
-        key=f'card:{card.chat_id}:{card.message_id}'
-        if not effective_order_photo(db,card).get('first_received'):
+    for card, record, restored in gbu_payroll_entries(db,month):
+        if not restored and not effective_order_photo(db,card).get('first_received'):
             continue
-        record=db.get(GbuPayrollRoster,key)
         item={'card_id':card.id,'date':card.work_date.isoformat(),'surname':card.surname,'brigadier':card.full_name,'tg_id':card.tg_id}
         if not record:
             missing.append(item);continue
@@ -18219,3 +18217,111 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     "function attachGbuPayrollComment(report,employee,month,period,root,data){",
     "function attachGbuPayrollComment(report,employee,month,period,root,data){\n if(Number(employee.id)===-1)return;", 1)
+
+
+# Explicit historical accounting recovery; these records never send Telegram messages
+# or fabricate number cards, photo reports or attendance.
+GBU_OCT_RECOVERY = [
+ ('2026-10-01','Овчинникова','standard',['Арсений Балашиха','Станислав Щербинка','Ярослав Щелковская','Николай Кленовый Бульвар']),
+ ('2026-10-01','Семенов','standard',['Иван Таганская','Эльман Котельники','Алексей Планерная','Григорий Лухмановская']),
+ ('2026-10-01','Литовченко','standard',['Артем Щелковская','Кирилл Анино','Иван Орехово','Семен ВДНХ']),
+ ('2026-10-01','Дервиз','elite',['Данила Лухмановская','Иван Строгино','Сергей Кунцевская','Андрей Владыкино']),
+ ('2026-10-01','Патрушева','elite',['Алексей Роща','Никита Ясенево','Олег Донского','Родион Тимирязевская']),
+ ('2026-10-02','Добранова','standard',['Артем Щелковская','Семен ВДНХ','Кирилл Анино','Никита Лермонтовский']),
+ ('2026-10-02','Смирнов','elite',['Влад Рязанский','Даниила Кузьминки','Влад Балашиха','Максим Ясенево']),
+]
+
+def gbu_recovery_key(i):
+    return f'history:oct2026:recovery7:{i}'
+
+
+def gbu_payroll_entries(db, month):
+    from types import SimpleNamespace
+    for card in gbu_payroll_cards(db, month):
+        yield card, db.get(GbuPayrollRoster, f'card:{card.chat_id}:{card.message_id}'), False
+    start=date.fromisoformat(month+'-01')
+    end=(start.replace(year=start.year+1,month=1) if start.month==12 else start.replace(month=start.month+1))
+    rows=db.scalars(select(GbuPayrollRoster).where(GbuPayrollRoster.report_key.like('history:oct2026:recovery7:%'),
+        GbuPayrollRoster.work_date>=start,GbuPayrollRoster.work_date<end).order_by(GbuPayrollRoster.work_date,GbuPayrollRoster.report_key))
+    for record in rows:
+        saved=json.loads(record.payload)
+        if saved.get('recovery')!='oct2026-recovery7': continue
+        # Keep payroll rows identifiable without creating a real Telegram card.
+        card=SimpleNamespace(id=-100001-int(record.report_key.rsplit(':',1)[1]),work_date=record.work_date,
+            surname=saved['surname'],full_name=saved['brigadier'],tg_id=saved['tg_id'])
+        yield card, record, True
+
+
+class GbuRecoverySelection(BaseModel):
+    crews: list[list[StrictInt]] = Field(min_length=7,max_length=7)
+
+
+@app.get('/api/gbu-staff-payroll/recovery-oct2026')
+def gbu_recovery_preview(db: Session=Depends(get_db),user: TelegramUser=Depends(require_admin)):
+    people=list(db.scalars(select(Employee).where(_visible_employee()).order_by(Employee.full_name,Employee.id)))
+    return {'orders':[{'date':d,'surname':n,'category':c,'names':names,
+        'saved':db.get(GbuPayrollRoster,gbu_recovery_key(i)) is not None}
+        for i,(d,n,c,names) in enumerate(GBU_OCT_RECOVERY)],
+        'employees':[{'id':p.id,'name':_employee_dict(p)['display_name']} for p in people]}
+
+
+@app.post('/api/gbu-staff-payroll/recovery-oct2026')
+def gbu_recovery_apply(data:GbuRecoverySelection,db:Session=Depends(get_db),user:TelegramUser=Depends(require_admin)):
+    # A transaction and the existing day lock serialize retries across workers.
+    for day in ('2026-10-01','2026-10-02'): dispatch_day_lock(db,date.fromisoformat(day))
+    prepared=[];skipped=0
+    for i,((day,surname,category,names),ids) in enumerate(zip(GBU_OCT_RECOVERY,data.crews)):
+        key=gbu_recovery_key(i)
+        if db.get(GbuPayrollRoster,key): skipped+=1;continue
+        if len(ids)!=4 or len(set(ids))!=4: raise HTTPException(422,f'{surname}: выберите 4 разных сотрудников')
+        employees={p.id:p for p in db.scalars(select(Employee).where(Employee.id.in_(ids),_visible_employee()))}
+        if len(employees)!=4: raise HTTPException(409,f'{surname}: сотрудник недоступен, обновите список')
+        day_value=date.fromisoformat(day)
+        # Do not restore an already recorded order under another source key.
+        for card in gbu_payroll_cards(db,'2026-10'):
+            if card.work_date==day_value and card.surname.casefold().replace('ё','е').strip()==surname.casefold().replace('ё','е'):
+                raise HTTPException(409,f'{day} · {surname}: карточка уже существует. Проверьте её состав, восстановление остановлено')
+        leader=employees[ids[0]]
+        crew=[{'id':pid,'name':_employee_dict(employees[pid])['display_name'],
+            'role':'brigadier' if j==0 else 'member',
+            'amount':gbu_staff_pay(category,j==0,employees[pid].full_name,employees[pid].metro)} for j,pid in enumerate(ids)]
+        prepared.append(GbuPayrollRoster(report_key=key,work_date=day_value,created_by=user.id,payload=json.dumps({
+            'recovery':'oct2026-recovery7','surname':surname,'category':category,'crew':crew,
+            'brigadier':_employee_dict(leader)['display_name'],'tg_id':leader.tg_id or 0},ensure_ascii=False)))
+    db.add_all(prepared)
+    try: db.commit()
+    except IntegrityError:
+        db.rollback();raise HTTPException(409,'Заказы уже восстанавливаются. Откройте зарплату заново')
+    return {'added':len(prepared),'already_saved':skipped}
+
+
+def _gbu_recovery_button_html(html):
+    anchor="  const data=gbuPayrollForPeriod(response,month,period);"
+    assert html.count(anchor)==1
+    html=html.replace(anchor,anchor+"\n  if(month==='2026-10'&&period==='first')addGbuRecoveryButton(body,month,period);",1)
+    # Insert the button after the synchronous body render has finished.
+    return html.replace('</body>',r"""<script>
+function addGbuRecoveryButton(body,month,period){queueMicrotask(()=>{
+ if(!body.isConnected)return;
+ const button=document.createElement('button');button.type='button';button.className='secondary';button.textContent='Восстановить 7 заказов · 1–2 октября';
+ button.onclick=()=>openGbuRecovery(month,period);body.prepend(button);
+});}
+async function openGbuRecovery(month,period){
+ showModal('Восстановление 7 заказов','<div id="gbuRecovery">Загрузка…</div>');const root=qs('#gbuRecovery');
+ try{
+ const data=await api('/api/gbu-staff-payroll/recovery-oct2026');if(qs('#gbuRecovery')!==root)return;
+ root.innerHTML='<p>Проверьте сотрудников. Первый в каждом составе — бригадир. Зарплата будет начислена за 1–2 октября 2026 года.</p>'+data.orders.map((o,i)=>`<section style="margin:12px 0"><b>${esc(o.date)} · ${esc(o.surname)} · ${o.category==='elite'?'Элит':'Стандарт'} · 4 чел.${o.saved?' · восстановлен':''}</b>${o.names.map((name,j)=>`<label style="display:block">${j+1}. ${esc(name)}${j===0?' · бригадир':''}<select data-recovery-order="${i}" ${o.saved?'disabled':''} style="width:100%"><option value="">Выберите сотрудника</option>${data.employees.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></label>`).join('')}</section>`).join('')+'<p data-recovery-status role="status"></p><button type="button" class="primary" data-recovery-save>Восстановить и начислить</button>';
+ const normalize=s=>String(s).toLowerCase().replace(/ё/g,'е').replace(/[^а-яa-z ]/g,' ').replace(/\s+/g,' ').trim();
+ qsa('[data-recovery-order]',root).forEach((select,k)=>{const name=data.orders[Math.floor(k/4)].names[k%4],n=normalize(name);const matches=data.employees.filter(p=>normalize(p.name)===n);if(matches.length===1)select.value=matches[0].id;});
+ const save=qs('[data-recovery-save]',root);save.onclick=async()=>{
+ const crews=data.orders.map((o,i)=>qsa(`[data-recovery-order="${i}"]`,root).map(s=>Number(s.value)));
+ if(crews.some((ids,i)=>!data.orders[i].saved&&(ids.some(id=>!id)||new Set(ids).size!==4))){qs('[data-recovery-status]',root).textContent='Выберите 4 разных сотрудников в каждом невосстановленном заказе';return}
+ save.disabled=true;
+ try{const result=await api('/api/gbu-staff-payroll/recovery-oct2026',{method:'POST',body:JSON.stringify({crews})});await openGbuPayroll(month,period);alert('Добавлено: '+result.added+'. Уже восстановлено: '+result.already_saved)}catch(e){if(root.isConnected){qs('[data-recovery-status]',root).textContent=e.message;save.disabled=false}}
+ };
+ }catch(e){if(root.isConnected)root.textContent=e.message}
+}
+</script></body>""",1)
+
+
+INLINE_INDEX_HTML=_gbu_recovery_button_html(INLINE_INDEX_HTML)
