@@ -1297,6 +1297,17 @@ def gbu_staff_pay(category, is_brigadier, name='', metro=''):
     return (3000 if category == 'standard' else 3400) if vlad else (2500 if category == 'standard' else 3000)
 
 
+def gbu_payroll_crew(roster):
+    # Derive the outside-worker account from the confirmed snapshot only.
+    # No employee profile or additional persistent payroll entry is created.
+    crew = list(roster['crew'])
+    count = max(0, min(5, int(roster.get('external_member_count') or 0)))
+    for _ in range(count):
+        crew.append({'id': -1, 'name': 'Сторонний чел.', 'role': 'member',
+                     'amount': gbu_staff_pay(roster['category'], False)})
+    return crew
+
+
 def gbu_payroll_cards(db, month):
     start = date.fromisoformat(month+'-01')
     last = date(start.year, 12, 31) if start.month == 12 else start.replace(month=start.month+1)-timedelta(days=1)
@@ -1320,8 +1331,9 @@ def gbu_staff_payroll(month: str, db: Session = Depends(get_db), user: TelegramU
         if not record:
             missing.append(item);continue
         roster=json.loads(record.payload)
-        orders.append(dict(item,category=roster['category'],crew=roster['crew']))
-        for member in roster['crew']:
+        payroll_crew = gbu_payroll_crew(roster)
+        orders.append(dict(item,category=roster['category'],crew=payroll_crew))
+        for member in payroll_crew:
             row=people.setdefault(member['id'],{'id':member['id'],'name':member['name'],'exits':0,'amount':0,'orders':[]})
             row['exits']+=1;row['amount']+=member['amount'];row['orders'].append(dict(item,amount=member['amount'],role=member['role'],category=roster['category']))
     profiles = {employee.id: employee for employee in db.scalars(select(Employee).where(
@@ -18198,3 +18210,12 @@ def _external_organization_crew_html(html):
 
 
 INLINE_INDEX_HTML = _external_organization_crew_html(INLINE_INDEX_HTML)
+
+
+# The collective outside-worker account is scoped by the existing period filter.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "function gbuPayrollPersonLabel(employee){",
+    "function gbuPayrollPersonLabel(employee){\n if(Number(employee.id)===-1)return {name:'Сторонний чел.',location:'Выходы: '+employee.exits};", 1)
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "function attachGbuPayrollComment(report,employee,month,period,root,data){",
+    "function attachGbuPayrollComment(report,employee,month,period,root,data){\n if(Number(employee.id)===-1)return;", 1)
