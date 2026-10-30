@@ -18432,15 +18432,23 @@ def _gbu_paid_order_counts_html(html):
     assert html.count(anchor)==1
     html=html.replace(anchor,'<div class="gbu-payroll-total-row">'+anchor+'${gbuPaidOrderCountsHtml(data)}</div>',1)
     return html.replace('</body>',r"""<style>
-.gbu-payroll-total-row{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:10px 0}
-.gbu-payroll-total-row .gbu-payroll-total{margin:4px 0}
-.gbu-paid-orders{margin-left:auto;font-size:13px;max-width:100%}
+.gbu-payroll-total-row{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:nowrap;margin:10px 0;position:relative;overflow:visible}
+.gbu-payroll-total-row .gbu-payroll-total{margin:4px 0;flex:1;min-width:0;font-size:clamp(16px,4.5vw,20px)}
+.gbu-paid-orders{margin-left:auto;font-size:13px;max-width:100%;position:relative;flex:0 0 auto}
 .gbu-paid-orders>summary{cursor:pointer;list-style:none;padding:8px 12px;border:1px solid var(--gold);border-radius:10px;color:var(--gold2);font-weight:700;min-height:38px}
 .gbu-paid-orders>summary::-webkit-details-marker{display:none}
 .gbu-paid-orders>summary:after{content:' ▾'}.gbu-paid-orders[open]>summary:after{content:' ▴'}
-.gbu-paid-orders>div{padding:8px 10px;border:1px solid var(--line);border-radius:10px;margin-top:5px;background:var(--panel);line-height:1.5}
+.gbu-paid-orders>div{position:absolute;right:0;bottom:calc(100% + 6px);z-index:80;width:max-content;max-width:min(320px,calc(100vw - 64px));box-sizing:border-box;padding:8px 10px;border:1px solid var(--gold);border-radius:10px;background:var(--panel);line-height:1.5;box-shadow:0 8px 24px #0003}
 .gbu-paid-orders p{margin:3px 0}.gbu-paid-orders strong{display:block;border-top:1px solid var(--line);padding-top:5px;margin-top:5px}
 </style><script>
+const gbuPaidOrderTimers=new WeakMap();
+function handleGbuPaidOrderToggle(event){
+ const details=event.target;if(!details.matches?.('details.gbu-paid-orders'))return;
+ const old=gbuPaidOrderTimers.get(details);if(old!==undefined)clearTimeout(old);
+ gbuPaidOrderTimers.delete(details);
+ if(details.open)gbuPaidOrderTimers.set(details,setTimeout(()=>{gbuPaidOrderTimers.delete(details);if(details.isConnected)details.open=false},5000));
+}
+document.addEventListener('toggle',handleGbuPaidOrderToggle,true);
 function gbuPaidOrderCounts(orders){
  const seen=new Set(),counts=new Map();
  for(const order of orders||[]){
@@ -18453,9 +18461,9 @@ function gbuPaidOrderCounts(orders){
  return {total:seen.size,groups:[...counts.values()].sort((a,b)=>(rank[a.category]??9)-(rank[b.category]??9)||a.size-b.size)};
 }
 function gbuPaidOrderCountsHtml(data){
- const result=gbuPaidOrderCounts(data.orders),word=n=>n%10===1&&n%100!==11?'заказ':n%10>=2&&n%10<=4&&(n%100<12||n%100>14)?'заказа':'заказов';
+ const result=gbuPaidOrderCounts(data.orders),word=()=>'зак.';
  const names={standard:'Стандарт',vip:'Вип',elite:'Элит'};
- return `<details class="gbu-paid-orders"><summary aria-label="Развернуть количество начисленных заказов">Заказы · ${result.total}</summary><div>${result.groups.map(g=>`<p>${esc(names[g.category]||g.category)} · ${g.size||'—'} чел. — ${g.count} ${word(g.count)}</p>`).join('')||'<p>Начисленных заказов нет</p>'}<strong>Итого: ${result.total} ${word(result.total)}</strong></div></details>`;
+ return `<details class="gbu-paid-orders"><summary aria-label="Развернуть количество начисленных заказов">Зак. · ${result.total}</summary><div>${result.groups.map(g=>`<p>${esc(names[g.category]||g.category)} · ${g.size||'—'} чел. — ${g.count} ${word(g.count)}</p>`).join('')||'<p>Начисленных заказов нет</p>'}<strong>Итого: ${result.total} ${word(result.total)}</strong></div></details>`;
 }
 </script></body>""",1)
 
