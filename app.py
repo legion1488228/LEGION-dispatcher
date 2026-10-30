@@ -1330,7 +1330,7 @@ def gbu_staff_payroll(month: str, db: Session = Depends(get_db), user: TelegramU
             missing.append(item);continue
         roster=json.loads(record.payload)
         payroll_crew = gbu_payroll_crew(roster)
-        orders.append(dict(item,category=roster['category'],crew=payroll_crew))
+        orders.append(dict(item,category=roster['category'],team_size=len(payroll_crew),crew=payroll_crew))
         for member in payroll_crew:
             row=people.setdefault(member['id'],{'id':member['id'],'name':member['name'],'exits':0,'amount':0,'orders':[]})
             row['exits']+=1;row['amount']+=member['amount'];row['orders'].append(dict(item,amount=member['amount'],role=member['role'],category=roster['category']))
@@ -18416,3 +18416,48 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
  try{const r=await api('/api/gbu-staff-payroll/recover-oct2-photos',{method:'POST',body:'{}'});status.textContent='Фото сохранены: '+r.added+'. Уже были сохранены: '+r.already_saved+'. Откройте Контроль за 2 октября.'}
  catch(e){status.textContent=e.message}finally{if(photos.isConnected)photos.disabled=false}};
  button.after(photos,status);""",1)
+
+
+
+def _gbu_paid_order_counts_html(html):
+    # Counts use confirmed order snapshots, never individual employee exits.
+    first=html.index('function gbuPayrollForPeriod(')
+    end=html.index('\nfunction gbuPayrollRoleGroups(',first)
+    section=html[first:end]
+    anchor='return {...data,employees,missing:'
+    assert section.count(anchor)==1
+    section=section.replace(anchor,'return {...data,employees,orders:(data.orders||[]).filter(matches),missing:',1)
+    html=html[:first]+section+html[end:]
+    anchor='<h3 class="gbu-payroll-total">Начислено: ${esc(cabinetMoney(data.total))} ₽</h3>'
+    assert html.count(anchor)==1
+    html=html.replace(anchor,'<div class="gbu-payroll-total-row">'+anchor+'${gbuPaidOrderCountsHtml(data)}</div>',1)
+    return html.replace('</body>',r"""<style>
+.gbu-payroll-total-row{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:10px 0}
+.gbu-payroll-total-row .gbu-payroll-total{margin:4px 0}
+.gbu-paid-orders{margin-left:auto;font-size:13px;max-width:100%}
+.gbu-paid-orders>summary{cursor:pointer;list-style:none;padding:8px 12px;border:1px solid var(--gold);border-radius:10px;color:var(--gold2);font-weight:700;min-height:38px}
+.gbu-paid-orders>summary::-webkit-details-marker{display:none}
+.gbu-paid-orders>summary:after{content:' ▾'}.gbu-paid-orders[open]>summary:after{content:' ▴'}
+.gbu-paid-orders>div{padding:8px 10px;border:1px solid var(--line);border-radius:10px;margin-top:5px;background:var(--panel);line-height:1.5}
+.gbu-paid-orders p{margin:3px 0}.gbu-paid-orders strong{display:block;border-top:1px solid var(--line);padding-top:5px;margin-top:5px}
+</style><script>
+function gbuPaidOrderCounts(orders){
+ const seen=new Set(),counts=new Map();
+ for(const order of orders||[]){
+  const key=String(order.date)+'/'+String(order.card_id);
+  if(seen.has(key))continue;seen.add(key);
+  const size=Number(order.team_size??order.crew?.length)||0,group=String(order.category)+'/'+size;
+  if(!counts.has(group))counts.set(group,{category:order.category,size,count:0});counts.get(group).count++;
+ }
+ const rank={standard:0,vip:1,elite:2};
+ return {total:seen.size,groups:[...counts.values()].sort((a,b)=>(rank[a.category]??9)-(rank[b.category]??9)||a.size-b.size)};
+}
+function gbuPaidOrderCountsHtml(data){
+ const result=gbuPaidOrderCounts(data.orders),word=n=>n%10===1&&n%100!==11?'заказ':n%10>=2&&n%10<=4&&(n%100<12||n%100>14)?'заказа':'заказов';
+ const names={standard:'Стандарт',vip:'Вип',elite:'Элит'};
+ return `<details class="gbu-paid-orders"><summary aria-label="Развернуть количество начисленных заказов">Заказы · ${result.total}</summary><div>${result.groups.map(g=>`<p>${esc(names[g.category]||g.category)} · ${g.size||'—'} чел. — ${g.count} ${word(g.count)}</p>`).join('')||'<p>Начисленных заказов нет</p>'}<strong>Итого: ${result.total} ${word(result.total)}</strong></div></details>`;
+}
+</script></body>""",1)
+
+
+INLINE_INDEX_HTML=_gbu_paid_order_counts_html(INLINE_INDEX_HTML)
