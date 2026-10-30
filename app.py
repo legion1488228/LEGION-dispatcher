@@ -18227,8 +18227,6 @@ GBU_OCT_RECOVERY = [
  ('2026-10-01','Литовченко','standard',['Артем Щелковская','Кирилл Анино','Иван Орехово','Семен ВДНХ']),
  ('2026-10-01','Дервиз','elite',['Данила Лухмановская','Иван Строгино','Сергей Кунцевская','Андрей Владыкино']),
  ('2026-10-01','Патрушева','elite',['Алексей Роща','Никита Ясенево','Олег Донского','Родион Тимирязевская']),
- ('2026-10-02','Добранова','standard',['Артем Щелковская','Семен ВДНХ','Кирилл Анино','Никита Лермонтовский']),
- ('2026-10-02','Смирнов','elite',['Влад Рязанский','Даниила Кузьминки','Влад Балашиха','Максим Ясенево']),
 ]
 
 def gbu_recovery_key(i):
@@ -18253,7 +18251,7 @@ def gbu_payroll_entries(db, month):
 
 
 class GbuRecoverySelection(BaseModel):
-    crews: list[list[StrictInt]] = Field(min_length=7,max_length=7)
+    crews: list[list[StrictInt]] = Field(min_length=5,max_length=5)
 
 
 @app.get('/api/gbu-staff-payroll/recovery-oct2026')
@@ -18271,7 +18269,7 @@ def gbu_recovery_preview(db: Session=Depends(get_db),user: TelegramUser=Depends(
 @app.post('/api/gbu-staff-payroll/recovery-oct2026')
 def gbu_recovery_apply(data:GbuRecoverySelection,db:Session=Depends(get_db),user:TelegramUser=Depends(require_admin)):
     # A transaction and the existing day lock serialize retries across workers.
-    for day in ('2026-10-01','2026-10-02'): dispatch_day_lock(db,date.fromisoformat(day))
+    dispatch_day_lock(db,date(2026,10,1))
     prepared=[];skipped=0
     for i,((day,surname,category,names),ids) in enumerate(zip(GBU_OCT_RECOVERY,data.crews)):
         key=gbu_recovery_key(i)
@@ -18306,7 +18304,7 @@ def _gbu_recovery_button_html(html):
     return html.replace('</body>',r"""<script>
 function addGbuRecoveryButton(body,month,period){queueMicrotask(()=>{
  if(!body.isConnected)return;
- const button=document.createElement('button');button.type='button';button.className='secondary';button.textContent='Восстановить 7 заказов · 1–2 октября';
+ const button=document.createElement('button');button.type='button';button.className='secondary';button.textContent='Восстановить 5 заказов · 1 октября';
  button.onclick=()=>openGbuRecovery(month,period);body.prepend(button);
 });}
 function gbuRecoverySearch(employees,query){
@@ -18316,10 +18314,10 @@ function gbuRecoverySearch(employees,query){
  return employees.filter(p=>terms.every(term=>clean(p.name).split(/\s+/).some(word=>word.startsWith(term))));
 }
 async function openGbuRecovery(month,period){
- showModal('Восстановление 7 заказов','<div id="gbuRecovery">Загрузка…</div>');const root=qs('#gbuRecovery');
+ showModal('Восстановление 5 заказов','<div id="gbuRecovery">Загрузка…</div>');const root=qs('#gbuRecovery');
  try{
  const data=await api('/api/gbu-staff-payroll/recovery-oct2026');if(qs('#gbuRecovery')!==root)return;
- root.innerHTML='<p>Проверьте сотрудников. Первый в каждом составе — бригадир. Зарплата будет начислена за 1–2 октября 2026 года.</p>'+data.orders.map((o,i)=>`<section style="margin:12px 0"><b>${esc(o.date)} · ${esc(o.surname)} · ${o.category==='elite'?'Элит':'Стандарт'} · 4 чел.${o.saved?' · восстановлен':''}</b>${o.names.map((name,j)=>`<label style="display:block">${j+1}. ${esc(name)}${j===0?' · бригадир':''}<input type="search" data-recovery-search placeholder="Введите минимум 3 буквы" aria-label="Поиск сотрудника ${j+1}" ${o.saved?'disabled':''} style="display:block;width:100%;font-size:16px;margin:5px 0"><select data-recovery-order="${i}" ${o.saved?'disabled':''} style="width:100%"><option value="">Выберите сотрудника</option>${data.employees.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></label>`).join('')}</section>`).join('')+'<p data-recovery-status role="status"></p><button type="button" class="primary" data-recovery-save>Восстановить и начислить</button>';
+ root.innerHTML='<p>Проверьте сотрудников. Первый в каждом составе — бригадир. Зарплата будет начислена за 1 октября 2026 года.</p>'+data.orders.map((o,i)=>`<section style="margin:12px 0"><b>${esc(o.date)} · ${esc(o.surname)} · ${o.category==='elite'?'Элит':'Стандарт'} · 4 чел.${o.saved?' · восстановлен':''}</b>${o.names.map((name,j)=>`<label style="display:block">${j+1}. ${esc(name)}${j===0?' · бригадир':''}<input type="search" data-recovery-search placeholder="Введите минимум 3 буквы" aria-label="Поиск сотрудника ${j+1}" ${o.saved?'disabled':''} style="display:block;width:100%;font-size:16px;margin:5px 0"><select data-recovery-order="${i}" ${o.saved?'disabled':''} style="width:100%"><option value="">Выберите сотрудника</option>${data.employees.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></label>`).join('')}</section>`).join('')+'<p data-recovery-status role="status"></p><button type="button" class="primary" data-recovery-save>Восстановить и начислить</button>';
  const normalize=s=>String(s).toLowerCase().replace(/ё/g,'е').replace(/[^а-яa-z ]/g,' ').replace(/\s+/g,' ').trim();
  qsa('[data-recovery-order]',root).forEach((select,k)=>{const name=data.orders[Math.floor(k/4)].names[k%4],n=normalize(name);const matches=data.employees.filter(p=>normalize(p.name)===n);if(matches.length===1)select.value=matches[0].id;});
  qsa('[data-recovery-search]',root).forEach((input,k)=>{
