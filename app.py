@@ -18180,7 +18180,7 @@ def _external_organization_crew_html(html):
     # rendered.  Individual names are intentionally not invented or persisted.
     html = html.replace(
         "${people.map(p=>`<p>${p.id===o.brigadier?.id?'<strong>':''}${esc(dispatchPerson(p))}${p.id===o.brigadier?.id?'</strong>':''}</p>`).join('')||'<p class=\"muted\">Пока не назначен</p>'}",
-        "${people.map(p=>`<p>${p.id===o.brigadier?.id?'<strong>':''}${esc(dispatchPerson(p))}${p.id===o.brigadier?.id?'</strong>':''}</p>`).join('')}${o.external_member_count?`<p class=\"dispatch-external-person\">Сторонняя организация · ${o.external_member_count} чел.</p>`:''}${!people.length&&!o.external_member_count?'<p class=\"muted\">Пока не назначен</p>':''}",
+        "${people.map((p,i)=>`<p>${p.id===o.brigadier?.id?'<strong>':''}${i+1}. ${esc(dispatchPerson(p))}${p.id===o.brigadier?.id?'</strong>':''}</p>`).join('')}${Array.from({length:Number(o.external_member_count||0)},(_,i)=>`<p class=\"dispatch-external-person\">${people.length+i+1}. Сторонний чел ${i+1}.</p>`).join('')}${!people.length&&!o.external_member_count?'<p class=\"muted\">Пока не назначен</p>':''}",
         1,
     )
     html = html.replace(
