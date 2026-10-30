@@ -18185,7 +18185,7 @@ def _external_organization_crew_html(html):
     )
     html = html.replace(
         "panel.innerHTML=people.map(p=>`<p>${p.id===order.brigadier?.id?'<strong>':''}${esc(dispatch_crew_person_js(p))}${p.id===order.brigadier?.id?'</strong>':''}</p>`).join('')||'<p>Состав не назначен</p>';",
-        "panel.innerHTML=people.map(p=>`<p>${p.id===order.brigadier?.id?'<strong>':''}${esc(dispatch_crew_person_js(p))}${p.id===order.brigadier?.id?'</strong>':''}</p>`).join('')+(order.external_member_count?`<p class=\"dispatch-external-person\">Сторонняя организация · ${order.external_member_count} чел.</p>`:'')||'<p>Состав не назначен</p>';",
+        "panel.innerHTML=people.map(p=>`<p>${p.id===order.brigadier?.id?'<strong>':''}${esc(dispatch_crew_person_js(p))}${p.id===order.brigadier?.id?'</strong>':''}</p>`).join('')+(order.external_member_count?`<p class=\"dispatch-external-person\">Сторонний ${order.external_member_count} чел.</p>`:'')||'<p>Состав не назначен</p>';",
         1,
     )
     return html.replace('</body>', r'''<style id="external-organization-crew-style">
