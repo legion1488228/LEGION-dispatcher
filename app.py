@@ -990,7 +990,7 @@ def _order_dict(order: Order, db: Session, include_candidates: bool = False):
         "kickback_rub": order.kickback_rub,
         "agent_tg_id": order.agent_tg_id,
         "agent_name": order.agent_name,
-        "agent_phone": order.agent_phone,
+        "agent_phone": brigadier_phone8(order.agent_phone),
         "other_agent_phone": order.other_agent_phone,
         "status": order.status,
         "status_label": _label_status(order.status),
@@ -13874,6 +13874,7 @@ class DispatchPlanInput(BaseModel):
     source: Literal['private', 'gbu']
     agent_name: StrictStr = Field(default='', max_length=200)
     agent_phone: StrictStr = Field(default='', max_length=50)
+    agent_phone_auto: StrictBool = False
     category: Literal['standard', 'vip', 'elite', 'carryout'] | None = None
     team_size: StrictInt | None = Field(default=None, ge=2, le=6)
     deceased_name: StrictStr = Field(default='', max_length=100)
@@ -14146,6 +14147,7 @@ def dispatch_order_data(db, order, number):
     data = _order_dict(order, db)
     plan = db.get(DispatchPlan, order.id)
     meta = json.loads(plan.payload) if plan else {}
+    data['agent_phone_auto'] = bool(meta.get('agent_phone_auto') and brigadier_phone8(meta['agent_phone_auto'])==data['agent_phone'])
     data['source_messages'] = meta.get('source_messages',[]) if order.source=='private' else []
     data['is_draft'] = order.status == 'draft'
     if data['is_draft']:
@@ -14322,7 +14324,7 @@ def private_agent_phone_key(value):
 
 def private_agent_phone_number(value):
     digits=re.sub(r'\D', '', str(value or ''))
-    if len(digits)==11 and digits[0] in '78':return '+7'+digits[1:]
+    if len(digits)==11 and digits[0] in '78':return '8'+digits[1:]
     return ''
 
 
@@ -14415,9 +14417,10 @@ def dispatch_create(data: DispatchPlanInput, db: Session = Depends(get_db), user
         issue_time=data.issue_time or time(0,0), arrival_time=arrival, deceased_name=data.deceased_name.strip(),
         route='\n'.join(route_fields.values()), category=data.category or '', team_size=data.team_size or 0,
         organization=data.organization.strip(), notes=(data.notes or '').strip(), kickback_rub=0, agent_name=data.agent_name.strip(),
-        agent_phone=data.agent_phone.strip() or (private_agent_phone_lookup(db,data.organization or data.agent_name) if data.source=='private' else ''), other_agent_phone='', status='draft' if missing else 'new')
+        agent_phone=brigadier_phone8(data.agent_phone) or (private_agent_phone_lookup(db,data.organization or data.agent_name) if data.source=='private' else ''), other_agent_phone='', status='draft' if missing else 'new')
     db.add(order); db.flush()
     db.add(DispatchPlan(order_id=order.id, request_key=data.request_key, payload=json.dumps({
+        'agent_phone_auto':order.agent_phone if data.agent_phone_auto or not data.agent_phone.strip() else '',
         'creation_hash':dispatch_hash(data.model_dump(exclude={'revision'})),
         'slot_number':data.slot_number,
         'missing_fields':missing,
@@ -14507,7 +14510,7 @@ def dispatch_import_gbu(data: DispatchGbuImportInput, db: Session = Depends(get_
             issue_time=item.issue_time,arrival_time=arrival,deceased_name=item.deceased_name.strip(),
             route='\n'.join(route_fields.values()),category=item.category,team_size=item.team_size,
             organization=item.organization.strip() or 'ГБУ',notes=item.notes,kickback_rub=0,
-            agent_name=item.agent_name.strip(),agent_phone=item.agent_phone.strip(),other_agent_phone='',status='new')
+            agent_name=item.agent_name.strip(),agent_phone=brigadier_phone8(item.agent_phone),other_agent_phone='',status='new')
         db.add(order);db.flush()
         db.add(DispatchPlan(order_id=order.id,request_key=keys[index],payload=json.dumps({
             'import_hash':batch_hash,'slot_number':slots[index],'route_fields':route_fields,
@@ -14540,6 +14543,7 @@ def dispatch_update(order_id: int, data: DispatchPlanInput, db: Session = Depend
         value = getattr(data, field)
         if value is None: value = {'category':'','team_size':0,'issue_time':time(0,0)}.get(field,value)
         setattr(order, field, value.strip() if isinstance(value,str) else value)
+    order.agent_phone=brigadier_phone8(order.agent_phone)
     if order.source=='private' and not order.agent_phone:
         order.agent_phone=private_agent_phone_lookup(db,order.organization or order.agent_name,order.id)
     if data.notes is not None: order.notes=data.notes.strip()
@@ -14551,6 +14555,7 @@ def dispatch_update(order_id: int, data: DispatchPlanInput, db: Session = Depend
     if not plan:
         plan=DispatchPlan(order_id=order.id,request_key=secrets.token_hex(16),payload='{}');db.add(plan)
     meta=json.loads(plan.payload);meta['route_fields']=route_fields;meta['missing_fields']=missing
+    meta['agent_phone_auto']=order.agent_phone if data.agent_phone_auto or not data.agent_phone.strip() else ''
     meta['church_required']=dispatch_church_required(data.church_required, data.church)
     meta['destination_type']=dispatch_destination_type(data.destination_type or meta.get('destination_type'), data.cemetery)
     plan.payload=json.dumps(meta,ensure_ascii=False)
@@ -15565,7 +15570,7 @@ function dispatchMini(o){
  const surname=String(o.deceased_name||'').trim().split(/\s+/)[0]||'—';
  const assigned=Number.isInteger(o.assigned_count)?o.assigned_count:Number(Boolean(o.brigadier))+(o.members||[]).length,complete=assigned===o.team_size&&Boolean(o.brigadier);
  const rawPhone=String(o.agent_phone||''),digits=rawPhone.replace(/\D/g,'');
- const phone=/^[78]\d{10}$/.test(digits)?`+7 (${digits.slice(1,4)}) ${digits.slice(4,7)}-${digits.slice(7,9)}-${digits.slice(9)}`:rawPhone;
+ const phone=/^[78]\d{10}$/.test(digits)?`8 (${digits.slice(1,4)}) ${digits.slice(4,7)}-${digits.slice(7,9)}-${digits.slice(9)}`:rawPhone;
  const fields=o.route_fields||{},oldRoute=Object.keys(fields).length?[]:String(o.route||'').split(/[;\n]+/);
  const route=[['morgue','Морг'],['church','Храм'],['cemetery',o.destination_type==='cremation'?'Кремация':'Кладбище']].map(([key,label],i)=>{
   let value=String(fields[key]??oldRoute[i]??'').trim();
@@ -15803,13 +15808,21 @@ async function openDispatchEditor(order,source='private',slotNumber=null){
  const input=(name,label,value='',extra='')=>`<label class="${['morgue','church','cemetery'].includes(name)?'dispatch-route-field':''}">${label}<input name="${name}" value="${esc(value)}" ${extra}></label>`;
  showModal(order?`${source==='gbu'?'ГБУ ⬛️':'Частный'} №${order.number}`:'Новый заказ · '+(source==='gbu'?'ГБУ ⬛️':'Частный'),`<form class="dispatch-form" id="dispatchEditor">${order?.source_messages?.length?`<section class="private-source-text"><b>Текст из бота</b>${order.source_messages.map(m=>`<p>${esc(m.text||'')}${m.photo?'<small>Фотография отправлена в чат ЛЕГИОН</small>':''}</p>`).join('')}</section>`:''}<small class="dispatch-form-day">${esc(dispatchShortDay(day))}</small>${input('agent_name','Имя агента',order?.agent_name||'','maxlength="200"')}${input('agent_phone','Номер агента',order?.agent_phone||'','type="tel" maxlength="50"')}${input('organization','От кого заказ',order?.organization||'','maxlength="200"')}${input('deceased_name','Фамилия умершего',order?.deceased_name||'','maxlength="100"')}<label>Категория заказа<select name="category"><option value="">Выберите категорию</option>${Object.entries(source==='gbu'?{standard:'Стандарт',elite:'Элит'}:{standard:'Стандарт',vip:'Вип',elite:'Элит',carryout:'Вынос'}).map(([v,label])=>`<option value="${v}" ${v===order?.category?'selected':''}>${label}</option>`).join('')}</select></label><label>Количество человек<select name="team_size"></select></label><div class="dispatch-times">${input('issue_time','Время выдачи',order?.issue_time||'','type="time"')}<label>📸 Подача авто<input data-plan-arrival readonly value="${esc(order?.arrival_time||'')}"></label></div><small class="dispatch-arrival-hint">Подача автоматически за 30 минут до выдачи.</small><b class="dispatch-route-title">Маршрут</b>${input('morgue','1. Морг',route.morgue||(!Object.keys(route).length?order?.route||'':''),'maxlength="500"')}<label class="dispatch-route-field dispatch-church"><span>2. Храм <select name="church_required" aria-label="Нужен храм"><option value="yes" ${churchRequired?'selected':''}>Да</option><option value="no" ${!churchRequired?'selected':''}>Нет</option></select></span><input name="church" value="${esc(route.church||'')}" maxlength="500" placeholder="Название или адрес храма"></label><label class="dispatch-route-field dispatch-destination"><span>3. <select name="destination_type" aria-label="Кладбище или кремация"><option value="cemetery" ${order?.destination_type!=='cremation'?'selected':''}>Кладбище</option><option value="cremation" ${order?.destination_type==='cremation'?'selected':''}>Кремация</option></select></span><input name="cemetery" value="${esc(route.cemetery||'')}" maxlength="500" placeholder="Название или адрес"></label><label class="dispatch-order-comment">Комментарий<input name="notes" value="${esc(order?.notes||'')}" maxlength="500" placeholder="Коротко об особенностях заказа"></label>${order?`<p class="dispatch-crew-status">${order.composition_complete?'Состав назначен ✓':'Состав не назначен'}</p><button type="button" data-plan-crew ${order.approved?'disabled':''}>Выбрать бригадира и состав ›</button>${order.brigadier?'<button type="button" data-plan-clear>Снять состав</button>':''}`:'<small class="dispatch-crew-hint">Можно сохранить только «От кого заказ» и дополнить позже.</small>'}<p data-plan-error role="status"></p><button type="submit" class="primary" ${order?.approved?'disabled':''}>Сохранить заказ</button></form>`);
  const form=qs('#dispatchEditor'),live=()=>qs('#dispatchEditor')===form&&!qs('#modal').classList.contains('hidden');let chooseCrewAfterSave=false;
+ const domesticAgentPhone=value=>{const digits=String(value||'').replace(/\D/g,'');return /^[78]\d{10}$/.test(digits)?'8'+digits.slice(1):String(value||'')};
+ const phoneInput=form.elements.agent_phone,phoneLabel=phoneInput.closest('label');
+ const phoneMarker=document.createElement('span');phoneMarker.className='agent-phone-auto-marker';phoneMarker.textContent=' (авто!)';phoneMarker.style.cssText='display:inline;font-size:inherit;white-space:nowrap;visibility:hidden';const phoneHeading=document.createElement('span');phoneHeading.style.whiteSpace='nowrap';phoneHeading.textContent='Номер агента';phoneHeading.append(phoneMarker);phoneLabel.replaceChild(phoneHeading,phoneLabel.firstChild);
+ let agentPhoneAuto=Boolean(order?.agent_phone_auto);
+ const markAutoPhone=on=>{agentPhoneAuto=on;phoneMarker.style.visibility=on?'visible':'hidden'};
+ phoneInput.value=domesticAgentPhone(phoneInput.value);markAutoPhone(agentPhoneAuto);
+ phoneInput.addEventListener('input',()=>{const value=domesticAgentPhone(phoneInput.value);if(value!==phoneInput.value)phoneInput.value=value;markAutoPhone(false)});
+ phoneInput.addEventListener('blur',()=>{phoneInput.value=domesticAgentPhone(phoneInput.value)});
  const toggleChurch=()=>{form.elements.church.disabled=form.elements.church_required.value!=='yes'};form.elements.church_required.onchange=toggleChurch;toggleChurch();
  if(source==='gbu'&&!order?.approved){
   const lookupAgent=async()=>{
    const entered=form.elements.agent_name.value,phone=form.elements.agent_phone.value;
    if(!entered.trim()||phone.trim())return;
    try{const result=await api('/api/dispatch-board/agent-match?name='+encodeURIComponent(entered));
-    if(live()&&form.elements.agent_name.value===entered&&form.elements.agent_phone.value===phone&&result.match){form.elements.agent_name.value=result.match.full_name;form.elements.agent_phone.value=result.match.phone}
+    if(live()&&form.elements.agent_name.value===entered&&form.elements.agent_phone.value===phone&&result.match){form.elements.agent_name.value=result.match.full_name;form.elements.agent_phone.value=domesticAgentPhone(result.match.phone);markAutoPhone(true)}
    }catch(error){/* Agent lookup must not interrupt manual order editing. */}
   };
   form.elements.agent_name.onchange=lookupAgent;lookupAgent();
@@ -15822,14 +15835,11 @@ async function openDispatchEditor(order,source='private',slotNumber=null){
    if(!alias||form.elements.agent_phone.value.trim())return;
    try{const result=await api('/api/dispatch-board/private-agent-phone?name='+encodeURIComponent(alias));
     if(live()&&generation===phoneLookupGeneration&&!form.elements.agent_phone.value.trim()&&alias===(form.elements.organization.value.trim()||form.elements.agent_name.value.trim())&&result.phone){
-     form.elements.agent_phone.value=result.phone;filledPhone=result.phone;
-     let hint=form.querySelector('[data-private-phone-hint]');
-     if(!hint){hint=document.createElement('small');hint.dataset.privatePhoneHint='';form.elements.agent_phone.after(hint)}
-     hint.textContent='Номер из предыдущих заказов или контактов. Проверьте перед сохранением.';
+     form.elements.agent_phone.value=domesticAgentPhone(result.phone);filledPhone=form.elements.agent_phone.value;markAutoPhone(true);
     }
    }catch(error){/* Manual editing remains available when lookup fails. */}
   };
-  const resetPrivatePhone=()=>{phoneLookupGeneration++;if(filledPhone&&form.elements.agent_phone.value===filledPhone){form.elements.agent_phone.value='';form.querySelector('[data-private-phone-hint]')?.remove()}filledPhone=''};
+  const resetPrivatePhone=()=>{phoneLookupGeneration++;if(filledPhone&&form.elements.agent_phone.value===filledPhone){form.elements.agent_phone.value='';markAutoPhone(false)}filledPhone=''};
   form.elements.organization.addEventListener('input',resetPrivatePhone);
   form.elements.agent_name.addEventListener('input',resetPrivatePhone);
   form.elements.organization.addEventListener('change',lookupPrivatePhone);
@@ -15841,7 +15851,7 @@ async function openDispatchEditor(order,source='private',slotNumber=null){
  const crew=qs('[data-plan-crew]',form);if(crew)crew.onclick=()=>{chooseCrewAfterSave=true;form.requestSubmit()};
  const clear=qs('[data-plan-clear]',form);if(clear){clear.disabled=order.approved;clear.onclick=async()=>{clear.disabled=true;try{await api('/api/dispatch-board/orders/'+order.id+'/crew',{method:'DELETE',body:JSON.stringify({revision:order.revision})});closeModal();await loadDispatchBoard()}catch(e){qs('[data-plan-error]',form).textContent=e.message;clear.disabled=false}}}
  form.onsubmit=async e=>{e.preventDefault();const button=qs('[type=submit]',form);if(button.disabled)return;button.disabled=true;
- const fields=Object.fromEntries(new FormData(form));const payload={...fields,church_required:fields.church_required==='yes',church:fields.church_required==='yes'?(fields.church||''):'',category:fields.category||null,team_size:fields.team_size?Number(fields.team_size):null,issue_time:fields.issue_time||null,source,work_date:day,request_key:key,revision:order?.revision||null,slot_number:slotNumber};
+ const fields=Object.fromEntries(new FormData(form));const payload={...fields,agent_phone:domesticAgentPhone(fields.agent_phone),agent_phone_auto:agentPhoneAuto,church_required:fields.church_required==='yes',church:fields.church_required==='yes'?(fields.church||''):'',category:fields.category||null,team_size:fields.team_size?Number(fields.team_size):null,issue_time:fields.issue_time||null,source,work_date:day,request_key:key,revision:order?.revision||null,slot_number:slotNumber};
  try{const r=await api('/api/dispatch-board/orders'+(order?'/'+order.id:''),{method:order?'PUT':'POST',body:JSON.stringify(payload)});if(!live())return;closeModal();await loadDispatchBoard();if(chooseCrewAfterSave){const fresh=dispatchBoard?.items.find(o=>o.id===(order?.id||r.id));if(fresh)await openDispatchCrew(fresh)}else toast('Заказ сохранён')}catch(error){if(live()){qs('[data-plan-error]',form).textContent=error.message;button.disabled=false;chooseCrewAfterSave=false}}
  };
 }
@@ -16432,7 +16442,7 @@ function dispatchMini(o){
  const people=[o.brigadier,...(o.members||[])].filter(Boolean);
  const assigned=Number.isInteger(o.assigned_count)?o.assigned_count:people.length,complete=assigned===o.team_size&&Boolean(o.brigadier);
  const rawPhone=String(o.agent_phone||''),digits=rawPhone.replace(/\D/g,'');
- const phone=/^[78]\d{10}$/.test(digits)?`+7 (${digits.slice(1,4)}) ${digits.slice(4,7)}-${digits.slice(7,9)}-${digits.slice(9)}`:rawPhone;
+ const phone=/^[78]\d{10}$/.test(digits)?`8 (${digits.slice(1,4)}) ${digits.slice(4,7)}-${digits.slice(7,9)}-${digits.slice(9)}`:rawPhone;
  const fields=o.route_fields||{},oldRoute=Object.keys(fields).length?[]:String(o.route||'').split(/[;\n]+/);
  const route=[['morgue','Морг'],['church','Храм'],['cemetery',o.destination_type==='cremation'?'Кремация':'Кладбище']].map(([key,label],i)=>{
   let value=String(fields[key]??oldRoute[i]??'').trim();
@@ -17074,7 +17084,7 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
     order=None
     if data.action=='start':
         if not data.agent_name.strip():raise HTTPException(422,'Введите агента')
-        resolved_agent_phone=data.agent_phone.strip() or private_agent_phone_lookup(db,data.agent_name)
+        resolved_agent_phone=brigadier_phone8(data.agent_phone) or private_agent_phone_lookup(db,data.agent_name)
         day=datetime.now(MOSCOW).date()+timedelta(days=1);dispatch_day_lock(db,day)
         rows=list(db.scalars(select(Order).where(Order.work_date==day,Order.source=='private',Order.status!='cancelled').order_by(Order.id)))
         mapping,_=dispatch_slot_layout(db,day,rows)
@@ -17101,7 +17111,9 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
             meta.update(private_intake=True,chat_number=number)
             meta.setdefault('source_messages',[])
             plan.payload=json.dumps(meta,ensure_ascii=False)
-            if not order.agent_phone and resolved_agent_phone:order.agent_phone=resolved_agent_phone
+            if not order.agent_phone and resolved_agent_phone:
+                order.agent_phone=resolved_agent_phone;meta['agent_phone_auto']=resolved_agent_phone
+                plan.payload=json.dumps(meta,ensure_ascii=False)
         else:
             order=Order(public_id=_public_id(),source='private',work_date=day,issue_time=time(0,0),arrival_time=None,
                 deceased_name='',route='',category='',team_size=0,organization=data.agent_name.strip(),notes='',kickback_rub=0,
@@ -17109,6 +17121,7 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
             db.add(order);db.flush()
             db.add(DispatchPlan(order_id=order.id,request_key=dispatch_hash({'intake':key})[:32],payload=json.dumps({
                 'slot_number':slot_number,'chat_number':number,'private_intake':True,'source_messages':[],
+                'agent_phone_auto':resolved_agent_phone,
                 'missing_fields':['category','team_size','deceased_name','issue_time']},ensure_ascii=False)))
         if not session:session=PrivateIntakeSession(tg_id=data.tg_id);db.add(session)
         session.order_id=order.id
@@ -17123,9 +17136,14 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
         if order.status=='cancelled':raise HTTPException(409,'Заказ отменён')
         plan=db.get(DispatchPlan,order.id)
         if not plan:raise HTTPException(409,'Заказ не поддерживает этот режим')
+        auto_phone=''
         if not order.agent_phone:
-            order.agent_phone=private_agent_phone_lookup(db,order.organization or order.agent_name,order.id)
-        meta=json.loads(plan.payload);number=private_intake_info(db,order)['number']
+            auto_phone=private_agent_phone_lookup(db,order.organization or order.agent_name,order.id)
+            order.agent_phone=auto_phone
+        meta=json.loads(plan.payload)
+        if auto_phone:
+            meta['agent_phone_auto']=auto_phone;plan.payload=json.dumps(meta,ensure_ascii=False)
+        number=private_intake_info(db,order)['number']
         heading=f'Частный №{number} · {order.work_date.strftime("%d.%m")} · {order.agent_name}'
         if order.work_date<datetime.now(MOSCOW).date() and data.action in {'resume','append','time'}:
             raise HTTPException(409,'Дата заказа уже прошла')
@@ -17365,9 +17383,9 @@ INLINE_INDEX_HTML=_payroll_missing_order_viewer_html(INLINE_INDEX_HTML)
 
 
 def _dispatch_editor_keyboard_html(html):
-    anchor="let chooseCrewAfterSave=false;\n const toggleChurch="
+    anchor="let chooseCrewAfterSave=false;\n const domesticAgentPhone="
     if html.count(anchor)!=1:raise ValueError('Dispatch editor keyboard anchor missing')
-    html=html.replace(anchor,"let chooseCrewAfterSave=false;\n installDispatchEditorViewport(form);\n const toggleChurch=",1)
+    html=html.replace(anchor,"let chooseCrewAfterSave=false;\n installDispatchEditorViewport(form);\n const domesticAgentPhone=",1)
     html=html.replace("function showModal(title, body) {", "function showModal(title, body) {disposeDispatchEditorViewport();",1)
     html=html.replace("function closeModal(){", "function closeModal(){disposeDispatchEditorViewport();",1)
     return html.replace('</body>',r'''<style>
