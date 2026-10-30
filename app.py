@@ -18262,7 +18262,10 @@ def gbu_recovery_preview(db: Session=Depends(get_db),user: TelegramUser=Depends(
     return {'orders':[{'date':d,'surname':n,'category':c,'names':names,
         'saved':db.get(GbuPayrollRoster,gbu_recovery_key(i)) is not None}
         for i,(d,n,c,names) in enumerate(GBU_OCT_RECOVERY)],
-        'employees':[{'id':p.id,'name':_employee_dict(p)['display_name']} for p in people]}
+        'employees':[{'id':p.id,
+            'name':' · '.join([str(p.full_name or 'Без имени').split()[0],
+                str(p.metro or '').strip() or 'метро не указано',
+                f'{p.height_cm} см' if p.height_cm else 'рост не указан'])} for p in people]}
 
 
 @app.post('/api/gbu-staff-payroll/recovery-oct2026')
@@ -18306,13 +18309,28 @@ function addGbuRecoveryButton(body,month,period){queueMicrotask(()=>{
  const button=document.createElement('button');button.type='button';button.className='secondary';button.textContent='Восстановить 7 заказов · 1–2 октября';
  button.onclick=()=>openGbuRecovery(month,period);body.prepend(button);
 });}
+function gbuRecoverySearch(employees,query){
+ const clean=s=>String(s).toLowerCase().replace(/ё/g,'е').replace(/[^а-яa-z0-9]+/g,' ').trim();
+ const terms=clean(query).split(/\s+/).filter(Boolean);
+ return employees.filter(p=>terms.every(term=>clean(p.name).includes(term)));
+}
 async function openGbuRecovery(month,period){
  showModal('Восстановление 7 заказов','<div id="gbuRecovery">Загрузка…</div>');const root=qs('#gbuRecovery');
  try{
  const data=await api('/api/gbu-staff-payroll/recovery-oct2026');if(qs('#gbuRecovery')!==root)return;
- root.innerHTML='<p>Проверьте сотрудников. Первый в каждом составе — бригадир. Зарплата будет начислена за 1–2 октября 2026 года.</p>'+data.orders.map((o,i)=>`<section style="margin:12px 0"><b>${esc(o.date)} · ${esc(o.surname)} · ${o.category==='elite'?'Элит':'Стандарт'} · 4 чел.${o.saved?' · восстановлен':''}</b>${o.names.map((name,j)=>`<label style="display:block">${j+1}. ${esc(name)}${j===0?' · бригадир':''}<select data-recovery-order="${i}" ${o.saved?'disabled':''} style="width:100%"><option value="">Выберите сотрудника</option>${data.employees.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></label>`).join('')}</section>`).join('')+'<p data-recovery-status role="status"></p><button type="button" class="primary" data-recovery-save>Восстановить и начислить</button>';
+ root.innerHTML='<p>Проверьте сотрудников. Первый в каждом составе — бригадир. Зарплата будет начислена за 1–2 октября 2026 года.</p>'+data.orders.map((o,i)=>`<section style="margin:12px 0"><b>${esc(o.date)} · ${esc(o.surname)} · ${o.category==='elite'?'Элит':'Стандарт'} · 4 чел.${o.saved?' · восстановлен':''}</b>${o.names.map((name,j)=>`<label style="display:block">${j+1}. ${esc(name)}${j===0?' · бригадир':''}<input type="search" data-recovery-search placeholder="Поиск: имя, метро, рост" aria-label="Поиск сотрудника ${j+1}" ${o.saved?'disabled':''} style="display:block;width:100%;font-size:16px;margin:5px 0"><select data-recovery-order="${i}" ${o.saved?'disabled':''} style="width:100%"><option value="">Выберите сотрудника</option>${data.employees.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></label>`).join('')}</section>`).join('')+'<p data-recovery-status role="status"></p><button type="button" class="primary" data-recovery-save>Восстановить и начислить</button>';
  const normalize=s=>String(s).toLowerCase().replace(/ё/g,'е').replace(/[^а-яa-z ]/g,' ').replace(/\s+/g,' ').trim();
  qsa('[data-recovery-order]',root).forEach((select,k)=>{const name=data.orders[Math.floor(k/4)].names[k%4],n=normalize(name);const matches=data.employees.filter(p=>normalize(p.name)===n);if(matches.length===1)select.value=matches[0].id;});
+ qsa('[data-recovery-search]',root).forEach(input=>{
+ const select=input.nextElementSibling;
+ input.oninput=()=>{
+  const selected=select.value,rows=gbuRecoverySearch(data.employees,input.value);
+  const current=data.employees.find(p=>String(p.id)===selected);
+  if(current&&!rows.some(p=>String(p.id)===selected))rows.unshift(current);
+  select.innerHTML='<option value="">'+(rows.length?'Выберите сотрудника':'Ничего не найдено')+'</option>'+rows.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('');
+  select.value=selected;
+ };
+ });
  const save=qs('[data-recovery-save]',root);save.onclick=async()=>{
  const crews=data.orders.map((o,i)=>qsa(`[data-recovery-order="${i}"]`,root).map(s=>Number(s.value)));
  if(crews.some((ids,i)=>!data.orders[i].saved&&(ids.some(id=>!id)||new Set(ids).size!==4))){qs('[data-recovery-status]',root).textContent='Выберите 4 разных сотрудников в каждом невосстановленном заказе';return}
