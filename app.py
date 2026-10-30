@@ -14316,6 +14316,45 @@ def dispatch_board(work_date: date, db: Session = Depends(get_db), user: Telegra
     return JSONResponse(dispatch_board_data(db, work_date), headers={'Cache-Control':'private, no-store'})
 
 
+def private_agent_phone_key(value):
+    return re.sub(r'[^а-яa-z0-9]+', ' ', private_intake_agent_key(value).replace('ё', 'е')).strip()
+
+
+def private_agent_phone_number(value):
+    digits=re.sub(r'\D', '', str(value or ''))
+    if len(digits)==11 and digits[0] in '78':return '+7'+digits[1:]
+    return ''
+
+
+def private_agent_unique_phone(phones):
+    values={phone for value in phones if (phone:=private_agent_phone_number(value))}
+    return next(iter(values)) if len(values)==1 else ''
+
+
+def private_agent_phone_lookup(db, name, exclude_order_id=None):
+    """Exact private-agent aliases only; conflicting numbers require manual input."""
+    key=private_agent_phone_key(name)
+    if not key or key in {'агент','гбу','частный','частные','без агента'}:return ''
+    phones=[]
+    for full_name,phone in db.execute(select(Agent.full_name,Agent.phone).where(Agent.active.is_(True))):
+        if private_agent_phone_key(full_name)==key:phones.append(phone)
+    for oid,organization,agent_name,phone in db.execute(select(
+            Order.id,Order.organization,Order.agent_name,Order.agent_phone).where(
+                Order.source=='private',Order.agent_phone!='',Order.status!='cancelled')):
+        if oid==exclude_order_id:continue
+        # Prefer the operator's own alias rather than a common first name.
+        alias=organization.strip() or agent_name.strip()
+        if private_agent_phone_key(alias)==key:phones.append(phone)
+    return private_agent_unique_phone(phones)
+
+
+@app.get('/api/dispatch-board/private-agent-phone')
+def private_agent_phone_endpoint(name: str, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    dispatch_guard(db,user)
+    if len(name)>200:raise HTTPException(422,'Слишком длинное имя агента')
+    return JSONResponse({'phone':private_agent_phone_lookup(db,name)},headers={'Cache-Control':'private, no-store'})
+
+
 @app.get('/api/dispatch-board/agent-match')
 def dispatch_agent_lookup(name: str, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     dispatch_guard(db,user)
@@ -14376,7 +14415,7 @@ def dispatch_create(data: DispatchPlanInput, db: Session = Depends(get_db), user
         issue_time=data.issue_time or time(0,0), arrival_time=arrival, deceased_name=data.deceased_name.strip(),
         route='\n'.join(route_fields.values()), category=data.category or '', team_size=data.team_size or 0,
         organization=data.organization.strip(), notes=(data.notes or '').strip(), kickback_rub=0, agent_name=data.agent_name.strip(),
-        agent_phone=data.agent_phone.strip(), other_agent_phone='', status='draft' if missing else 'new')
+        agent_phone=data.agent_phone.strip() or (private_agent_phone_lookup(db,data.organization or data.agent_name) if data.source=='private' else ''), other_agent_phone='', status='draft' if missing else 'new')
     db.add(order); db.flush()
     db.add(DispatchPlan(order_id=order.id, request_key=data.request_key, payload=json.dumps({
         'creation_hash':dispatch_hash(data.model_dump(exclude={'revision'})),
@@ -14501,6 +14540,8 @@ def dispatch_update(order_id: int, data: DispatchPlanInput, db: Session = Depend
         value = getattr(data, field)
         if value is None: value = {'category':'','team_size':0,'issue_time':time(0,0)}.get(field,value)
         setattr(order, field, value.strip() if isinstance(value,str) else value)
+    if order.source=='private' and not order.agent_phone:
+        order.agent_phone=private_agent_phone_lookup(db,order.organization or order.agent_name,order.id)
     if data.notes is not None: order.notes=data.notes.strip()
     order.arrival_time=(datetime.combine(data.work_date,data.issue_time)-timedelta(minutes=30)).time() if data.issue_time else None
     if missing: order.status='draft'
@@ -15773,6 +15814,28 @@ async function openDispatchEditor(order,source='private',slotNumber=null){
   };
   form.elements.agent_name.onchange=lookupAgent;lookupAgent();
  }
+ if(source==='private'&&!order?.approved){
+  let phoneLookupGeneration=0,filledPhone='';
+  const lookupPrivatePhone=async()=>{
+   const generation=++phoneLookupGeneration;
+   const alias=form.elements.organization.value.trim()||form.elements.agent_name.value.trim();
+   if(!alias||form.elements.agent_phone.value.trim())return;
+   try{const result=await api('/api/dispatch-board/private-agent-phone?name='+encodeURIComponent(alias));
+    if(live()&&generation===phoneLookupGeneration&&!form.elements.agent_phone.value.trim()&&alias===(form.elements.organization.value.trim()||form.elements.agent_name.value.trim())&&result.phone){
+     form.elements.agent_phone.value=result.phone;filledPhone=result.phone;
+     let hint=form.querySelector('[data-private-phone-hint]');
+     if(!hint){hint=document.createElement('small');hint.dataset.privatePhoneHint='';form.elements.agent_phone.after(hint)}
+     hint.textContent='Номер из предыдущих заказов или контактов. Проверьте перед сохранением.';
+    }
+   }catch(error){/* Manual editing remains available when lookup fails. */}
+  };
+  const resetPrivatePhone=()=>{phoneLookupGeneration++;if(filledPhone&&form.elements.agent_phone.value===filledPhone){form.elements.agent_phone.value='';form.querySelector('[data-private-phone-hint]')?.remove()}filledPhone=''};
+  form.elements.organization.addEventListener('input',resetPrivatePhone);
+  form.elements.agent_name.addEventListener('input',resetPrivatePhone);
+  form.elements.organization.addEventListener('change',lookupPrivatePhone);
+  form.elements.agent_name.addEventListener('change',lookupPrivatePhone);
+  lookupPrivatePhone();
+ }
  const sizes=()=>{const allowed=form.elements.category.value==='carryout'?[2,3,4]:(source==='gbu'||form.elements.category.value!=='standard'?[4,6]:[3,4,5,6]);const old=Number(form.elements.team_size.value)||order?.team_size;form.elements.team_size.innerHTML='<option value="">Выберите количество</option>'+allowed.map(n=>`<option value="${n}" ${n===old?'selected':''}>${n}</option>`).join('')};sizes();form.elements.category.onchange=sizes;
  form.elements.issue_time.oninput=()=>{const parts=form.elements.issue_time.value.split(':').map(Number);if(parts.length===2){const minutes=(parts[0]*60+parts[1]-30+1440)%1440;qs('[data-plan-arrival]',form).value=String(Math.floor(minutes/60)).padStart(2,'0')+':'+String(minutes%60).padStart(2,'0')}};
  const crew=qs('[data-plan-crew]',form);if(crew)crew.onclick=()=>{chooseCrewAfterSave=true;form.requestSubmit()};
@@ -17011,6 +17074,7 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
     order=None
     if data.action=='start':
         if not data.agent_name.strip():raise HTTPException(422,'Введите агента')
+        resolved_agent_phone=data.agent_phone.strip() or private_agent_phone_lookup(db,data.agent_name)
         day=datetime.now(MOSCOW).date()+timedelta(days=1);dispatch_day_lock(db,day)
         rows=list(db.scalars(select(Order).where(Order.work_date==day,Order.source=='private',Order.status!='cancelled').order_by(Order.id)))
         mapping,_=dispatch_slot_layout(db,day,rows)
@@ -17037,11 +17101,11 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
             meta.update(private_intake=True,chat_number=number)
             meta.setdefault('source_messages',[])
             plan.payload=json.dumps(meta,ensure_ascii=False)
-            if not order.agent_phone and data.agent_phone.strip():order.agent_phone=data.agent_phone.strip()
+            if not order.agent_phone and resolved_agent_phone:order.agent_phone=resolved_agent_phone
         else:
             order=Order(public_id=_public_id(),source='private',work_date=day,issue_time=time(0,0),arrival_time=None,
                 deceased_name='',route='',category='',team_size=0,organization=data.agent_name.strip(),notes='',kickback_rub=0,
-                agent_name=data.agent_name.strip(),agent_phone=data.agent_phone.strip(),other_agent_phone='',status='draft')
+                agent_name=data.agent_name.strip(),agent_phone=resolved_agent_phone,other_agent_phone='',status='draft')
             db.add(order);db.flush()
             db.add(DispatchPlan(order_id=order.id,request_key=dispatch_hash({'intake':key})[:32],payload=json.dumps({
                 'slot_number':slot_number,'chat_number':number,'private_intake':True,'source_messages':[],
@@ -17059,6 +17123,8 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
         if order.status=='cancelled':raise HTTPException(409,'Заказ отменён')
         plan=db.get(DispatchPlan,order.id)
         if not plan:raise HTTPException(409,'Заказ не поддерживает этот режим')
+        if not order.agent_phone:
+            order.agent_phone=private_agent_phone_lookup(db,order.organization or order.agent_name,order.id)
         meta=json.loads(plan.payload);number=private_intake_info(db,order)['number']
         heading=f'Частный №{number} · {order.work_date.strftime("%d.%m")} · {order.agent_name}'
         if order.work_date<datetime.now(MOSCOW).date() and data.action in {'resume','append','time'}:
