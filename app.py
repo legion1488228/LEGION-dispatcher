@@ -19456,7 +19456,7 @@ async function openGbuCashAllocation(month,period){
  if(state.bootstrap?.is_owner!==true){toast('Доступно только владельцу');return}
  showModal('Распределение кассы','<div id="gbuAllocation">Загрузка…</div>');
  const root=qs('#gbuAllocation'),active=()=>qs('#gbuAllocation')===root&&!qs('#modal').classList.contains('hidden');
- const half=period==='first'?1:2;let plan,busy=false;
+ const half=period==='first'?1:2;let plan,busy=false,comments=[];const commentDrafts=new Map();
  const line=(name,amount)=>`<div class="allocation-line"><span>${esc(name)}</span><b>${gbuAllocationMoney(amount)}</b></div>`;
  const summary=(label,amount)=>`<div><small>${label}</small><b>${gbuAllocationMoney(amount)}</b></div>`;
  function draw(){
@@ -19466,8 +19466,8 @@ async function openGbuCashAllocation(month,period){
   ${plan.missing_count?`<p class="allocation-warn">Не заполнен состав: ${plan.missing_count}. Сначала завершите начисления.</p>`:''}
   ${plan.unverified?.length?`<p class="allocation-warn">Ещё не подтвердили сверку: ${esc(plan.unverified.join(', '))}. Проверь суммы перед отправкой.</p>`:''}
   ${plan.locked?'<p class="allocation-info">План зафиксирован. Повторное открытие сохраняет назначения. Поручение не означает, что деньги уже выплачены.</p>':''}
-  ${plan.cashiers.map(c=>`<section><h4>${esc(c.name)}${plan.allocation_rule==='smallest_first_height3_fallback_v3'?' · '+(c.height_cm?esc(c.height_cm)+' см':'рост не указан'):''}</h4>${line('Касса + откат',c.total)}${line('Оставить себе',c.own_salary)}${c.payments.map(p=>gbuAllocationRecipientHtml(p)).join('')||'<p class="allocation-info">Выплаты другим не назначены.</p>'}${line('Остаток к сдаче тебе',c.remaining)}<p class="allocation-info">${esc(gbuAllocationDeliveryLabel(plan,c.tg_id))}</p>${gbuAllocationPayoutStatus(plan,c.tg_id)}</section>`).join('')}
-  <section><h4>Мой список выплат · ${gbuAllocationMoney(plan.owner_due)}</h4>${gbuAllocationOwnerProgressHtml(plan)}${plan.owner_payments.map(p=>gbuAllocationOwnerRecipientHtml(p)).join('')||'<p>Доплат сотрудникам нет.</p>'}<button type="button" class="secondary" data-allocation-copy>Скопировать мой список</button>${plan.owner_due?gbuAllocationPayoutStatus(plan,0):''}</section>
+  ${plan.cashiers.map(c=>`<section><h4>${esc(c.name)}${plan.allocation_rule==='smallest_first_height3_fallback_v3'?' · '+(c.height_cm?esc(c.height_cm)+' см':'рост не указан'):''}</h4>${line('Касса + откат',c.total)}${line('Оставить себе',c.own_salary)}${c.payments.map(p=>gbuAllocationRecipientHtml(p)).join('')||'<p class="allocation-info">Выплаты другим не назначены.</p>'}${line('Остаток к сдаче тебе',c.remaining)}<p class="allocation-info">${esc(gbuAllocationDeliveryLabel(plan,c.tg_id))}</p>${gbuAllocationCardCommentHtml(comments,c.tg_id,commentDrafts)}${gbuAllocationPayoutStatus(plan,c.tg_id)}</section>`).join('')}
+  <section><h4>Мой список выплат · ${gbuAllocationMoney(plan.owner_due)}</h4>${gbuAllocationOwnerProgressHtml(plan)}${plan.owner_payments.map(p=>gbuAllocationOwnerRecipientHtml(p)).join('')||'<p>Доплат сотрудникам нет.</p>'}<button type="button" class="secondary" data-allocation-copy>Скопировать мой список</button>${gbuAllocationCardCommentHtml(comments,0,commentDrafts)}${plan.owner_due?gbuAllocationPayoutStatus(plan,0):''}</section>
   ${plan.unspent_cash?`<p class="allocation-info">Не распределено у бригадиров: ${gbuAllocationMoney(plan.unspent_cash)}. Эти деньги нужно передать тебе.</p>`:''}
   ${plan.owner_surplus?`<p class="allocation-info">Останется после зарплаты: ${gbuAllocationMoney(plan.owner_surplus)}.</p>`:''}
   <p class="allocation-payout-total ${plan.all_payouts_confirmed?'paid':'unpaid'}" role="status">${plan.locked?(plan.all_payouts_confirmed?'Все выплаты подтверждены':'Есть неподтверждённые выплаты'):'План ещё не подтверждён'}</p><p data-allocation-status role="status" aria-live="polite"></p><button type="button" class="primary" data-allocation-send>${plan.locked?'Отправить неотправленные поручения':'Подтвердить план и отправить бригадирам'}</button>`;
@@ -19484,6 +19484,26 @@ async function openGbuCashAllocation(month,period){
   button.onclick=send;
   root.querySelectorAll('[data-payout-confirm]').forEach(b=>{b.disabled=busy||(Number(b.dataset.payoutConfirm)===0&&!plan.owner_payments.every(p=>p.paid===true));b.onclick=()=>confirmPayout(Number(b.dataset.payoutConfirm))});
   root.querySelectorAll('[data-owner-payment]').forEach(input=>{input.disabled=busy;input.onchange=()=>markOwnerPayment(Number(input.dataset.ownerPayment),input.checked,Number(input.dataset.version))});
+  root.querySelectorAll('[data-allocation-comment-toggle]').forEach(b=>{b.disabled=busy;b.onclick=()=>{
+   const uid=Number(b.dataset.allocationCommentToggle);
+   if(commentDrafts.has(uid))commentDrafts.delete(uid);else{const c=comments.find(c=>Number(c.tg_id)===uid);commentDrafts.set(uid,{text:c?.text||'',version:c?.version||0,error:''})}
+   redraw();qs('[data-allocation-comment-text="'+uid+'"]',root)?.focus();
+  }});
+  root.querySelectorAll('[data-allocation-comment-text]').forEach(t=>{t.disabled=busy;t.oninput=()=>{const d=commentDrafts.get(Number(t.dataset.allocationCommentText));if(d)d.text=t.value}});
+  root.querySelectorAll('[data-allocation-comment-save]').forEach(b=>{b.disabled=busy;b.onclick=()=>saveComment(Number(b.dataset.allocationCommentSave),false)});
+  root.querySelectorAll('[data-allocation-comment-delete]').forEach(b=>{b.disabled=busy;b.onclick=()=>saveComment(Number(b.dataset.allocationCommentDelete),true)});
+ }
+ async function saveComment(uid,remove){
+  const draft=commentDrafts.get(uid);if(busy||!active()||!draft)return;busy=true;
+  root.querySelectorAll('button,input,textarea').forEach(e=>e.disabled=true);
+  try{
+   const result=await api('/api/gbu-cash-allocation/comments/'+uid,{method:'PUT',body:JSON.stringify({month,half,text:remove?'':draft.text,expected_version:draft.version})});
+   if(!active())return;comments=result.card_comments||[];commentDrafts.delete(uid);busy=false;redraw();
+  }catch(e){
+   if(!active())return;draft.error=e.message;
+   try{const latest=await api('/api/gbu-cash-allocation/comments?month='+encodeURIComponent(month)+'&half='+half,{cache:'no-store'});if(active())comments=latest.card_comments||[]}catch(ignore){}
+   if(active()){busy=false;redraw()}
+  }
  }
  async function markOwnerPayment(employeeId,paid,version){
   if(busy||!active()){if(active())redraw();return}busy=true;
@@ -19515,9 +19535,14 @@ async function openGbuCashAllocation(month,period){
  }
  async function poll(){
   if(!active())return;
-  if(!busy&&plan?.locked){
-   try{const current=plan;const latest=await api('/api/gbu-cash-allocation?month='+encodeURIComponent(month)+'&half='+half,{cache:'no-store'});
-    if(active()&&!busy&&plan===current&&latest.plan_id===plan.plan_id&&JSON.stringify(latest)!==JSON.stringify(plan)){plan=latest;redraw()}
+  if(!busy&&!commentDrafts.size&&plan){
+   try{const current=plan;const [latest,notes]=await Promise.all([
+    plan.locked?api('/api/gbu-cash-allocation?month='+encodeURIComponent(month)+'&half='+half,{cache:'no-store'}):Promise.resolve(plan),
+    api('/api/gbu-cash-allocation/comments?month='+encodeURIComponent(month)+'&half='+half,{cache:'no-store'})]);
+    if(active()&&!busy&&!commentDrafts.size&&plan===current&&latest.plan_id===plan.plan_id){
+     const nextComments=notes.card_comments||[],changed=JSON.stringify(latest)!==JSON.stringify(plan)||JSON.stringify(nextComments)!==JSON.stringify(comments);
+     plan=latest;comments=nextComments;if(changed)redraw();
+    }
    }catch(e){/* Keep the last confirmed view until the connection returns. */}
   }
   if(active())setTimeout(poll,7000);
@@ -19532,7 +19557,10 @@ async function openGbuCashAllocation(month,period){
    const rows=plan.deliveries||[];qs('[data-allocation-status]',root).textContent='Сообщений отправлено: '+rows.filter(d=>d.status==='sent').length+'. Не отправлено: '+rows.filter(d=>d.status==='failed').length+'. Требуют проверки: '+rows.filter(d=>['pending','unknown'].includes(d.status)).length+'.';
   }catch(e){if(active()){busy=false;qs('[data-allocation-status]',root).textContent=e.message+' Закройте и снова откройте распределение для проверки результата.';qs('[data-allocation-send]',root).disabled=true}}
  }
- try{plan=await api('/api/gbu-cash-allocation?month='+encodeURIComponent(month)+'&half='+half,{cache:'no-store'});if(active()){draw();setTimeout(poll,7000)}}
+ try{const [data,notes]=await Promise.all([
+  api('/api/gbu-cash-allocation?month='+encodeURIComponent(month)+'&half='+half,{cache:'no-store'}),
+  api('/api/gbu-cash-allocation/comments?month='+encodeURIComponent(month)+'&half='+half,{cache:'no-store'})]);
+  if(active()){plan=data;comments=notes.card_comments||[];draw();setTimeout(poll,7000)}}
  catch(e){if(active()){root.textContent=e.message;const back=document.createElement('button');back.textContent='← К зарплате';back.onclick=()=>openGbuPayroll(month,period);root.append(back)}}
 }
 </script></body>''',1)
@@ -19864,5 +19892,84 @@ function gbuAllocationOwnerProgressHtml(plan){
 }
 function gbuAllocationOwnerRecipientHtml(person){
  return `<div class="allocation-owner-payment ${person.paid?'is-paid':''}">${gbuAllocationRecipientHtml(person)}<label class="allocation-owner-check"><input type="checkbox" data-owner-payment="${Number(person.employee_id)}" data-version="${Number(person.payment_version||0)}" ${person.paid?'checked':''} aria-label="Выплачено: ${esc(person.name)}" title="Выплачено"></label></div>`;
+}
+</script></body>''',1)
+
+
+class GbuCashAllocationComment(Base):
+    __tablename__ = 'gbu_cash_allocation_comments'
+    salary_start = Column(Date, primary_key=True)
+    tg_id = Column(BigInteger, primary_key=True)  # 0: owner's payout list
+    text = Column(String(2000), nullable=False, default='')
+    version = Column(Integer, nullable=False, default=1)
+    updated_by = Column(BigInteger, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class GbuCashAllocationCommentInput(BaseModel):
+    month: str = Field(pattern=r'^[1-9]\d{3}-(0[1-9]|1[0-2])$')
+    half: StrictInt = Field(ge=1, le=2)
+    text: StrictStr = Field(max_length=2000)
+    expected_version: StrictInt = Field(ge=0)
+
+
+def gbu_allocation_card_comments(db, salary_start):
+    rows = db.scalars(select(GbuCashAllocationComment).where(
+        GbuCashAllocationComment.salary_start == salary_start).order_by(GbuCashAllocationComment.tg_id))
+    return [{'tg_id': c.tg_id, 'text': c.text, 'version': c.version,
+             'updated_at': c.updated_at.isoformat()+'Z'} for c in rows]
+
+
+@app.get('/api/gbu-cash-allocation/comments')
+def gbu_cash_allocation_comments(month: str, half: int,
+        db: Session=Depends(get_db), user: TelegramUser=Depends(require_app_user)):
+    _require_gbu_payroll_owner(db, user)
+    start, _ = cash_reconciliation_period(month, half)
+    return JSONResponse({'card_comments': gbu_allocation_card_comments(db, start)},
+                        headers={'Cache-Control':'private, no-store'})
+
+
+@app.put('/api/gbu-cash-allocation/comments/{tg_id}')
+def gbu_cash_allocation_save_comment(tg_id: int, data: GbuCashAllocationCommentInput,
+        db: Session=Depends(get_db), user: TelegramUser=Depends(require_app_user)):
+    _require_gbu_payroll_owner(db, user)
+    start, _ = cash_reconciliation_period(data.month, data.half)
+    dispatch_day_lock(db, start)
+    saved = db.get(GbuCashAllocation, start)
+    plan = json.loads(saved.payload) if saved and saved.locked else gbu_allocation_source(db, user, data.month, data.half)
+    if tg_id != 0 and not any(int(c['tg_id']) == tg_id for c in plan['cashiers']):
+        raise HTTPException(404, 'Карточка отсутствует в этом распределении')
+    row = db.get(GbuCashAllocationComment, (start, tg_id))
+    if (row.version if row else 0) != data.expected_version:
+        raise HTTPException(409, 'Комментарий изменён в другом окне. Закройте редактор и откройте заново, чтобы увидеть сохранённый текст.')
+    value = data.text.strip()
+    if row is None:
+        row = GbuCashAllocationComment(salary_start=start, tg_id=tg_id, text=value,
+            version=1, updated_by=user.id, updated_at=datetime.utcnow())
+        db.add(row)
+    elif row.text != value:
+        row.text = value
+        row.version += 1
+        row.updated_by = user.id
+        row.updated_at = datetime.utcnow()
+    db.commit()
+    return {'card_comments': gbu_allocation_card_comments(db, start)}
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>',r'''<style>
+#gbuAllocation .allocation-card-comment{margin:10px 0}
+#gbuAllocation .allocation-card-comment>button{min-height:40px;padding:7px 12px}
+#gbuAllocation .allocation-card-comment p{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;margin:6px 0}
+#gbuAllocation .allocation-card-comment textarea{display:block;width:100%;min-height:100px;box-sizing:border-box;margin:7px 0;padding:10px;font-size:16px;line-height:1.4;border:1px solid var(--gold2);border-radius:8px;resize:vertical;scroll-margin-block:18px}
+#gbuAllocation .allocation-comment-actions{display:flex;gap:8px;flex-wrap:wrap}
+#gbuAllocation .allocation-comment-actions button{min-height:42px;padding:7px 12px}
+#gbuAllocation .allocation-comment-dot{color:var(--gold2);margin-right:5px}
+#gbuAllocation .allocation-comment-error{color:#b23832}
+</style><script>
+function gbuAllocationCardCommentHtml(comments,uid,drafts){
+ const saved=comments.find(c=>Number(c.tg_id)===Number(uid)),draft=drafts.get(Number(uid));
+ return `<div class="allocation-card-comment"><button type="button" class="secondary" data-allocation-comment-toggle="${uid}">${saved?.text?'<span class="allocation-comment-dot">●</span>':''}${draft?'Закрыть комментарий':'Комментарий'}</button>`+
+ (saved?.text?`<p>${esc(saved.text)}</p>`:'')+
+ (draft?`<label><span class="allocation-info">Комментарий к карточке</span><textarea maxlength="2000" data-allocation-comment-text="${uid}" placeholder="Введите комментарий">${esc(draft.text)}</textarea></label><div class="allocation-comment-actions"><button type="button" class="primary" data-allocation-comment-save="${uid}">Сохранить</button>${saved?.text?`<button type="button" class="secondary" data-allocation-comment-delete="${uid}">Удалить</button>`:''}</div><p class="allocation-comment-error" role="status">${esc(draft.error||'')}</p>`:'')+'</div>';
 }
 </script></body>''',1)
