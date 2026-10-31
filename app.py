@@ -19529,13 +19529,13 @@ async function openGbuCashAllocation(month,period){
   ${plan.unverified?.length?`<p class="allocation-warn">Ещё не подтвердили сверку: ${esc(plan.unverified.join(', '))}. Проверь суммы перед отправкой.</p>`:''}
   ${plan.locked?'<p class="allocation-info">План зафиксирован. Повторное открытие сохраняет назначения. Поручение не означает, что деньги уже выплачены.</p>':''}
   ${plan.cashiers.map(c=>`<section><h4>${esc(c.name)}${plan.allocation_rule==='smallest_first_height3_fallback_v3'?' · '+(c.height_cm?esc(c.height_cm)+' см':'рост не указан'):''}</h4>${line('Касса + откат',c.total)}${line('Оставить себе',c.own_salary)}${c.payments.map(p=>gbuAllocationRecipientHtml(p)).join('')||'<p class="allocation-info">Выплаты другим не назначены.</p>'}${line('Остаток к сдаче тебе',c.remaining)}<p class="allocation-info">${esc(gbuAllocationDeliveryLabel(plan,c.tg_id))}</p>${gbuAllocationResendHtml(plan,c)}${gbuAllocationCardCommentHtml(comments,c.tg_id,commentDrafts)}${gbuAllocationCommentSendHtml(plan,comments,c.tg_id)}${gbuAllocationPayoutStatus(plan,c.tg_id)}</section>`).join('')}
-  <section><h4>Мой список выплат · ${gbuAllocationMoney(plan.owner_due)}</h4>${gbuAllocationOwnerProgressHtml(plan)}${plan.owner_payments.map(p=>gbuAllocationOwnerRecipientHtml(p)).join('')||'<p>Доплат сотрудникам нет.</p>'}<button type="button" class="secondary" data-allocation-copy>Скопировать мой список</button>${gbuAllocationCardCommentHtml(comments,0,commentDrafts)}${plan.owner_due?gbuAllocationPayoutStatus(plan,0):''}</section>
+  <section><h4>Мой список выплат · ${gbuAllocationMoney(plan.owner_due)}</h4>${gbuAllocationOwnerProgressHtml(plan)}<div class="allocation-owner-grid">${plan.owner_payments.map(p=>gbuAllocationOwnerRecipientHtml(p)).join('')||'<p>Доплат сотрудникам нет.</p>'}</div><button type="button" class="secondary" data-allocation-copy>Скопировать мой список</button>${gbuAllocationCardCommentHtml(comments,0,commentDrafts)}${plan.owner_due?gbuAllocationPayoutStatus(plan,0):''}</section>
   ${plan.unspent_cash?`<p class="allocation-info">Не распределено у бригадиров: ${gbuAllocationMoney(plan.unspent_cash)}. Эти деньги нужно передать тебе.</p>`:''}
   ${plan.owner_surplus?`<p class="allocation-info">Останется после зарплаты: ${gbuAllocationMoney(plan.owner_surplus)}.</p>`:''}
   <p class="allocation-payout-total ${plan.all_payouts_confirmed?'paid':'unpaid'}" role="status">${plan.locked?(plan.all_payouts_confirmed?'Все выплаты подтверждены':'Есть неподтверждённые выплаты'):'План ещё не подтверждён'}</p><p data-allocation-status role="status" aria-live="polite"></p><button type="button" class="primary" data-allocation-send>${plan.locked?'Отправить неотправленные поручения':'Подтвердить план и отправить бригадирам'}</button>`;
   qs('[data-allocation-back]',root).onclick=()=>openGbuPayroll(month,period);
   qs('[data-allocation-copy]',root).onclick=async()=>{
-   const text='Зарплата '+gbuAllocationPeriod(plan.salary_start,plan.salary_end)+'\nМой список выплат:\n'+plan.owner_payments.map(p=>(p.paid?'✅ ':'☐ ')+p.name+' — '+cabinetMoney(p.amount)+' ₽'+(p.telegram_url?' · '+p.telegram_url:'')+' · Телефон: '+(p.phone||'не указан')).join('\n')+'\nИтого: '+cabinetMoney(plan.owner_due)+' ₽\nКасса у меня: '+cabinetMoney(plan.owner_cash)+' ₽\nДобавить своих: '+cabinetMoney(plan.owner_topup)+' ₽';
+   const text='Зарплата '+gbuAllocationPeriod(plan.salary_start,plan.salary_end)+'\nМой список выплат:\n'+plan.owner_payments.map(p=>(p.paid?'✅ ':'☐ ')+p.name+' — '+cabinetMoney(p.amount)+' ₽'+(p.telegram_url?'\n'+p.telegram_url:'')+'\nТелефон: '+(p.phone||'не указан')).join('\n')+'\nИтого: '+cabinetMoney(plan.owner_due)+' ₽\nКасса у меня: '+cabinetMoney(plan.owner_cash)+' ₽\nДобавить своих: '+cabinetMoney(plan.owner_topup)+' ₽';
    try{await navigator.clipboard.writeText(text);toast('Список скопирован')}catch(e){qs('[data-allocation-status]',root).textContent=text}
   };
   const button=qs('[data-allocation-send]',root),deliveries=plan.deliveries||[];
@@ -19727,20 +19727,31 @@ def gbu_allocation_recipient_line(index, person, money):
     telegram = f'<a href="{escape(url, quote=True)}">Личные сообщения</a>' if valid else 'Telegram не указан'
     phone = str(person.get('phone') or '').strip()
     return (f"{index}. {escape(person['name'])} — <b>{money(person['amount'])}</b>\n"
-            f"{telegram} · Телефон: {escape(phone) if phone else 'не указан'}")
+            f"{telegram}\nТелефон: {escape(phone) if phone else 'не указан'}")
 
 
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>',r'''<style>
-#gbuAllocation .allocation-recipient{margin:8px 0}
-#gbuAllocation .allocation-recipient .allocation-line{margin-bottom:2px}
-#gbuAllocation .allocation-recipient small{display:block;font-size:12px;overflow-wrap:anywhere;line-height:1.5}
-#gbuAllocation .allocation-recipient a{color:var(--gold);text-decoration:underline}
+#gbuAllocation .allocation-recipient{margin:6px 0}
+#gbuAllocation .allocation-recipient .allocation-line{margin-bottom:3px}
+#gbuAllocation .allocation-contact-actions{display:flex;align-items:center;gap:6px;margin-top:4px}
+#gbuAllocation .allocation-contact-action{display:inline-flex;align-items:center;justify-content:center;flex:0 0 30px;width:30px;height:30px;min-height:30px;padding:5px;border:1px solid var(--line);border-radius:8px;text-decoration:none;color:var(--text);background:var(--panel2)}
+#gbuAllocation .allocation-contact-action svg{display:block;width:18px;height:18px;pointer-events:none}
+#gbuAllocation .allocation-contact-action.telegram{color:#229ed9}
+#gbuAllocation .allocation-contact-action.phone{color:var(--green)}
+#gbuAllocation .allocation-contact-action[aria-disabled="true"]{opacity:.3}
+#gbuAllocation a.allocation-contact-action:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
 </style><script>
 function gbuAllocationRecipientHtml(person){
  const url=String(person.telegram_url||'');
  const valid=/^(?:https:\/\/t\.me\/[A-Za-z][A-Za-z0-9_]{3,31}|tg:\/\/user\?id=[1-9]\d*)$/.test(url);
- const telegram=valid?`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">Личные сообщения</a>`:'Telegram не указан';
- return `<div class="allocation-recipient"><div class="allocation-line"><span>${esc(person.name)}</span><b>${gbuAllocationMoney(person.amount)}</b></div><small>${telegram} · Телефон: ${esc(person.phone||'не указан')}</small></div>`;
+ const rawPhone=String(person.phone||'').trim(),digits=rawPhone.replace(/\D/g,'');
+ const phoneValid=digits.length>=7&&digits.length<=15;
+ const dial=digits.length===11&&digits[0]==='8'?'+7'+digits.slice(1):((rawPhone.startsWith('+')||(digits.length===11&&digits[0]==='7'))?'+':'')+digits;
+ const telegramIcon='<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M21.6 3.5 18.5 20c-.2 1.2-.9 1.5-1.8.9l-4.8-3.6-2.3 2.2c-.3.3-.5.5-1 .5l.4-5L18.1 6c.4-.4-.1-.6-.6-.3L6.3 12.8l-4.8-1.5c-1-.3-1-1 .2-1.5L20.4 2.6c.9-.3 1.6.2 1.2.9Z"/></svg>';
+ const phoneIcon='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3.1-8.7A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.5c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.8 2.1Z"/></svg>';
+ const telegram=valid?`<a class="allocation-contact-action telegram" href="${esc(url)}" target="_blank" rel="noopener noreferrer" aria-label="${esc('Личные сообщения: '+person.name)}" title="Личные сообщения">${telegramIcon}</a>`:`<span class="allocation-contact-action telegram" aria-disabled="true" aria-label="Telegram не указан" title="Telegram не указан">${telegramIcon}</span>`;
+ const phone=phoneValid?`<a class="allocation-contact-action phone" href="tel:${dial}" aria-label="${esc('Позвонить: '+person.name+', '+rawPhone)}" title="${esc(rawPhone)}">${phoneIcon}</a>`:`<span class="allocation-contact-action phone" aria-disabled="true" aria-label="Телефон не указан" title="Телефон не указан">${phoneIcon}</span>`;
+ return `<div class="allocation-recipient"><div class="allocation-line"><span>${esc(person.name)}</span><b>${gbuAllocationMoney(person.amount)}</b></div><div class="allocation-contact-actions">${telegram}${phone}</div></div>`;
 }
 </script></body>''',1)
 
@@ -19769,7 +19780,7 @@ class GbuCashAllocationBotConfirmInput(BaseModel):
 def gbu_allocation_confirmation_message(plan, cashier):
     amount = sum(int(p['amount']) for p in cashier['payments'])
     money = f'{amount:,}'.replace(',', ' ')
-    return (f"✅ <b>Подтверждение выплат · ЛЕГИОН</b>\n"
+    return (f"⏳ <b>Подтверждение выплат · ЛЕГИОН</b>\n"
             f"{escape(cashier['name'])}\n"
             f"Зарплата: {date.fromisoformat(plan['salary_start']):%d.%m.%Y}–"
             f"{date.fromisoformat(plan['salary_end']):%d.%m.%Y}\n"
@@ -19969,11 +19980,16 @@ def gbu_cash_allocation_owner_payment(plan_id: str, data: GbuCashAllocationOwner
 
 
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>',r'''<style>
-#gbuAllocation .allocation-owner-payment{display:grid;grid-template-columns:minmax(0,1fr) 44px;align-items:center;gap:6px;padding:5px 6px;border-radius:8px;margin:4px 0}
+#gbuAllocation .allocation-owner-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;margin:8px 0}
+#gbuAllocation .allocation-owner-payment{position:relative;min-width:0;padding:6px;border:1px solid var(--line);border-radius:6px}
 #gbuAllocation .allocation-owner-payment.is-paid{background:#e0f1e7}
 #gbuAllocation .allocation-owner-payment>.allocation-recipient{min-width:0;margin:0}
-#gbuAllocation .allocation-owner-check{display:flex;align-items:center;justify-content:center;min-width:44px;min-height:44px;cursor:pointer}
-#gbuAllocation input[data-owner-payment]{width:24px;height:24px;min-width:24px;margin:0;padding:0;accent-color:#237453;cursor:pointer}
+#gbuAllocation .allocation-owner-payment .allocation-line{display:flex;flex-direction:column;gap:2px;margin:0 0 3px}
+#gbuAllocation .allocation-owner-payment .allocation-line>span{padding-right:28px;font-size:11px;line-height:1.2;min-height:0}
+#gbuAllocation .allocation-owner-payment .allocation-line>b{font-size:12px;line-height:1.2}
+#gbuAllocation .allocation-owner-payment small{font-size:10px;line-height:1.25}
+#gbuAllocation .allocation-owner-check{position:absolute;top:0;right:0;display:flex;align-items:center;justify-content:center;width:34px;height:44px;cursor:pointer}
+#gbuAllocation input[data-owner-payment]{width:20px;height:20px;min-width:20px;margin:0;padding:0;accent-color:#237453;cursor:pointer}
 #gbuAllocation .allocation-owner-progress{display:flex;flex-wrap:wrap;gap:6px 16px;margin:8px 0;font-size:13px}
 </style><script>
 function gbuAllocationOwnerProgressHtml(plan){
