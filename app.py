@@ -4330,7 +4330,8 @@ def sync_cash_reminder_settings(data: CashReminderSettings, db: Session = Depend
 
 
 @app.post("/api/cash/reminder")
-async def send_cash_reminder(db: Session = Depends(get_db),
+async def send_cash_reminder(month: str | None = None, half: Literal[0, 1, 2] = 0,
+                             db: Session = Depends(get_db),
                              user: TelegramUser = Depends(require_admin)):
     _require_cash_manager(db, user)
     now = datetime.utcnow()
@@ -4342,6 +4343,23 @@ async def send_cash_reminder(db: Session = Depends(get_db),
     if not chat_ids:
         raise HTTPException(409, "Нет подключённых групп действующих кассиров.")
     today = datetime.now(MOSCOW).date()
+    month = month or today.strftime('%Y-%m')
+    selected_halves = (1, 2) if half == 0 else (half,)
+    reports = [json.loads(cash_reconciliation(month, h, db, user).body) for h in selected_halves]
+    snapshot = db.scalar(select(OwnerBotSnapshot).where(OwnerBotSnapshot.id == 1).with_for_update())
+    if not snapshot or now - snapshot.updated_at > timedelta(minutes=5):
+        raise HTTPException(409, 'Привязки групп кассы не обновлены. Проверьте работу бота.')
+    try:
+        payload = json.loads(snapshot.payload)
+        routes = _cash_note_destinations(payload)
+        blocked = {int(item['tg_id']) for item in payload.get('blocked', [])}
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise HTTPException(409, 'Не удалось проверить группы кассовых бригадиров.')
+    recipients, skipped, pending_count = _cash_reminder_recipients(reports, routes, blocked, set(chat_ids))
+    chat_ids = sorted(recipients)
+    if not chat_ids:
+        return {'sent_chats':0, 'failed_chats':0, 'already_sent_chats':0,
+                'unconfirmed_chats':0, 'pending_count':pending_count, 'skipped_chats':skipped}
     sent, failed, already, unconfirmed = 0, 0, 0, 0
     claimed = []
     legacy_sent_today = bool(row.sent_at and
@@ -4379,7 +4397,11 @@ async def send_cash_reminder(db: Session = Depends(get_db),
     for chat_id in claimed:
         outcome = 'unknown'
         try:
-            delivered = await send_telegram_message(chat_id, message)
+            periods = ', '.join(recipients[chat_id])
+            delivered = await send_telegram_message(chat_id,
+                f'🔔 Напоминание о сверке кассы\nПериод: {periods}\n\n'
+                'Вы ещё не подтвердили сверку за этот период. '
+                'Откройте «Касса» в личном кабинете и нажмите кнопку сверки кассы.')
             outcome = 'sent' if delivered else 'failed'
         except Exception as exc:
             # An explicit Telegram 4xx response rejected the send. A timeout or
@@ -4398,7 +4420,8 @@ async def send_cash_reminder(db: Session = Depends(get_db),
         else:
             unconfirmed += 1
     return {"sent_chats": sent, "failed_chats": failed,
-        "already_sent_chats": already, "unconfirmed_chats": unconfirmed}
+        "already_sent_chats": already, "unconfirmed_chats": unconfirmed,
+        "pending_count": pending_count, "skipped_chats": skipped}
 
 
 @app.get("/api/cash/months")
@@ -18690,3 +18713,44 @@ def _gbu_crew_direct_confirm_html(html: str) -> str:
 
 
 INLINE_INDEX_HTML = _gbu_crew_direct_confirm_html(INLINE_INDEX_HTML)
+
+
+
+def _cash_reminder_recipients(reports, routes, blocked, allowed_chats):
+    """Use the same checked state as the cash reconciliation cards."""
+    recipients, pending, skipped = {}, set(), set()
+    for report in reports:
+        label = f"{date.fromisoformat(report['start']):%d.%m.%Y}–{date.fromisoformat(report['end']):%d.%m.%Y}"
+        for item in report['items']:
+            uid = int(item['tg_id'])
+            if item['checked'] or uid in blocked:
+                continue
+            pending.add(uid)
+            chat = routes.get(uid)
+            if chat not in allowed_chats:
+                skipped.add(uid)
+                continue
+            labels = recipients.setdefault(chat, [])
+            if label not in labels:
+                labels.append(label)
+    return recipients, len(skipped), len(pending)
+
+
+def _cash_pending_reminders_html(html: str) -> str:
+    start = html.index('async function openCashTable(')
+    end = html.index('let ownerCabinetRequest=', start)
+    part = html[start:end]
+    old = "api('/api/cash/reminder',{method:'POST'})"
+    new = "api('/api/cash/reminder?month='+encodeURIComponent(requestedMonth)+'&half='+(requestedRange==='first'?1:requestedRange==='second'?2:0),{method:'POST'})"
+    if part.count(old) != 2:
+        raise RuntimeError('Cash reminder handlers not found')
+    part = part.replace(old, new)
+    old = 'toast(`Отправлено: ${result.sent_chats}. Уже напомнили сегодня:'
+    new = "toast(`${result.pending_count===0?'Все кассовые бригадиры уже сверились. ':''}Отправлено: ${result.sent_chats}.${result.skipped_chats?' Нет проверенной группы: '+result.skipped_chats+'.':''} Уже напомнили сегодня:"
+    if part.count(old) != 2:
+        raise RuntimeError('Cash reminder result labels not found')
+    part = part.replace(old, new)
+    return html[:start] + part + html[end:]
+
+
+INLINE_INDEX_HTML = _cash_pending_reminders_html(INLINE_INDEX_HTML)
