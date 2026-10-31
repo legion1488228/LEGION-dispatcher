@@ -18467,3 +18467,18 @@ function gbuPaidOrderCountsHtml(data){
 
 
 INLINE_INDEX_HTML=_gbu_paid_order_counts_html(INLINE_INDEX_HTML)
+
+
+def _gbu_crew_clear_selected_search_html(html: str) -> str:
+    """Reset the crew filter after selecting a member without rebuilding the form."""
+    start = html.index('async function openGbuOrderRoster(')
+    end = html.index('async function openGbuPayrollRoster(', start)
+    part = html[start:end]
+    old = 'boxes.forEach(box=>box.onchange=()=>{if(!box.checked)second.delete(Number(box.value));update()});update();'
+    new = "boxes.forEach(box=>box.onchange=()=>{if(!box.checked)second.delete(Number(box.value));update();if(box.checked&&search.value){search.value='';filterCrew()}});update();"
+    if part.count(old) != 1:
+        raise RuntimeError('GBU crew selection handler not found')
+    return html[:start] + part.replace(old, new, 1) + html[end:]
+
+
+INLINE_INDEX_HTML = _gbu_crew_clear_selected_search_html(INLINE_INDEX_HTML)
