@@ -18599,3 +18599,44 @@ dialog.bc-photo-viewer.photo-crew-keyboard .photo-crew-editor .gbu-crew-dialog{m
 
 
 INLINE_INDEX_HTML = _photo_crew_pinned_photo_html(INLINE_INDEX_HTML)
+
+
+def _photo_crew_select_button_html(html: str) -> str:
+    """Offer an accessible keyboard-dismiss action without shrinking the photo."""
+    start = html.index('function installPhotoCrewKeyboard(dialog,host){')
+    end = html.index('\n</script>', start)
+    part = html[start:end]
+    anchor = " let stableHeight=0,searchFocus=null,disposed=false;"
+    replacement = anchor + r'''
+ let selecting=false;
+ const choose=document.createElement('button');choose.type='button';choose.className='photo-crew-select-results';choose.textContent='К выбору ↓';choose.setAttribute('aria-label','Скрыть клавиатуру и перейти к выбору сотрудников');
+ const photo=shell?.querySelector('.bc-viewer-photo');(photo||shell||host).append(choose);
+ const alignResults=()=>{const search=find();if(!disposed&&dialog.open&&selecting&&search){const field=search.getBoundingClientRect(),frame=host.getBoundingClientRect();host.scrollTop+=field.top-frame.top}};
+ const selectResults=event=>{event?.preventDefault();event?.stopPropagation();selecting=true;searchFocus=null;find()?.blur();update();requestAnimationFrame(alignResults)};
+ choose.addEventListener('pointerdown',event=>event.preventDefault());choose.onclick=selectResults;
+ const submitSearch=event=>{if(event.target===find()&&event.key==='Enter'&&!event.isComposing)selectResults(event)};
+ host.addEventListener('keydown',submitSearch);
+'''
+    if part.count(anchor) != 1:
+        raise RuntimeError('Crew keyboard action anchor missing')
+    part = part.replace(anchor, replacement, 1)
+    anchor = "  if(dialog.classList.contains('photo-crew-keyboard')!==keyboard)dialog.classList.toggle('photo-crew-keyboard',keyboard);"
+    part = part.replace(anchor, anchor + "\n  choose.hidden=!keyboard;if(!keyboard&&selecting)requestAnimationFrame(alignResults);", 1)
+    part = part.replace("searchFocus=event.target;update();", "selecting=false;searchFocus=event.target;update();", 1)
+    part = part.replace('return ()=>{disposed=true;', "return ()=>{disposed=true;choose.remove();host.removeEventListener('keydown',submitSearch);", 1)
+    html = html[:start] + part + html[end:]
+    return html.replace('</body>', '''<style id="photo-crew-select-results-style">
+.bc-photo-viewer .photo-crew-select-results{position:absolute;right:10px;top:10px;z-index:25;min-height:44px;padding:9px 14px;border:1px solid #b49a60;border-radius:10px;background:#f7f3e8;color:#382d18;font-size:15px;font-weight:700;box-shadow:0 2px 10px #0004;cursor:pointer;touch-action:manipulation}
+.bc-photo-viewer .photo-crew-select-results[hidden]{display:none!important}
+</style></body>''', 1)
+
+
+INLINE_INDEX_HTML = _photo_crew_select_button_html(INLINE_INDEX_HTML)
+
+
+# Keep the photo visible while reserving usable space for crew selection.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '''<style id="photo-crew-balanced-keyboard">
+dialog.bc-photo-viewer.photo-crew-editing.photo-crew-keyboard .bc-expanded-card{grid-template-rows:auto clamp(90px,26%,160px) minmax(0,1fr)!important;gap:6px!important;padding:8px!important}
+dialog.bc-photo-viewer.photo-crew-keyboard .bc-viewer-photo{height:100%;max-height:160px;min-height:0}
+dialog.bc-photo-viewer.photo-crew-keyboard .bc-viewer-photo img{object-fit:contain}
+</style></body>''', 1)
