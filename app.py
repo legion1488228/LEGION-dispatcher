@@ -18539,3 +18539,63 @@ def _photo_crew_keep_photo_size_html(html: str) -> str:
 
 
 INLINE_INDEX_HTML = _photo_crew_keep_photo_size_html(INLINE_INDEX_HTML)
+
+
+def _photo_crew_single_scroll_html(html: str) -> str:
+    """Use one scroll container while the keyboard reduces the visible area."""
+    start = html.index('function installPhotoCrewKeyboard(dialog,host){')
+    end = html.index('\n</script>', start)
+    part = html[start:end]
+    old = "host.scrollTop=Math.max(0,event.target.offsetTop-host.offsetTop)"
+    new = """host.scrollTop=0;requestAnimationFrame(()=>{
+   if(disposed||!dialog.open||document.activeElement!==event.target)return;
+   const field=event.target.getBoundingClientRect(),frame=dialog.getBoundingClientRect();
+   if(field.bottom>frame.bottom-12)dialog.scrollTop+=field.bottom-frame.bottom+12;
+  })"""
+    if part.count(old) != 1:
+        raise RuntimeError('Photo crew focus scroll anchor missing')
+    html = html[:start] + part.replace(old, new, 1) + html[end:]
+    return html.replace('</body>', '''<style id="photo-crew-single-scroll">
+/* The whole card scrolls; nested editors must not trap the touch gesture. */
+dialog.bc-photo-viewer.photo-crew-editing.photo-crew-keyboard{overflow-x:hidden!important;overflow-y:auto!important;touch-action:pan-y;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+dialog.bc-photo-viewer.photo-crew-editing.photo-crew-keyboard .bc-expanded-card{height:auto!important;min-height:var(--crew-stable-shell-height,100%);grid-template-rows:var(--crew-stable-header-height,auto) var(--crew-stable-photo-height,280px) max-content!important;overflow:visible!important;gap:var(--crew-stable-gap,10px);padding:var(--crew-stable-padding,13px)}
+dialog.bc-photo-viewer.photo-crew-keyboard .photo-crew-editor{height:auto!important;max-height:none!important;overflow:visible!important;overscroll-behavior:auto;min-height:0;padding-bottom:24px}
+dialog.bc-photo-viewer.photo-crew-keyboard .photo-crew-editor .gbu-crew-dialog,
+dialog.bc-photo-viewer.photo-crew-keyboard .photo-crew-editor [data-crew-body],
+dialog.bc-photo-viewer.photo-crew-keyboard .photo-crew-editor [data-crew-form]{height:auto!important;max-height:none!important;overflow:visible!important}
+dialog.bc-photo-viewer.photo-crew-keyboard .photo-crew-editor .gbu-crew-footer{position:static!important;padding-bottom:16px}
+</style></body>''', 1)
+
+
+INLINE_INDEX_HTML = _photo_crew_single_scroll_html(INLINE_INDEX_HTML)
+
+
+def _photo_crew_pinned_photo_html(html: str) -> str:
+    """Reserve the photo row and give only the remaining space to the crew scroller."""
+    start = html.index('function installPhotoCrewKeyboard(dialog,host){')
+    end = html.index('\n</script>', start)
+    part = html[start:end]
+    old = """host.scrollTop=0;requestAnimationFrame(()=>{
+   if(disposed||!dialog.open||document.activeElement!==event.target)return;
+   const field=event.target.getBoundingClientRect(),frame=dialog.getBoundingClientRect();
+   if(field.bottom>frame.bottom-12)dialog.scrollTop+=field.bottom-frame.bottom+12;
+  })"""
+    new = """requestAnimationFrame(()=>{
+   if(disposed||!dialog.open||document.activeElement!==event.target)return;
+   const field=event.target.getBoundingClientRect(),frame=host.getBoundingClientRect();
+   host.scrollTop+=field.top-frame.top;
+  })"""
+    if part.count(old) != 1:
+        raise RuntimeError('Pinned photo focus anchor missing')
+    html = html[:start] + part.replace(old, new, 1) + html[end:]
+    return html.replace('</body>', '''<style id="photo-crew-pinned-photo">
+/* The photo stays in its own grid row; only the editor is scrollable. */
+dialog.bc-photo-viewer.photo-crew-editing.photo-crew-keyboard{overflow:hidden!important}
+dialog.bc-photo-viewer.photo-crew-editing.photo-crew-keyboard .bc-expanded-card{height:100%!important;min-height:0!important;max-height:100%;grid-template-rows:var(--crew-stable-header-height,auto) var(--crew-stable-photo-height,280px) minmax(0,1fr)!important;overflow:hidden!important}
+dialog.bc-photo-viewer.photo-crew-keyboard .bc-viewer-photo{min-height:0;align-self:stretch}
+dialog.bc-photo-viewer.photo-crew-keyboard .photo-crew-editor{height:100%!important;min-height:0!important;max-height:100%!important;box-sizing:border-box;overflow-x:hidden!important;overflow-y:auto!important;touch-action:pan-y;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding-bottom:24px;scroll-padding-bottom:16px}
+dialog.bc-photo-viewer.photo-crew-keyboard .photo-crew-editor .gbu-crew-dialog{min-height:0!important}
+</style></body>''', 1)
+
+
+INLINE_INDEX_HTML = _photo_crew_pinned_photo_html(INLINE_INDEX_HTML)
