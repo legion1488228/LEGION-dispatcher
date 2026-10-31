@@ -18503,3 +18503,39 @@ def _gbu_crew_search_archive_html(html: str) -> str:
 
 
 INLINE_INDEX_HTML = _gbu_crew_search_archive_html(INLINE_INDEX_HTML)
+
+
+def _photo_crew_keep_photo_size_html(html: str) -> str:
+    """Keep the editor canvas at its pre-keyboard height and scroll its viewport."""
+    start = html.index('function installPhotoCrewKeyboard(dialog,host){')
+    end = html.index('\n</script>', start)
+    part = html[start:end]
+    old = ' let searchFocus=null,disposed=false;'
+    new = " const shell=dialog.querySelector('.bc-expanded-card');\n let stableHeight=0,searchFocus=null,disposed=false;"
+    if part.count(old) != 1:
+        raise RuntimeError('Photo keyboard sizing anchor missing')
+    part = part.replace(old, new, 1)
+    old = "  const height=viewport?.height||window.innerHeight,top=viewport?.offsetTop||0;"
+    new = """  const height=viewport?.height||window.innerHeight,top=viewport?.offsetTop||0;
+  const keyboard=document.activeElement===find();
+  if(!keyboard&&!dialog.classList.contains('photo-crew-keyboard')&&shell){
+   stableHeight=shell.getBoundingClientRect().height||stableHeight;
+   const photo=shell.querySelector('.bc-viewer-photo'),head=shell.querySelector('header'),style=getComputedStyle(shell);
+   if(photo)dialog.style.setProperty('--crew-stable-photo-height',photo.getBoundingClientRect().height+'px');
+   if(head)dialog.style.setProperty('--crew-stable-header-height',head.getBoundingClientRect().height+'px');
+   dialog.style.setProperty('--crew-stable-padding',style.padding);dialog.style.setProperty('--crew-stable-gap',style.gap);
+  }
+  if(stableHeight>0)dialog.style.setProperty('--crew-stable-shell-height',stableHeight+'px');"""
+    part = part.replace(old, new, 1)
+    part = part.replace("  const keyboard=document.activeElement===find();\n  if(dialog.classList", "  if(dialog.classList", 1)
+    part = part.replace("dialog.style.removeProperty('--crew-viewport-top')", "dialog.style.removeProperty('--crew-viewport-top');['--crew-stable-shell-height','--crew-stable-photo-height','--crew-stable-header-height','--crew-stable-padding','--crew-stable-gap'].forEach(name=>dialog.style.removeProperty(name))", 1)
+    html = html[:start] + part + html[end:]
+    return html.replace('</head>', '''<style id="photo-crew-stable-photo-size">
+.bc-photo-viewer.photo-crew-keyboard{overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+.bc-photo-viewer.photo-crew-keyboard .bc-expanded-card{height:var(--crew-stable-shell-height,100%);min-height:var(--crew-stable-shell-height,100%);grid-template-rows:var(--crew-stable-header-height,auto) var(--crew-stable-photo-height,44%) minmax(0,1fr);gap:var(--crew-stable-gap,10px);padding:var(--crew-stable-padding,13px)}
+.bc-photo-viewer.photo-crew-keyboard .bc-viewer-close{width:40px;height:40px;min-height:40px}
+
+</style></head>''', 1)
+
+
+INLINE_INDEX_HTML = _photo_crew_keep_photo_size_html(INLINE_INDEX_HTML)
