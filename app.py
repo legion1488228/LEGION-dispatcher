@@ -18640,3 +18640,30 @@ dialog.bc-photo-viewer.photo-crew-editing.photo-crew-keyboard .bc-expanded-card{
 dialog.bc-photo-viewer.photo-crew-keyboard .bc-viewer-photo{height:100%;max-height:160px;min-height:0}
 dialog.bc-photo-viewer.photo-crew-keyboard .bc-viewer-photo img{object-fit:contain}
 </style></body>''', 1)
+
+
+def _gbu_crew_confirm_under_search_html(html: str) -> str:
+    """Keep the existing submit action next to the search instead of below the list."""
+    start = html.index('async function openGbuOrderRoster(')
+    end = html.index('async function openGbuPayrollRoster(', start)
+    part = html[start:end]
+    anchor = "  const layoutCrewRows=()=>"
+    addition = """  const crewSearch=form.querySelector('[data-crew-search]'),crewFooter=form.querySelector('.gbu-crew-footer');
+  if(crewSearch&&crewFooter){
+   const toolbar=document.createElement('div');toolbar.className='gbu-crew-search-actions';
+   crewSearch.before(toolbar);toolbar.append(crewSearch,crewFooter);
+  }
+"""
+    if part.count(anchor) != 1:
+        raise RuntimeError('Crew confirmation placement anchor missing')
+    html = html[:start] + part.replace(anchor, addition + anchor, 1) + html[end:]
+    return html.replace('</body>', '''<style id="gbu-crew-confirm-under-search">
+.gbu-crew-search-actions{position:sticky;top:0;z-index:7;background:var(--panel,var(--card,#f7f5ef));padding-bottom:6px}
+.gbu-crew-search-actions [data-crew-search],.bc-photo-viewer .photo-crew-editor .gbu-crew-search-actions [data-crew-search]{position:static!important;margin-bottom:4px}
+.gbu-crew-search-actions .gbu-crew-footer,.bc-photo-viewer .photo-crew-editor .gbu-crew-search-actions .gbu-crew-footer{position:static!important;margin:0;padding:3px 0 4px!important}
+.gbu-crew-search-actions .gbu-crew-footer p{margin:2px 0 4px;font-size:12px}
+.gbu-crew-search-actions .gbu-crew-footer button{width:100%;min-height:40px}
+</style></body>''', 1)
+
+
+INLINE_INDEX_HTML = _gbu_crew_confirm_under_search_html(INLINE_INDEX_HTML)
