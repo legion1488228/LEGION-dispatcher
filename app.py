@@ -19180,10 +19180,10 @@ def build_gbu_cash_allocation(people, cashiers):
                 available, key=lambda p: (p['remaining'], -p['tg_id']))
             amount = min(person['remaining'], pool['remaining'])
             pool['payments'].append({'employee_id': person['id'], 'name': person['name'],
-                                     'phone': person.get('phone', ''), 'amount': amount})
+                                     'phone': person.get('phone', ''), 'telegram_url': person.get('telegram_url', ''), 'amount': amount})
             person['remaining'] -= amount
             pool['remaining'] -= amount
-    owner_payments = [{'employee_id': p['id'], 'name': p['name'], 'phone': p.get('phone', ''),
+    owner_payments = [{'employee_id': p['id'], 'name': p['name'], 'phone': p.get('phone', ''), 'telegram_url': p.get('telegram_url', ''),
                        'amount': p['remaining']} for p in sorted(due.values(), key=lambda p: (-p['remaining'], p['id']))
                       if p['remaining'] > 0]
     salary_total = sum(int(p['amount']) for p in people)
@@ -19216,7 +19216,8 @@ def gbu_allocation_source(db, user, month, half):
         name = ' '.join(str(x) for x in (str(profile.full_name or '').split()[0] if profile else person['name'],
                        profile.metro if profile else '', profile.height_cm if profile else '') if x)
         people.append({'id': person['id'], 'name': name, 'amount': amount,
-                       'phone': str(profile.phone or '') if profile else ''})
+                       'phone': brigadier_phone8(profile.phone) if profile else '',
+                       'telegram_url': gbu_allocation_telegram_url(profile)})
     report = json.loads(cash_reconciliation(periods['cash_month'], periods['cash_half'], db, user).body)
     # Match accounts by Telegram ID, never by similar names or metro.
     staff_by_tg = defaultdict(list)
@@ -19229,11 +19230,11 @@ def gbu_allocation_source(db, user, month, half):
         if len(own_ids) > 1:
             raise HTTPException(409, 'Несколько сотрудников привязаны к одному аккаунту. Исправьте профили перед распределением.')
         cashiers.append(dict(entry, employee_id=own_ids[0] if own_ids else None))
-    source = {'allocation_rule': 'smallest_first_v1', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
+    source = {'contact_format': 1, 'allocation_rule': 'smallest_first_v1', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
               'cashiers': sorted(cashiers, key=lambda p:p['tg_id']), 'missing': missing}
     digest = hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     plan = dict(build_gbu_cash_allocation(people, cashiers), **periods, snapshot=digest,
-                allocation_rule='smallest_first_v1',
+                allocation_rule='smallest_first_v1', contact_format=1,
                 missing_count=len(missing), unverified=[c['name'] for c in cashiers
                     if c['total'] and not c['received'] and not c['checked']])
     return plan
@@ -19245,6 +19246,18 @@ def gbu_allocation_view(db, row):
         GbuCashAllocationDelivery.plan_id == row.plan_id)))
     plan.update(plan_id=row.plan_id, locked=bool(row.locked),
         deliveries=[{'tg_id': d.tg_id, 'part': d.part, 'status': d.status} for d in deliveries])
+    confirmations = list(db.scalars(select(GbuCashAllocationPayout).where(
+        GbuCashAllocationPayout.plan_id == row.plan_id)))
+    plan['payout_confirmations'] = [{'tg_id': c.tg_id,
+        'confirmed_at': c.confirmed_at.isoformat()+'Z', 'confirmed_by': c.confirmed_by,
+        'source': c.source} for c in confirmations if c.confirmed_at]
+    gbu_allocation_owner_payment_view(db, row, plan)
+    paid = {c['tg_id'] for c in plan['payout_confirmations']}
+    plan['all_payouts_confirmed'] = all(int(c['tg_id']) in paid for c in plan['cashiers']) and (
+        not plan['owner_due'] or 0 in paid)
+    plan['confirmation_buttons_sent'] = all(any(d.tg_id == int(c['tg_id']) and
+        d.part == len(gbu_allocation_messages(plan, c))+1 and d.status == 'sent'
+        for d in deliveries) for c in plan['cashiers'])
     return plan
 
 
@@ -19300,6 +19313,8 @@ def gbu_allocation_messages(plan, cashier):
               f"Оставить себе в счёт зарплаты: <b>{money(cashier['own_salary'])}</b>\n\nКому выплатить:\n")
     lines = [f"{i}. {escape(p['name'])} — <b>{money(p['amount'])}</b>"+
              (f" · {escape(p['phone'])}" if p.get('phone') else '') for i,p in enumerate(cashier['payments'],1)]
+    if plan.get('contact_format') == 1:
+        lines = [gbu_allocation_recipient_line(i, p, money) for i, p in enumerate(cashier['payments'], 1)]
     if not lines:
         lines = ['Другим сотрудникам выплаты не назначены.']
     lines += [f"\nОстаток кассы к сдаче владельцу: <b>{money(cashier['remaining'])}</b>",
@@ -19323,6 +19338,8 @@ async def gbu_cash_allocation_send(plan_id: str, db: Session=Depends(get_db),
         raise HTTPException(404, 'План не найден')
     dispatch_day_lock(db, row.salary_start)
     db.refresh(row)
+    if row.plan_id != plan_id:
+        raise HTTPException(409, 'План изменился. Откройте распределение заново.')
     plan = json.loads(row.payload)
     if not row.locked:
         fresh = gbu_allocation_source(db, user, row.salary_start.strftime('%Y-%m'),
@@ -19347,7 +19364,14 @@ async def gbu_cash_allocation_send(plan_id: str, db: Session=Depends(get_db),
         uid = int(cashier['tg_id'])
         if uid in blocked or db.get(OwnerManagedBlock, uid) or uid not in routes:
             raise HTTPException(409, 'Нет доступной однозначной группы кассы: '+cashier['name'])
-        for part, message in enumerate(gbu_allocation_messages(plan, cashier), 1):
+        confirmation = db.get(GbuCashAllocationPayout, (plan_id, uid))
+        if confirmation is None:
+            confirmation = GbuCashAllocationPayout(plan_id=plan_id, tg_id=uid,
+                token=secrets.token_hex(16))
+            db.add(confirmation)
+        messages = gbu_allocation_messages(plan, cashier)
+        messages.append(gbu_allocation_confirmation_message(plan, cashier))
+        for part, message in enumerate(messages, 1):
             key = (plan_id, uid, part)
             delivery = db.get(GbuCashAllocationDelivery, key)
             if delivery and delivery.status != 'failed':
@@ -19355,15 +19379,19 @@ async def gbu_cash_allocation_send(plan_id: str, db: Session=Depends(get_db),
             if delivery is None:
                 delivery = GbuCashAllocationDelivery(plan_id=plan_id,tg_id=uid,part=part)
                 db.add(delivery)
+            # Once issued, the confirmation stays bound to its original group.
+            if part == len(messages):
+                confirmation.chat_id = routes[uid]
             delivery.chat_id = routes[uid]
             delivery.status = 'pending'
             delivery.updated_at = datetime.utcnow()
-            jobs.append((key, routes[uid], message))
+            markup = gbu_allocation_confirmation_markup(confirmation) if part == len(messages) else None
+            jobs.append((key, routes[uid], message, markup))
     # Freeze all instructions and claim each message before external delivery.
     row.locked = True
     db.commit()
-    for key, chat_id, message in jobs:
-        status = await gbu_allocation_deliver_message(chat_id, message)
+    for key, chat_id, message, markup in jobs:
+        status = await gbu_allocation_deliver_message(chat_id, message, markup)
         delivery = db.get(GbuCashAllocationDelivery, key)
         delivery.status = status
         delivery.updated_at = datetime.utcnow()
@@ -19419,23 +19447,62 @@ async function openGbuCashAllocation(month,period){
   <p class="allocation-info">Бригадир сначала оставляет себе зарплату, затем выплачивает другим от меньших сумм к большим. Крупные остатки остаются в твоём списке. Откаты включены. Сданная касса учтена у тебя. Сторонние сотрудники остаются в твоём списке.</p>
   ${plan.missing_count?`<p class="allocation-warn">Не заполнен состав: ${plan.missing_count}. Сначала завершите начисления.</p>`:''}
   ${plan.unverified?.length?`<p class="allocation-warn">Ещё не подтвердили сверку: ${esc(plan.unverified.join(', '))}. Проверь суммы перед отправкой.</p>`:''}
-  ${plan.locked?'<p class="allocation-info">План зафиксирован при отправке. Повторное открытие сохраняет назначения. Поручение не означает, что деньги уже выплачены.</p>':''}
-  ${plan.cashiers.map(c=>`<section><h4>${esc(c.name)}</h4>${line('Касса + откат',c.total)}${line('Оставить себе',c.own_salary)}${c.payments.map(p=>line(p.name,p.amount)).join('')||'<p class="allocation-info">Выплаты другим не назначены.</p>'}${line('Остаток к сдаче тебе',c.remaining)}<p class="allocation-info">${esc(gbuAllocationDeliveryLabel(plan,c.tg_id))}</p></section>`).join('')}
-  <section><h4>Мой список выплат · ${gbuAllocationMoney(plan.owner_due)}</h4>${plan.owner_payments.map(p=>line(p.name,p.amount)).join('')||'<p>Доплат сотрудникам нет.</p>'}<button type="button" class="secondary" data-allocation-copy>Скопировать мой список</button></section>
+  ${plan.locked?'<p class="allocation-info">План зафиксирован. Повторное открытие сохраняет назначения. Поручение не означает, что деньги уже выплачены.</p>':''}
+  ${plan.cashiers.map(c=>`<section><h4>${esc(c.name)}</h4>${line('Касса + откат',c.total)}${line('Оставить себе',c.own_salary)}${c.payments.map(p=>gbuAllocationRecipientHtml(p)).join('')||'<p class="allocation-info">Выплаты другим не назначены.</p>'}${line('Остаток к сдаче тебе',c.remaining)}<p class="allocation-info">${esc(gbuAllocationDeliveryLabel(plan,c.tg_id))}</p>${gbuAllocationPayoutStatus(plan,c.tg_id)}</section>`).join('')}
+  <section><h4>Мой список выплат · ${gbuAllocationMoney(plan.owner_due)}</h4>${gbuAllocationOwnerProgressHtml(plan)}${plan.owner_payments.map(p=>gbuAllocationOwnerRecipientHtml(p)).join('')||'<p>Доплат сотрудникам нет.</p>'}<button type="button" class="secondary" data-allocation-copy>Скопировать мой список</button>${plan.owner_due?gbuAllocationPayoutStatus(plan,0):''}</section>
   ${plan.unspent_cash?`<p class="allocation-info">Не распределено у бригадиров: ${gbuAllocationMoney(plan.unspent_cash)}. Эти деньги нужно передать тебе.</p>`:''}
   ${plan.owner_surplus?`<p class="allocation-info">Останется после зарплаты: ${gbuAllocationMoney(plan.owner_surplus)}.</p>`:''}
-  <p data-allocation-status role="status" aria-live="polite"></p><button type="button" class="primary" data-allocation-send>${plan.locked?'Отправить неотправленные поручения':'Подтвердить план и отправить бригадирам'}</button>`;
+  <p class="allocation-payout-total ${plan.all_payouts_confirmed?'paid':'unpaid'}" role="status">${plan.locked?(plan.all_payouts_confirmed?'Все выплаты подтверждены':'Есть неподтверждённые выплаты'):'План ещё не подтверждён'}</p><p data-allocation-status role="status" aria-live="polite"></p><button type="button" class="primary" data-allocation-send>${plan.locked?'Отправить неотправленные поручения':'Подтвердить план и отправить бригадирам'}</button>`;
   qs('[data-allocation-back]',root).onclick=()=>openGbuPayroll(month,period);
   qs('[data-allocation-copy]',root).onclick=async()=>{
-   const text='Зарплата '+gbuAllocationPeriod(plan.salary_start,plan.salary_end)+'\nМой список выплат:\n'+plan.owner_payments.map(p=>p.name+' — '+cabinetMoney(p.amount)+' ₽').join('\n')+'\nИтого: '+cabinetMoney(plan.owner_due)+' ₽\nКасса у меня: '+cabinetMoney(plan.owner_cash)+' ₽\nДобавить своих: '+cabinetMoney(plan.owner_topup)+' ₽';
+   const text='Зарплата '+gbuAllocationPeriod(plan.salary_start,plan.salary_end)+'\nМой список выплат:\n'+plan.owner_payments.map(p=>(p.paid?'✅ ':'☐ ')+p.name+' — '+cabinetMoney(p.amount)+' ₽'+(p.telegram_url?' · '+p.telegram_url:'')+' · Телефон: '+(p.phone||'не указан')).join('\n')+'\nИтого: '+cabinetMoney(plan.owner_due)+' ₽\nКасса у меня: '+cabinetMoney(plan.owner_cash)+' ₽\nДобавить своих: '+cabinetMoney(plan.owner_topup)+' ₽';
    try{await navigator.clipboard.writeText(text);toast('Список скопирован')}catch(e){qs('[data-allocation-status]',root).textContent=text}
   };
   const button=qs('[data-allocation-send]',root),deliveries=plan.deliveries||[];
-  const allSent=plan.locked&&deliveries.length>0&&deliveries.every(d=>d.status==='sent');
+  const allSent=plan.locked&&plan.confirmation_buttons_sent&&deliveries.length>0&&deliveries.every(d=>d.status==='sent');
   button.disabled=busy||!!plan.missing_count||!plan.salary_total||!plan.cashiers.length||allSent;
   if(allSent)button.textContent='Все поручения отправлены';
   if(plan.locked&&deliveries.some(d=>['pending','unknown'].includes(d.status))&&!deliveries.some(d=>d.status==='failed')){button.disabled=true;button.textContent='Проверьте отправку в группах кассы'}
   button.onclick=send;
+  root.querySelectorAll('[data-payout-confirm]').forEach(b=>{b.disabled=busy||(Number(b.dataset.payoutConfirm)===0&&!plan.owner_payments.every(p=>p.paid===true));b.onclick=()=>confirmPayout(Number(b.dataset.payoutConfirm))});
+  root.querySelectorAll('[data-owner-payment]').forEach(input=>{input.disabled=busy;input.onchange=()=>markOwnerPayment(Number(input.dataset.ownerPayment),input.checked,Number(input.dataset.version))});
+ }
+ async function markOwnerPayment(employeeId,paid,version){
+  if(busy||!active()){if(active())redraw();return}busy=true;
+  root.querySelectorAll('button,input').forEach(e=>e.disabled=true);
+  qs('[data-allocation-status]',root).textContent='Сохраняем отметку выплаты…';
+  try{
+   if(!plan.plan_id){plan=await api('/api/gbu-cash-allocation',{method:'POST',body:JSON.stringify({month,half,snapshot:plan.snapshot})});if(!active())return}
+   plan=await api('/api/gbu-cash-allocation/'+encodeURIComponent(plan.plan_id)+'/owner-payment',{method:'POST',body:JSON.stringify({employee_id:employeeId,paid,expected_version:version})});
+   if(active()){busy=false;redraw()}
+  }catch(e){
+   if(!active())return;const message=e.message;
+   try{const latest=await api('/api/gbu-cash-allocation?month='+encodeURIComponent(month)+'&half='+half,{cache:'no-store'});if(active())plan=latest}catch(ignore){}
+   if(active()){busy=false;redraw();qs('[data-allocation-status]',root).textContent=message}
+  }
+ }
+ async function confirmPayout(uid){
+  if(busy||!active())return;busy=true;
+  root.querySelectorAll('button').forEach(b=>b.disabled=true);
+  qs('[data-allocation-status]',root).textContent='Сохраняем подтверждение выплат…';
+  try{
+   if(!plan.plan_id){plan=await api('/api/gbu-cash-allocation',{method:'POST',body:JSON.stringify({month,half,snapshot:plan.snapshot})});if(!active())return}
+   plan=await api('/api/gbu-cash-allocation/'+encodeURIComponent(plan.plan_id)+'/confirm-payouts',{method:'POST',body:JSON.stringify({tg_id:uid})});
+   if(active()){busy=false;redraw();toast('Выплаты подтверждены')}
+  }catch(e){if(active()){busy=false;redraw();qs('[data-allocation-status]',root).textContent=e.message}}
+ }
+ function redraw(){
+  const positions=[];for(let e=root.parentElement;e;e=e.parentElement)positions.push([e,e.scrollTop]);
+  draw();positions.forEach(([e,y])=>e.scrollTop=y);
+ }
+ async function poll(){
+  if(!active())return;
+  if(!busy&&plan?.locked){
+   try{const current=plan;const latest=await api('/api/gbu-cash-allocation?month='+encodeURIComponent(month)+'&half='+half,{cache:'no-store'});
+    if(active()&&!busy&&plan===current&&latest.plan_id===plan.plan_id&&JSON.stringify(latest)!==JSON.stringify(plan)){plan=latest;redraw()}
+   }catch(e){/* Keep the last confirmed view until the connection returns. */}
+  }
+  if(active())setTimeout(poll,7000);
  }
  async function send(){
   if(busy||!active())return;busy=true;qs('[data-allocation-send]',root).disabled=true;
@@ -19447,7 +19514,7 @@ async function openGbuCashAllocation(month,period){
    const rows=plan.deliveries||[];qs('[data-allocation-status]',root).textContent='Сообщений отправлено: '+rows.filter(d=>d.status==='sent').length+'. Не отправлено: '+rows.filter(d=>d.status==='failed').length+'. Требуют проверки: '+rows.filter(d=>['pending','unknown'].includes(d.status)).length+'.';
   }catch(e){if(active()){busy=false;qs('[data-allocation-status]',root).textContent=e.message+' Закройте и снова откройте распределение для проверки результата.';qs('[data-allocation-send]',root).disabled=true}}
  }
- try{plan=await api('/api/gbu-cash-allocation?month='+encodeURIComponent(month)+'&half='+half,{cache:'no-store'});if(active())draw()}
+ try{plan=await api('/api/gbu-cash-allocation?month='+encodeURIComponent(month)+'&half='+half,{cache:'no-store'});if(active()){draw();setTimeout(poll,7000)}}
  catch(e){if(active()){root.textContent=e.message;const back=document.createElement('button');back.textContent='← К зарплате';back.onclick=()=>openGbuPayroll(month,period);root.append(back)}}
 }
 </script></body>''',1)
@@ -19456,15 +19523,17 @@ async function openGbuCashAllocation(month,period){
 INLINE_INDEX_HTML = _gbu_cash_allocation_html(INLINE_INDEX_HTML)
 
 
-async def gbu_allocation_deliver_message(chat_id, message):
+async def gbu_allocation_deliver_message(chat_id, message, reply_markup=None):
     # A lost response can follow a successful send. Only Telegram's explicit
     # rejection is retryable; network/JSON failures remain uncertain.
     import httpx
     try:
         token = os.getenv('BOT_TOKEN', '').strip()
+        request = {'chat_id': chat_id, 'text': message, 'parse_mode': 'HTML'}
+        if reply_markup is not None:
+            request['reply_markup'] = reply_markup
         async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(f'https://api.telegram.org/bot{token}/sendMessage',
-                json={'chat_id': chat_id, 'text': message, 'parse_mode': 'HTML'})
+            response = await client.post(f'https://api.telegram.org/bot{token}/sendMessage', json=request)
         data = response.json()
         if isinstance(data, dict) and data.get('ok') is False:
             return 'failed'
@@ -19473,3 +19542,309 @@ async def gbu_allocation_deliver_message(chat_id, message):
     except Exception:
         pass
     return 'unknown'
+
+
+# Two demand metrics and three readiness metrics get equal shares of the row.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>',r'''<style id="readiness-five-equal-metrics">
+body.dashboard-compact #employeeReadiness #readinessOverview{grid-template-columns:minmax(0,2fr) minmax(0,3fr)!important;gap:8px!important}
+body.dashboard-compact #employeeReadiness #readinessOverview #readinessNextDemand .metric,
+body.dashboard-compact #employeeReadiness #readinessOverview #readinessSummary .metric{display:grid!important;grid-template-rows:28px minmax(24px,auto);align-content:center;justify-items:center;align-items:center;min-width:0;min-height:66px!important;padding:7px 2px!important;text-align:center!important;box-sizing:border-box}
+body.dashboard-compact #employeeReadiness #readinessOverview #readinessNextDemand .metric b,
+body.dashboard-compact #employeeReadiness #readinessOverview #readinessSummary .metric b{font-size:clamp(15px,4.1vw,21px)!important;line-height:1.1;white-space:nowrap;letter-spacing:-.035em}
+body.dashboard-compact #employeeReadiness #readinessOverview #readinessNextDemand .metric span,
+body.dashboard-compact #employeeReadiness #readinessOverview #readinessSummary .metric span{font-size:9px!important;line-height:1.15;margin:0!important;white-space:normal;overflow-wrap:normal;text-align:center}
+</style></body>''',1)
+
+
+def _readiness_free_before_no_response_html(html):
+    start=html.index('async function loadReadiness(){')
+    end=html.index('\nfunction employeeListName(',start)
+    part=html[start:end]
+    no_response=re.search(r'<button id="noResponseCount".*?</button>',part,re.S)
+    free=re.search(r'<div id="readinessFreeCount".*?</div>',part,re.S)
+    if no_response is None or free is None or no_response.end()>free.start():
+        raise RuntimeError('Readiness metric order anchor missing')
+    part=part[:no_response.start()]+free.group(0)+part[no_response.end():free.start()]+no_response.group(0)+part[free.end():]
+    return html[:start]+part+html[end:]
+
+
+INLINE_INDEX_HTML = _readiness_free_before_no_response_html(INLINE_INDEX_HTML)
+
+
+
+def gbu_allocation_telegram_url(profile):
+    if profile is None:
+        return ''
+    username = str(getattr(profile, 'telegram_username', '') or '').strip().lstrip('@')
+    if re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{3,31}', username):
+        return 'https://t.me/' + username
+    uid = getattr(profile, 'tg_id', None)
+    if isinstance(uid, int) and uid > 0:
+        return f'tg://user?id={uid}'
+    return ''
+
+
+def gbu_allocation_recipient_line(index, person, money):
+    url = str(person.get('telegram_url') or '')
+    valid = re.fullmatch(r'https://t\.me/[A-Za-z][A-Za-z0-9_]{3,31}|tg://user\?id=[1-9]\d*', url)
+    telegram = f'<a href="{escape(url, quote=True)}">Личные сообщения</a>' if valid else 'Telegram не указан'
+    phone = str(person.get('phone') or '').strip()
+    return (f"{index}. {escape(person['name'])} — <b>{money(person['amount'])}</b>\n"
+            f"{telegram} · Телефон: {escape(phone) if phone else 'не указан'}")
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>',r'''<style>
+#gbuAllocation .allocation-recipient{margin:8px 0}
+#gbuAllocation .allocation-recipient .allocation-line{margin-bottom:2px}
+#gbuAllocation .allocation-recipient small{display:block;font-size:12px;overflow-wrap:anywhere;line-height:1.5}
+#gbuAllocation .allocation-recipient a{color:var(--gold);text-decoration:underline}
+</style><script>
+function gbuAllocationRecipientHtml(person){
+ const url=String(person.telegram_url||'');
+ const valid=/^(?:https:\/\/t\.me\/[A-Za-z][A-Za-z0-9_]{3,31}|tg:\/\/user\?id=[1-9]\d*)$/.test(url);
+ const telegram=valid?`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">Личные сообщения</a>`:'Telegram не указан';
+ return `<div class="allocation-recipient"><div class="allocation-line"><span>${esc(person.name)}</span><b>${gbuAllocationMoney(person.amount)}</b></div><small>${telegram} · Телефон: ${esc(person.phone||'не указан')}</small></div>`;
+}
+</script></body>''',1)
+
+
+class GbuCashAllocationPayout(Base):
+    __tablename__ = 'gbu_cash_allocation_payouts'
+    plan_id = Column(String(64), primary_key=True)
+    tg_id = Column(BigInteger, primary_key=True)  # 0: owner's remaining payouts
+    token = Column(String(32), nullable=False, unique=True)
+    chat_id = Column(BigInteger, nullable=True)
+    confirmed_at = Column(DateTime, nullable=True)
+    confirmed_by = Column(BigInteger, nullable=True)
+    source = Column(String(20), nullable=True)
+
+
+class GbuCashAllocationConfirmInput(BaseModel):
+    tg_id: StrictInt = Field(ge=0)
+
+
+class GbuCashAllocationBotConfirmInput(BaseModel):
+    token: str = Field(pattern=r'^[0-9a-f]{32}$')
+    actor_id: StrictInt = Field(gt=0)
+    chat_id: StrictInt = Field(lt=0)
+
+
+def gbu_allocation_confirmation_message(plan, cashier):
+    amount = sum(int(p['amount']) for p in cashier['payments'])
+    money = f'{amount:,}'.replace(',', ' ')
+    return (f"✅ <b>Подтверждение выплат · ЛЕГИОН</b>\n"
+            f"{escape(cashier['name'])}\n"
+            f"Зарплата: {date.fromisoformat(plan['salary_start']):%d.%m.%Y}–"
+            f"{date.fromisoformat(plan['salary_end']):%d.%m.%Y}\n"
+            f"Выплатить другим сотрудникам: <b>{money} ₽</b>\n\n"
+            'Нажмите кнопку только после выполнения всех выплат по поручению, '
+            'включая сумму, которую оставляете себе. Подтверждение появится у руководителя в приложении.')
+
+
+def gbu_allocation_confirmation_markup(confirmation):
+    return {'inline_keyboard': [[{'text': '✅ Выплаты подтверждены' if confirmation.confirmed_at
+        else 'Подтвердить выплаты сотрудникам', 'callback_data': 'gbupay:'+confirmation.token}]]}
+
+
+def gbu_allocation_record_payout(db, row, tg_id, actor_id, source):
+    confirmation = db.get(GbuCashAllocationPayout, (row.plan_id, tg_id))
+    if confirmation is None:
+        confirmation = GbuCashAllocationPayout(plan_id=row.plan_id, tg_id=tg_id,
+            token=secrets.token_hex(16))
+        db.add(confirmation)
+    already = confirmation.confirmed_at is not None
+    if not already:
+        confirmation.confirmed_at = datetime.utcnow()
+        confirmation.confirmed_by = actor_id
+        confirmation.source = source
+        db.commit()
+    return confirmation, already
+
+
+@app.post('/api/gbu-cash-allocation/{plan_id}/confirm-payouts')
+def gbu_cash_allocation_confirm_payouts(plan_id: str, data: GbuCashAllocationConfirmInput,
+        db: Session=Depends(get_db), user: TelegramUser=Depends(require_app_user)):
+    _require_gbu_payroll_owner(db, user)
+    row = db.scalar(select(GbuCashAllocation).where(GbuCashAllocation.plan_id==plan_id))
+    if row is None:
+        raise HTTPException(404, 'План не найден')
+    dispatch_day_lock(db, row.salary_start)
+    db.refresh(row)
+    if row.plan_id != plan_id:
+        raise HTTPException(409, 'План изменился. Откройте распределение заново.')
+    plan = json.loads(row.payload)
+    if data.tg_id == 0:
+        if not plan['owner_due']:
+            raise HTTPException(409, 'В вашем списке нет выплат')
+        gbu_allocation_owner_payment_view(db, row, plan)
+        if not all(p['paid'] for p in plan['owner_payments']):
+            raise HTTPException(409, 'Сначала отметьте галочками выплаты каждому сотруднику в вашем списке')
+    elif not any(int(c['tg_id']) == data.tg_id for c in plan['cashiers']):
+        raise HTTPException(404, 'Бригадир отсутствует в этом распределении')
+    if not row.locked:
+        fresh = gbu_allocation_source(db, user, row.salary_start.strftime('%Y-%m'),
+                                      1 if row.salary_start.day==1 else 2)
+        if fresh['snapshot'] != row.source_hash:
+            raise HTTPException(409, 'План изменился. Откройте распределение заново.')
+        row.locked = True
+    gbu_allocation_record_payout(db, row, data.tg_id, user.id, 'owner')
+    return gbu_allocation_view(db, row)
+
+
+@app.post('/api/bot/gbu-cash-allocation/confirm', dependencies=[Depends(_bot_key)])
+def gbu_cash_allocation_bot_confirm(data: GbuCashAllocationBotConfirmInput,
+        db: Session=Depends(get_db)):
+    confirmation = db.scalar(select(GbuCashAllocationPayout).where(
+        GbuCashAllocationPayout.token == data.token))
+    if confirmation is None or confirmation.tg_id != data.actor_id or confirmation.chat_id != data.chat_id:
+        raise HTTPException(403, 'Подтвердить может только назначенный бригадир в своей группе кассы')
+    if db.get(OwnerManagedBlock, data.actor_id):
+        raise HTTPException(403, 'Доступ закрыт')
+    row = db.scalar(select(GbuCashAllocation).where(GbuCashAllocation.plan_id==confirmation.plan_id))
+    if row is None:
+        raise HTTPException(404, 'План не найден')
+    dispatch_day_lock(db, row.salary_start)
+    db.refresh(row)
+    db.refresh(confirmation)
+    if row.plan_id != confirmation.plan_id or not row.locked:
+        raise HTTPException(409, 'Это распределение больше не действует')
+    plan = json.loads(row.payload)
+    cashier = next((c for c in plan['cashiers'] if int(c['tg_id']) == data.actor_id), None)
+    if cashier is None:
+        raise HTTPException(403, 'Бригадир не назначен')
+    deliveries = {d.part: d for d in db.scalars(select(GbuCashAllocationDelivery).where(
+        GbuCashAllocationDelivery.plan_id == row.plan_id,
+        GbuCashAllocationDelivery.tg_id == data.actor_id))}
+    # A button is not proof that all earlier parts of a long instruction arrived.
+    expected = len(gbu_allocation_messages(plan, cashier))+1
+    if not all(i in deliveries and deliveries[i].status == 'sent' and
+               deliveries[i].chat_id == data.chat_id for i in range(1, expected+1)):
+        raise HTTPException(409, 'Не все части поручения доставлены. Обратитесь к руководителю')
+    confirmation, already = gbu_allocation_record_payout(db, row, data.actor_id, data.actor_id, 'brigadier')
+    return {'ok': True, 'already_confirmed': already,
+            'confirmed_at': confirmation.confirmed_at.isoformat()+'Z'}
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>',r'''<style>
+#gbuAllocation .allocation-payout-state,#gbuAllocation .allocation-payout-total{font-weight:800;font-size:14px;padding:8px 10px;border-radius:8px}
+#gbuAllocation .paid{color:#237453;background:#e0f1e7}
+#gbuAllocation .unpaid{color:#b23832;background:#f9e6e3}
+#gbuAllocation [data-payout-confirm]{width:100%;min-height:42px;margin-top:5px}
+</style><script>
+function gbuAllocationPayoutStatus(plan,uid){
+ const ack=(plan.payout_confirmations||[]).find(c=>Number(c.tg_id)===Number(uid));
+ return `<p class="allocation-payout-state ${ack?'paid':'unpaid'}">${ack?'Рассчитаны':'Не рассчитаны'}</p>`+
+ (ack?'<small class="allocation-info">'+(ack.source==='brigadier'?'Подтверждено бригадиром':'Подтверждено вами')+' · '+esc(new Date(ack.confirmed_at).toLocaleString('ru-RU'))+'</small>':`<button type="button" class="secondary" data-payout-confirm="${uid}">${uid===0?'Подтвердить мои выплаты':'Подтвердить выплаты'}</button>`);
+}
+</script></body>''',1)
+
+
+class GbuCashAllocationOwnerPayment(Base):
+    __tablename__ = 'gbu_cash_allocation_owner_payments'
+    plan_id = Column(String(64), primary_key=True)
+    employee_id = Column(Integer, primary_key=True)
+    paid = Column(Boolean, nullable=False, default=False)
+    paid_at = Column(DateTime, nullable=True)
+    updated_by = Column(BigInteger, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    version = Column(Integer, nullable=False, default=1)
+
+
+class GbuCashAllocationOwnerPaymentInput(BaseModel):
+    employee_id: StrictInt
+    paid: StrictBool
+    expected_version: StrictInt = Field(ge=0)
+
+
+def gbu_allocation_owner_payment_view(db, row, plan):
+    marks = {m.employee_id: m for m in db.scalars(select(GbuCashAllocationOwnerPayment).where(
+        GbuCashAllocationOwnerPayment.plan_id == row.plan_id))}
+    owner_ack = db.get(GbuCashAllocationPayout, (row.plan_id, 0))
+    # Earlier versions let the owner confirm the complete list in one action.
+    # Preserve that declaration when individual checkboxes are first introduced.
+    legacy_paid = bool(owner_ack and owner_ack.confirmed_at and not marks)
+    for person in plan['owner_payments']:
+        mark = marks.get(int(person['employee_id']))
+        person['paid'] = bool(mark.paid) if mark else legacy_paid
+        person['payment_version'] = mark.version if mark else 0
+        when = mark.paid_at if mark else owner_ack.confirmed_at if legacy_paid else None
+        person['paid_at'] = when.isoformat()+'Z' if when else None
+    plan['owner_paid_total'] = sum(int(p['amount']) for p in plan['owner_payments'] if p['paid'])
+    plan['owner_remaining_total'] = int(plan['owner_due'])-plan['owner_paid_total']
+    plan['owner_paid_count'] = sum(1 for p in plan['owner_payments'] if p['paid'])
+
+
+@app.post('/api/gbu-cash-allocation/{plan_id}/owner-payment')
+def gbu_cash_allocation_owner_payment(plan_id: str, data: GbuCashAllocationOwnerPaymentInput,
+        db: Session=Depends(get_db), user: TelegramUser=Depends(require_app_user)):
+    _require_gbu_payroll_owner(db, user)
+    row = db.scalar(select(GbuCashAllocation).where(GbuCashAllocation.plan_id==plan_id))
+    if row is None:
+        raise HTTPException(404, 'План не найден')
+    dispatch_day_lock(db, row.salary_start)
+    db.refresh(row)
+    if row.plan_id != plan_id:
+        raise HTTPException(409, 'План изменился. Откройте распределение заново.')
+    plan = json.loads(row.payload)
+    gbu_allocation_owner_payment_view(db, row, plan)
+    person = next((p for p in plan['owner_payments'] if int(p['employee_id'])==data.employee_id), None)
+    if person is None:
+        raise HTTPException(404, 'Сотрудник отсутствует в вашем списке выплат')
+    if person['payment_version'] != data.expected_version:
+        raise HTTPException(409, 'Отметка уже изменилась. Список обновлён, проверьте выплату.')
+    if not row.locked:
+        fresh = gbu_allocation_source(db, user, row.salary_start.strftime('%Y-%m'),
+                                      1 if row.salary_start.day==1 else 2)
+        if fresh['snapshot'] != row.source_hash:
+            raise HTTPException(409, 'План изменился. Откройте распределение заново.')
+        row.locked = True
+    marks = {m.employee_id: m for m in db.scalars(select(GbuCashAllocationOwnerPayment).where(
+        GbuCashAllocationOwnerPayment.plan_id == plan_id))}
+    now = datetime.utcnow()
+    # Materialize the previous whole-list declaration before allowing an undo.
+    for entry in plan['owner_payments']:
+        if entry['paid'] and entry['employee_id'] not in marks:
+            mark = GbuCashAllocationOwnerPayment(plan_id=plan_id, employee_id=entry['employee_id'],
+                paid=True, paid_at=datetime.fromisoformat(entry['paid_at'].rstrip('Z')) if entry['paid_at'] else now,
+                updated_by=user.id, updated_at=now, version=1)
+            db.add(mark)
+            marks[entry['employee_id']] = mark
+    mark = marks.get(data.employee_id)
+    if mark is None:
+        mark = GbuCashAllocationOwnerPayment(plan_id=plan_id, employee_id=data.employee_id,
+            paid=data.paid, paid_at=now if data.paid else None,
+            updated_by=user.id, updated_at=now, version=1)
+        db.add(mark)
+    elif bool(mark.paid) != data.paid:
+        mark.paid = data.paid
+        mark.paid_at = now if data.paid else None
+        mark.updated_by = user.id
+        mark.updated_at = now
+        mark.version += 1
+    if not data.paid:
+        owner_ack = db.get(GbuCashAllocationPayout, (plan_id, 0))
+        if owner_ack and owner_ack.confirmed_at:
+            owner_ack.confirmed_at = None
+            owner_ack.confirmed_by = None
+            owner_ack.source = None
+    db.commit()
+    return gbu_allocation_view(db, row)
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>',r'''<style>
+#gbuAllocation .allocation-owner-payment{display:grid;grid-template-columns:minmax(0,1fr) 44px;align-items:center;gap:6px;padding:5px 6px;border-radius:8px;margin:4px 0}
+#gbuAllocation .allocation-owner-payment.is-paid{background:#e0f1e7}
+#gbuAllocation .allocation-owner-payment>.allocation-recipient{min-width:0;margin:0}
+#gbuAllocation .allocation-owner-check{display:flex;align-items:center;justify-content:center;min-width:44px;min-height:44px;cursor:pointer}
+#gbuAllocation input[data-owner-payment]{width:24px;height:24px;min-width:24px;margin:0;padding:0;accent-color:#237453;cursor:pointer}
+#gbuAllocation .allocation-owner-progress{display:flex;flex-wrap:wrap;gap:6px 16px;margin:8px 0;font-size:13px}
+</style><script>
+function gbuAllocationOwnerProgressHtml(plan){
+ if(!plan.owner_payments.length)return '';
+ const paid=plan.owner_payments.filter(p=>p.paid===true),sum=paid.reduce((s,p)=>s+Number(p.amount),0);
+ return `<div class="allocation-owner-progress" role="status"><b>Выплачено: ${gbuAllocationMoney(sum)} · ${paid.length} из ${plan.owner_payments.length}</b><b>Осталось: ${gbuAllocationMoney(Number(plan.owner_due)-sum)}</b></div>`;
+}
+function gbuAllocationOwnerRecipientHtml(person){
+ return `<div class="allocation-owner-payment ${person.paid?'is-paid':''}">${gbuAllocationRecipientHtml(person)}<label class="allocation-owner-check"><input type="checkbox" data-owner-payment="${Number(person.employee_id)}" data-version="${Number(person.payment_version||0)}" ${person.paid?'checked':''} aria-label="Выплачено: ${esc(person.name)}" title="Выплачено"></label></div>`;
+}
+</script></body>''',1)
