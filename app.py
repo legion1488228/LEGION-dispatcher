@@ -19142,11 +19142,14 @@ def gbu_allocation_periods(month, half):
 
 
 def build_gbu_cash_allocation(people, cashiers):
-    """Integer RUB only; reserve own salary, prefer whole payouts, then split.
+    """Reserve own salary, then small payouts; prefer heights within 3 cm.
 
     Submitted cash stays with the owner. Outside-worker earnings also stay in
     the owner's list. This produces instructions, never payment receipts.
     """
+    def height_cm(value):
+        return value if isinstance(value, int) and not isinstance(value, bool) and 100 <= value <= 250 else None
+
     due = {int(p['id']): dict(p, remaining=int(p['amount'])) for p in people if p['amount'] > 0}
     pools, owner_cash = [], 0
     for cashier in sorted(cashiers, key=lambda c: int(c['tg_id'])):
@@ -19166,18 +19169,27 @@ def build_gbu_cash_allocation(people, cashiers):
             pool['remaining'] -= keep
             own['remaining'] -= keep
         pools.append(pool)
-    # Smallest outstanding salaries first; the owner covers larger balances.
-    # Own salary was reserved above for every cashier before paying others.
+    # Amount is the primary ordering: small salaries are assigned before large
+    # ones, across all height groups. Own salary was reserved for every cashier.
+    # Height is a preference, never a reason to leave a cashier's money idle.
+    # For each small salary, use matching pools first, then any remaining pool.
     for person in sorted(due.values(), key=lambda p: (p['remaining'], p['id'])):
         if person['id'] <= 0:  # external workers are collected by the owner
             continue
         while person['remaining']:
+            person_height = height_cm(person.get('height_cm'))
             available = [pool for pool in pools if pool['remaining'] > 0]
             if not available:
                 break
-            fitting = [pool for pool in available if pool['remaining'] >= person['remaining']]
-            pool = min(fitting, key=lambda p: (p['remaining'], p['tg_id'])) if fitting else max(
-                available, key=lambda p: (p['remaining'], -p['tg_id']))
+            matching = [pool for pool in available if person_height is not None and
+                height_cm(pool.get('height_cm')) is not None and abs(pool['height_cm']-person_height) <= 3]
+            candidates = matching or available
+            def height_gap(pool):
+                pool_height = height_cm(pool.get('height_cm'))
+                return abs(pool_height-person_height) if pool_height is not None and person_height is not None else 1000
+            fitting = [pool for pool in candidates if pool['remaining'] >= person['remaining']]
+            pool = min(fitting, key=lambda p: (height_gap(p), p['remaining'], p['tg_id'])) if fitting else min(
+                candidates, key=lambda p: (-p['remaining'], height_gap(p), p['tg_id']))
             amount = min(person['remaining'], pool['remaining'])
             pool['payments'].append({'employee_id': person['id'], 'name': person['name'],
                                      'phone': person.get('phone', ''), 'telegram_url': person.get('telegram_url', ''), 'amount': amount})
@@ -19216,25 +19228,31 @@ def gbu_allocation_source(db, user, month, half):
         name = ' '.join(str(x) for x in (str(profile.full_name or '').split()[0] if profile else person['name'],
                        profile.metro if profile else '', profile.height_cm if profile else '') if x)
         people.append({'id': person['id'], 'name': name, 'amount': amount,
+                       'height_cm': profile.height_cm if profile else None,
                        'phone': brigadier_phone8(profile.phone) if profile else '',
                        'telegram_url': gbu_allocation_telegram_url(profile)})
     report = json.loads(cash_reconciliation(periods['cash_month'], periods['cash_half'], db, user).body)
     # Match accounts by Telegram ID, never by similar names or metro.
     staff_by_tg = defaultdict(list)
-    for profile in profiles.values():
+    # Cashiers without salary in this period still need their profile height.
+    cashier_ids = [int(c['tg_id']) for c in report['items']]
+    cashier_profiles = db.scalars(select(Employee).where(Employee.tg_id.in_(cashier_ids))) if cashier_ids else []
+    for profile in cashier_profiles:
         if profile.tg_id:
-            staff_by_tg[int(profile.tg_id)].append(profile.id)
+            staff_by_tg[int(profile.tg_id)].append(profile)
     cashiers = []
     for entry in report['items']:
         own_ids = staff_by_tg.get(int(entry['tg_id']), [])
         if len(own_ids) > 1:
             raise HTTPException(409, 'Несколько сотрудников привязаны к одному аккаунту. Исправьте профили перед распределением.')
-        cashiers.append(dict(entry, employee_id=own_ids[0] if own_ids else None))
-    source = {'contact_format': 1, 'allocation_rule': 'smallest_first_v1', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
+        profile = own_ids[0] if own_ids else None
+        cashiers.append(dict(entry, employee_id=profile.id if profile else None,
+                             height_cm=profile.height_cm if profile else None))
+    source = {'contact_format': 1, 'allocation_rule': 'smallest_first_height3_fallback_v3', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
               'cashiers': sorted(cashiers, key=lambda p:p['tg_id']), 'missing': missing}
     digest = hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     plan = dict(build_gbu_cash_allocation(people, cashiers), **periods, snapshot=digest,
-                allocation_rule='smallest_first_v1', contact_format=1,
+                allocation_rule='smallest_first_height3_fallback_v3', height_tolerance_cm=3, contact_format=1,
                 missing_count=len(missing), unverified=[c['name'] for c in cashiers
                     if c['total'] and not c['received'] and not c['checked']])
     return plan
@@ -19444,11 +19462,11 @@ async function openGbuCashAllocation(month,period){
  function draw(){
   root.innerHTML=`<button type="button" class="secondary" data-allocation-back>← К зарплате</button><p class="allocation-info">Зарплата: ${esc(gbuAllocationPeriod(plan.salary_start,plan.salary_end))}\nКасса: ${esc(gbuAllocationPeriod(plan.cash_start,plan.cash_end))}</p>
   <div class="allocation-summary">${summary('Начислено',plan.salary_total)}${summary('Касса с откатами',plan.cash_total)}${summary('Из кассы уже у тебя',plan.owner_cash)}${summary('Бригадиры выплатят, включая себе',plan.cashier_payouts)}${summary('Выплатить через тебя',plan.owner_due)}${summary('Добавить своих денег',plan.owner_topup)}</div>
-  <p class="allocation-info">Бригадир сначала оставляет себе зарплату, затем выплачивает другим от меньших сумм к большим. Крупные остатки остаются в твоём списке. Откаты включены. Сданная касса учтена у тебя. Сторонние сотрудники остаются в твоём списке.</p>
+  <p class="allocation-info">Бригадир сначала оставляет себе зарплату, затем выплачивает другим от меньших сумм к большим. ${plan.allocation_rule==='smallest_first_height3_fallback_v3'?'В первую очередь подбирается бригадир с разницей в росте до 3 см. Если у подходящих бригадиров денег не хватает, выплата распределяется из оставшейся кассы других бригадиров. Рост не ограничивает использование кассы. ':''}Крупные остатки остаются в твоём списке. Откаты включены. Сданная касса учтена у тебя. Сторонние сотрудники остаются в твоём списке.</p>
   ${plan.missing_count?`<p class="allocation-warn">Не заполнен состав: ${plan.missing_count}. Сначала завершите начисления.</p>`:''}
   ${plan.unverified?.length?`<p class="allocation-warn">Ещё не подтвердили сверку: ${esc(plan.unverified.join(', '))}. Проверь суммы перед отправкой.</p>`:''}
   ${plan.locked?'<p class="allocation-info">План зафиксирован. Повторное открытие сохраняет назначения. Поручение не означает, что деньги уже выплачены.</p>':''}
-  ${plan.cashiers.map(c=>`<section><h4>${esc(c.name)}</h4>${line('Касса + откат',c.total)}${line('Оставить себе',c.own_salary)}${c.payments.map(p=>gbuAllocationRecipientHtml(p)).join('')||'<p class="allocation-info">Выплаты другим не назначены.</p>'}${line('Остаток к сдаче тебе',c.remaining)}<p class="allocation-info">${esc(gbuAllocationDeliveryLabel(plan,c.tg_id))}</p>${gbuAllocationPayoutStatus(plan,c.tg_id)}</section>`).join('')}
+  ${plan.cashiers.map(c=>`<section><h4>${esc(c.name)}${plan.allocation_rule==='smallest_first_height3_fallback_v3'?' · '+(c.height_cm?esc(c.height_cm)+' см':'рост не указан'):''}</h4>${line('Касса + откат',c.total)}${line('Оставить себе',c.own_salary)}${c.payments.map(p=>gbuAllocationRecipientHtml(p)).join('')||'<p class="allocation-info">Выплаты другим не назначены.</p>'}${line('Остаток к сдаче тебе',c.remaining)}<p class="allocation-info">${esc(gbuAllocationDeliveryLabel(plan,c.tg_id))}</p>${gbuAllocationPayoutStatus(plan,c.tg_id)}</section>`).join('')}
   <section><h4>Мой список выплат · ${gbuAllocationMoney(plan.owner_due)}</h4>${gbuAllocationOwnerProgressHtml(plan)}${plan.owner_payments.map(p=>gbuAllocationOwnerRecipientHtml(p)).join('')||'<p>Доплат сотрудникам нет.</p>'}<button type="button" class="secondary" data-allocation-copy>Скопировать мой список</button>${plan.owner_due?gbuAllocationPayoutStatus(plan,0):''}</section>
   ${plan.unspent_cash?`<p class="allocation-info">Не распределено у бригадиров: ${gbuAllocationMoney(plan.unspent_cash)}. Эти деньги нужно передать тебе.</p>`:''}
   ${plan.owner_surplus?`<p class="allocation-info">Останется после зарплаты: ${gbuAllocationMoney(plan.owner_surplus)}.</p>`:''}
