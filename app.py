@@ -19070,3 +19070,406 @@ def _gbu_payroll_report_toolbar_html(html):
 
 
 INLINE_INDEX_HTML = _gbu_payroll_report_toolbar_html(INLINE_INDEX_HTML)
+
+
+def _readiness_free_metric_html(html):
+    start=html.index('async function loadReadiness(){')
+    end=html.index('\nfunction employeeListName(',start)
+    part=html[start:end]
+    old="<span>Не отписались</span></button>`;"
+    new="""<span>Не отписались</span></button>
+    <div id="readinessFreeCount" class="metric" role="status"><b>${readinessFreeCount(r)}</b><span>Свободные</span></div>`;"""
+    if part.count(old)!=1:
+        raise RuntimeError('Readiness free metric anchor missing')
+    html=html[:start]+part.replace(old,new,1)+html[end:]
+    return html.replace('</body>',r'''<style>
+body.dashboard-compact #employeeReadiness #readinessSummary{grid-template-columns:repeat(3,minmax(0,1fr))!important}
+body.dashboard-compact #employeeReadiness #readinessSummary .metric b{font-size:clamp(16px,4.9vw,23px)!important}
+body.dashboard-compact #employeeReadiness #readinessSummary .metric span{font-size:9px!important;white-space:normal;text-align:center}
+body.dashboard-compact #employeeReadiness #readinessFreeCount b{color:var(--gold2)}
+#readinessSummary #readinessFreeCount{display:flex;flex-direction:column;align-items:center;justify-content:center}
+</style><script>
+function readinessFreeCount(report){
+ const ready=report.totals?.ready_now,demand=report.order_demand;
+ if(!Number.isSafeInteger(ready)||!Number.isSafeInteger(demand?.requested_staff))return '—';
+ const effective=Number.isSafeInteger(demand.requested_staff_effective)?demand.requested_staff_effective:demand.requested_staff;
+ return dispatchStaffCount(ready-demand.requested_staff,ready-effective);
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML = _readiness_free_metric_html(INLINE_INDEX_HTML)
+
+
+class GbuCashAllocation(Base):
+    __tablename__ = 'gbu_cash_allocations'
+    salary_start = Column(Date, primary_key=True)
+    plan_id = Column(String(64), nullable=False, unique=True)
+    source_hash = Column(String(64), nullable=False)
+    payload = Column(String, nullable=False)
+    locked = Column(Boolean, nullable=False, default=False)
+    created_by = Column(BigInteger, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class GbuCashAllocationDelivery(Base):
+    __tablename__ = 'gbu_cash_allocation_deliveries'
+    plan_id = Column(String(64), primary_key=True)
+    tg_id = Column(BigInteger, primary_key=True)
+    part = Column(Integer, primary_key=True)
+    chat_id = Column(BigInteger, nullable=False)
+    status = Column(String(20), nullable=False, default='pending')
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class GbuCashAllocationInput(BaseModel):
+    month: str = Field(pattern=r'^[1-9]\d{3}-(0[1-9]|1[0-2])$')
+    half: StrictInt = Field(ge=1, le=2)
+    snapshot: str = Field(pattern=r'^[0-9a-f]{64}$')
+
+
+def gbu_allocation_periods(month, half):
+    salary_start, salary_end = cash_reconciliation_period(month, half)
+    if half == 1:
+        cash_month, cash_half = month, 2
+    else:
+        next_month = salary_end + timedelta(days=1)
+        cash_month, cash_half = next_month.strftime('%Y-%m'), 1
+    cash_start, cash_end = cash_reconciliation_period(cash_month, cash_half)
+    return {'salary_start': salary_start.isoformat(), 'salary_end': salary_end.isoformat(),
+            'cash_month': cash_month, 'cash_half': cash_half,
+            'cash_start': cash_start.isoformat(), 'cash_end': cash_end.isoformat()}
+
+
+def build_gbu_cash_allocation(people, cashiers):
+    """Integer RUB only; reserve own salary, prefer whole payouts, then split.
+
+    Submitted cash stays with the owner. Outside-worker earnings also stay in
+    the owner's list. This produces instructions, never payment receipts.
+    """
+    due = {int(p['id']): dict(p, remaining=int(p['amount'])) for p in people if p['amount'] > 0}
+    pools, owner_cash = [], 0
+    for cashier in sorted(cashiers, key=lambda c: int(c['tg_id'])):
+        amount = int(cashier['cash']) + int(cashier['kickback'])
+        if amount < 0:
+            raise ValueError('Касса не может быть отрицательной')
+        if cashier['received']:
+            owner_cash += amount
+            continue
+        if not amount:
+            continue
+        pool = dict(cashier, total=amount, remaining=amount, own_salary=0, payments=[])
+        own = due.get(cashier.get('employee_id'))
+        if own:
+            keep = min(pool['remaining'], own['remaining'])
+            pool['own_salary'] = keep
+            pool['remaining'] -= keep
+            own['remaining'] -= keep
+        pools.append(pool)
+    # Smallest outstanding salaries first; the owner covers larger balances.
+    # Own salary was reserved above for every cashier before paying others.
+    for person in sorted(due.values(), key=lambda p: (p['remaining'], p['id'])):
+        if person['id'] <= 0:  # external workers are collected by the owner
+            continue
+        while person['remaining']:
+            available = [pool for pool in pools if pool['remaining'] > 0]
+            if not available:
+                break
+            fitting = [pool for pool in available if pool['remaining'] >= person['remaining']]
+            pool = min(fitting, key=lambda p: (p['remaining'], p['tg_id'])) if fitting else max(
+                available, key=lambda p: (p['remaining'], -p['tg_id']))
+            amount = min(person['remaining'], pool['remaining'])
+            pool['payments'].append({'employee_id': person['id'], 'name': person['name'],
+                                     'phone': person.get('phone', ''), 'amount': amount})
+            person['remaining'] -= amount
+            pool['remaining'] -= amount
+    owner_payments = [{'employee_id': p['id'], 'name': p['name'], 'phone': p.get('phone', ''),
+                       'amount': p['remaining']} for p in sorted(due.values(), key=lambda p: (-p['remaining'], p['id']))
+                      if p['remaining'] > 0]
+    salary_total = sum(int(p['amount']) for p in people)
+    owner_due = sum(p['amount'] for p in owner_payments)
+    unspent = sum(p['remaining'] for p in pools)
+    assigned = sum(p['own_salary'] + sum(x['amount'] for x in p['payments']) for p in pools)
+    assert assigned + owner_due == salary_total
+    return {'cashiers': pools, 'owner_payments': owner_payments,
+            'salary_total': salary_total, 'cash_total': owner_cash + sum(p['total'] for p in pools),
+            'kickback_total': sum(int(c['kickback']) for c in cashiers),
+            'owner_cash': owner_cash, 'cashier_payouts': assigned, 'owner_due': owner_due,
+            'owner_topup': max(0, owner_due-owner_cash-unspent), 'unspent_cash': unspent,
+            'owner_surplus': max(0, owner_cash+unspent-owner_due)}
+
+
+def gbu_allocation_source(db, user, month, half):
+    _require_gbu_payroll_owner(db, user)
+    periods = gbu_allocation_periods(month, half)
+    payroll = json.loads(gbu_staff_payroll(month, db, user).body)
+    start, end = periods['salary_start'], periods['salary_end']
+    missing = [p for p in payroll['missing'] if start <= p['date'] <= end]
+    profiles = {p.id: p for p in db.scalars(select(Employee).where(
+        Employee.id.in_([p['id'] for p in payroll['employees'] if p['id'] > 0])))}
+    people = []
+    for person in payroll['employees']:
+        amount = sum(int(o['amount']) for o in person['orders'] if start <= o['date'] <= end)
+        if not amount:
+            continue
+        profile = profiles.get(person['id'])
+        name = ' '.join(str(x) for x in (str(profile.full_name or '').split()[0] if profile else person['name'],
+                       profile.metro if profile else '', profile.height_cm if profile else '') if x)
+        people.append({'id': person['id'], 'name': name, 'amount': amount,
+                       'phone': str(profile.phone or '') if profile else ''})
+    report = json.loads(cash_reconciliation(periods['cash_month'], periods['cash_half'], db, user).body)
+    # Match accounts by Telegram ID, never by similar names or metro.
+    staff_by_tg = defaultdict(list)
+    for profile in profiles.values():
+        if profile.tg_id:
+            staff_by_tg[int(profile.tg_id)].append(profile.id)
+    cashiers = []
+    for entry in report['items']:
+        own_ids = staff_by_tg.get(int(entry['tg_id']), [])
+        if len(own_ids) > 1:
+            raise HTTPException(409, 'Несколько сотрудников привязаны к одному аккаунту. Исправьте профили перед распределением.')
+        cashiers.append(dict(entry, employee_id=own_ids[0] if own_ids else None))
+    source = {'allocation_rule': 'smallest_first_v1', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
+              'cashiers': sorted(cashiers, key=lambda p:p['tg_id']), 'missing': missing}
+    digest = hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    plan = dict(build_gbu_cash_allocation(people, cashiers), **periods, snapshot=digest,
+                allocation_rule='smallest_first_v1',
+                missing_count=len(missing), unverified=[c['name'] for c in cashiers
+                    if c['total'] and not c['received'] and not c['checked']])
+    return plan
+
+
+def gbu_allocation_view(db, row):
+    plan = json.loads(row.payload)
+    deliveries = list(db.scalars(select(GbuCashAllocationDelivery).where(
+        GbuCashAllocationDelivery.plan_id == row.plan_id)))
+    plan.update(plan_id=row.plan_id, locked=bool(row.locked),
+        deliveries=[{'tg_id': d.tg_id, 'part': d.part, 'status': d.status} for d in deliveries])
+    return plan
+
+
+@app.get('/api/gbu-cash-allocation')
+def gbu_cash_allocation_preview(month: str, half: int, db: Session=Depends(get_db),
+        user: TelegramUser=Depends(require_app_user)):
+    _require_gbu_payroll_owner(db, user)
+    start, _ = cash_reconciliation_period(month, half)
+    saved = db.get(GbuCashAllocation, start)
+    # Sent plans retain their recipients and amounts when source ledgers change.
+    if saved and saved.locked:
+        return JSONResponse(gbu_allocation_view(db, saved), headers={'Cache-Control':'private, no-store'})
+    return JSONResponse(gbu_allocation_source(db, user, month, half), headers={'Cache-Control':'private, no-store'})
+
+
+@app.post('/api/gbu-cash-allocation')
+def gbu_cash_allocation_save(data: GbuCashAllocationInput, db: Session=Depends(get_db),
+        user: TelegramUser=Depends(require_app_user)):
+    _require_gbu_payroll_owner(db, user)
+    start, _ = cash_reconciliation_period(data.month, data.half)
+    dispatch_day_lock(db, start)
+    row = db.get(GbuCashAllocation, start)
+    if row and row.locked:
+        return gbu_allocation_view(db, row)
+    plan = gbu_allocation_source(db, user, data.month, data.half)
+    if not secrets.compare_digest(plan['snapshot'], data.snapshot):
+        raise HTTPException(409, 'Касса или зарплата изменились. Обновите план и проверьте суммы.')
+    if plan['missing_count']:
+        raise HTTPException(409, 'Сначала укажите состав всех заказов за период зарплаты.')
+    if not plan['salary_total']:
+        raise HTTPException(409, 'За выбранный период нет начисленной зарплаты.')
+    if row and row.source_hash == plan['snapshot']:
+        return gbu_allocation_view(db, row)
+    if row is None:
+        row = GbuCashAllocation(salary_start=start)
+        db.add(row)
+    row.plan_id = secrets.token_hex(16)
+    row.source_hash = plan['snapshot']
+    row.payload = json.dumps(plan, ensure_ascii=False)
+    row.locked = False
+    row.created_by = user.id
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    return gbu_allocation_view(db, row)
+
+
+def gbu_allocation_messages(plan, cashier):
+    salary = f"{date.fromisoformat(plan['salary_start']):%d.%m.%Y}–{date.fromisoformat(plan['salary_end']):%d.%m.%Y}"
+    cash = f"{date.fromisoformat(plan['cash_start']):%d.%m.%Y}–{date.fromisoformat(plan['cash_end']):%d.%m.%Y}"
+    money = lambda n: f'{int(n):,}'.replace(',', ' ')+' ₽'
+    header = (f'💰 <b>Распределение кассы · ЛЕГИОН</b>\nЗарплата: {salary}\nКасса: {cash}\n'
+              f"{escape(cashier['name'])}\nКасса с откатами: <b>{money(cashier['total'])}</b>\n"
+              f"Оставить себе в счёт зарплаты: <b>{money(cashier['own_salary'])}</b>\n\nКому выплатить:\n")
+    lines = [f"{i}. {escape(p['name'])} — <b>{money(p['amount'])}</b>"+
+             (f" · {escape(p['phone'])}" if p.get('phone') else '') for i,p in enumerate(cashier['payments'],1)]
+    if not lines:
+        lines = ['Другим сотрудникам выплаты не назначены.']
+    lines += [f"\nОстаток кассы к сдаче владельцу: <b>{money(cashier['remaining'])}</b>",
+              'Это поручение на выплату. Сообщение не является подтверждением получения денег.']
+    messages, current = [], header
+    for line in lines:
+        if len(current)+len(line)+1 > 3500:
+            messages.append(current)
+            current = f'💰 Распределение кассы · продолжение\nЗарплата: {salary}\n'
+        current += line+'\n'
+    messages.append(current)
+    return messages
+
+
+@app.post('/api/gbu-cash-allocation/{plan_id}/send')
+async def gbu_cash_allocation_send(plan_id: str, db: Session=Depends(get_db),
+        user: TelegramUser=Depends(require_app_user)):
+    _require_gbu_payroll_owner(db, user)
+    row = db.scalar(select(GbuCashAllocation).where(GbuCashAllocation.plan_id==plan_id))
+    if not row:
+        raise HTTPException(404, 'План не найден')
+    dispatch_day_lock(db, row.salary_start)
+    db.refresh(row)
+    plan = json.loads(row.payload)
+    if not row.locked:
+        fresh = gbu_allocation_source(db, user, row.salary_start.strftime('%Y-%m'),
+                                      1 if row.salary_start.day==1 else 2)
+        if fresh['snapshot'] != row.source_hash:
+            raise HTTPException(409, 'Данные изменились. Заново откройте распределение и проверьте план.')
+    if not os.getenv('BOT_TOKEN', '').strip():
+        raise HTTPException(409, 'Бот для отправки не настроен.')
+    snapshot = db.get(OwnerBotSnapshot, 1)
+    if not snapshot or datetime.utcnow()-snapshot.updated_at > timedelta(minutes=5):
+        raise HTTPException(409, 'Привязки групп кассы не обновлены. Проверьте работу бота.')
+    try:
+        payload = json.loads(snapshot.payload)
+        if payload.get('owner_id') != user.id:
+            raise ValueError()
+        routes = _cash_note_destinations(payload)
+        blocked = {int(p['tg_id']) for p in payload.get('blocked', [])}
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise HTTPException(409, 'Не удалось проверить группы кассы.')
+    jobs = []
+    for cashier in plan['cashiers']:
+        uid = int(cashier['tg_id'])
+        if uid in blocked or db.get(OwnerManagedBlock, uid) or uid not in routes:
+            raise HTTPException(409, 'Нет доступной однозначной группы кассы: '+cashier['name'])
+        for part, message in enumerate(gbu_allocation_messages(plan, cashier), 1):
+            key = (plan_id, uid, part)
+            delivery = db.get(GbuCashAllocationDelivery, key)
+            if delivery and delivery.status != 'failed':
+                continue
+            if delivery is None:
+                delivery = GbuCashAllocationDelivery(plan_id=plan_id,tg_id=uid,part=part)
+                db.add(delivery)
+            delivery.chat_id = routes[uid]
+            delivery.status = 'pending'
+            delivery.updated_at = datetime.utcnow()
+            jobs.append((key, routes[uid], message))
+    # Freeze all instructions and claim each message before external delivery.
+    row.locked = True
+    db.commit()
+    for key, chat_id, message in jobs:
+        status = await gbu_allocation_deliver_message(chat_id, message)
+        delivery = db.get(GbuCashAllocationDelivery, key)
+        delivery.status = status
+        delivery.updated_at = datetime.utcnow()
+        db.commit()
+    return gbu_allocation_view(db, row)
+
+
+def _gbu_cash_allocation_html(html):
+    anchor='  wireGbuPayrollPeople(body,data,month,period);'
+    if html.count(anchor)!=1:
+        raise RuntimeError('Payroll allocation button anchor missing')
+    html=html.replace(anchor,anchor+"\n  addGbuCashAllocationButton(body,month,period);",1)
+    return html.replace('</body>',r'''<style>
+.gbu-allocation-open{margin:8px 0;width:100%;min-height:42px}
+#gbuAllocation .allocation-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin:10px 0}
+#gbuAllocation .allocation-summary>div{padding:8px;border:1px solid var(--line);border-radius:9px;min-width:0}
+#gbuAllocation .allocation-summary small{display:block;color:var(--muted);font-size:11px}
+#gbuAllocation .allocation-summary b{display:block;font-size:16px;overflow-wrap:anywhere}
+#gbuAllocation section{border:1px solid var(--gold2);border-radius:11px;padding:10px;margin:10px 0}
+#gbuAllocation h4{margin:0 0 6px;font-size:15px}
+#gbuAllocation .allocation-line{display:flex;justify-content:space-between;gap:8px;margin:6px 0;font-size:13px}
+#gbuAllocation .allocation-line>span{min-width:0;overflow-wrap:anywhere}
+#gbuAllocation .allocation-line b{white-space:nowrap}
+#gbuAllocation .allocation-info{font-size:12px;color:var(--muted);white-space:pre-line}
+#gbuAllocation .allocation-warn{color:var(--gold2);font-size:12px}
+#gbuAllocation [data-allocation-send]{width:100%;min-height:44px;margin:10px 0}
+#gbuAllocation [data-allocation-status]{white-space:pre-line;font-size:13px}
+</style><script>
+function addGbuCashAllocationButton(body,month,period){
+ if(state.bootstrap?.is_owner!==true)return;
+ const b=document.createElement('button');b.type='button';b.className='primary gbu-allocation-open';b.textContent='💰 Распределить кассу';
+ b.onclick=()=>openGbuCashAllocation(month,period);const heading=qs('.gbu-payroll-total-row',body);heading?heading.after(b):body.prepend(b);
+}
+function gbuAllocationPeriod(start,end){return fmtDate(start)+' — '+fmtDate(end)}
+function gbuAllocationMoney(amount){return esc(cabinetMoney(amount))+' ₽'}
+function gbuAllocationDeliveryLabel(plan,uid){
+ const rows=(plan.deliveries||[]).filter(d=>Number(d.tg_id)===Number(uid));
+ if(!rows.length)return 'Поручение ещё не отправлено';
+ if(rows.some(d=>d.status==='pending'||d.status==='unknown'))return 'Отправка не подтверждена. Проверьте группу кассы; повторная отправка этих сообщений отключена.';
+ if(rows.some(d=>d.status==='failed'))return 'Есть неотправленные сообщения. Можно повторить отправку.';
+ return 'Поручение отправлено в группу кассы';
+}
+async function openGbuCashAllocation(month,period){
+ if(state.bootstrap?.is_owner!==true){toast('Доступно только владельцу');return}
+ showModal('Распределение кассы','<div id="gbuAllocation">Загрузка…</div>');
+ const root=qs('#gbuAllocation'),active=()=>qs('#gbuAllocation')===root&&!qs('#modal').classList.contains('hidden');
+ const half=period==='first'?1:2;let plan,busy=false;
+ const line=(name,amount)=>`<div class="allocation-line"><span>${esc(name)}</span><b>${gbuAllocationMoney(amount)}</b></div>`;
+ const summary=(label,amount)=>`<div><small>${label}</small><b>${gbuAllocationMoney(amount)}</b></div>`;
+ function draw(){
+  root.innerHTML=`<button type="button" class="secondary" data-allocation-back>← К зарплате</button><p class="allocation-info">Зарплата: ${esc(gbuAllocationPeriod(plan.salary_start,plan.salary_end))}\nКасса: ${esc(gbuAllocationPeriod(plan.cash_start,plan.cash_end))}</p>
+  <div class="allocation-summary">${summary('Начислено',plan.salary_total)}${summary('Касса с откатами',plan.cash_total)}${summary('Из кассы уже у тебя',plan.owner_cash)}${summary('Бригадиры выплатят, включая себе',plan.cashier_payouts)}${summary('Выплатить через тебя',plan.owner_due)}${summary('Добавить своих денег',plan.owner_topup)}</div>
+  <p class="allocation-info">Бригадир сначала оставляет себе зарплату, затем выплачивает другим от меньших сумм к большим. Крупные остатки остаются в твоём списке. Откаты включены. Сданная касса учтена у тебя. Сторонние сотрудники остаются в твоём списке.</p>
+  ${plan.missing_count?`<p class="allocation-warn">Не заполнен состав: ${plan.missing_count}. Сначала завершите начисления.</p>`:''}
+  ${plan.unverified?.length?`<p class="allocation-warn">Ещё не подтвердили сверку: ${esc(plan.unverified.join(', '))}. Проверь суммы перед отправкой.</p>`:''}
+  ${plan.locked?'<p class="allocation-info">План зафиксирован при отправке. Повторное открытие сохраняет назначения. Поручение не означает, что деньги уже выплачены.</p>':''}
+  ${plan.cashiers.map(c=>`<section><h4>${esc(c.name)}</h4>${line('Касса + откат',c.total)}${line('Оставить себе',c.own_salary)}${c.payments.map(p=>line(p.name,p.amount)).join('')||'<p class="allocation-info">Выплаты другим не назначены.</p>'}${line('Остаток к сдаче тебе',c.remaining)}<p class="allocation-info">${esc(gbuAllocationDeliveryLabel(plan,c.tg_id))}</p></section>`).join('')}
+  <section><h4>Мой список выплат · ${gbuAllocationMoney(plan.owner_due)}</h4>${plan.owner_payments.map(p=>line(p.name,p.amount)).join('')||'<p>Доплат сотрудникам нет.</p>'}<button type="button" class="secondary" data-allocation-copy>Скопировать мой список</button></section>
+  ${plan.unspent_cash?`<p class="allocation-info">Не распределено у бригадиров: ${gbuAllocationMoney(plan.unspent_cash)}. Эти деньги нужно передать тебе.</p>`:''}
+  ${plan.owner_surplus?`<p class="allocation-info">Останется после зарплаты: ${gbuAllocationMoney(plan.owner_surplus)}.</p>`:''}
+  <p data-allocation-status role="status" aria-live="polite"></p><button type="button" class="primary" data-allocation-send>${plan.locked?'Отправить неотправленные поручения':'Подтвердить план и отправить бригадирам'}</button>`;
+  qs('[data-allocation-back]',root).onclick=()=>openGbuPayroll(month,period);
+  qs('[data-allocation-copy]',root).onclick=async()=>{
+   const text='Зарплата '+gbuAllocationPeriod(plan.salary_start,plan.salary_end)+'\nМой список выплат:\n'+plan.owner_payments.map(p=>p.name+' — '+cabinetMoney(p.amount)+' ₽').join('\n')+'\nИтого: '+cabinetMoney(plan.owner_due)+' ₽\nКасса у меня: '+cabinetMoney(plan.owner_cash)+' ₽\nДобавить своих: '+cabinetMoney(plan.owner_topup)+' ₽';
+   try{await navigator.clipboard.writeText(text);toast('Список скопирован')}catch(e){qs('[data-allocation-status]',root).textContent=text}
+  };
+  const button=qs('[data-allocation-send]',root),deliveries=plan.deliveries||[];
+  const allSent=plan.locked&&deliveries.length>0&&deliveries.every(d=>d.status==='sent');
+  button.disabled=busy||!!plan.missing_count||!plan.salary_total||!plan.cashiers.length||allSent;
+  if(allSent)button.textContent='Все поручения отправлены';
+  if(plan.locked&&deliveries.some(d=>['pending','unknown'].includes(d.status))&&!deliveries.some(d=>d.status==='failed')){button.disabled=true;button.textContent='Проверьте отправку в группах кассы'}
+  button.onclick=send;
+ }
+ async function send(){
+  if(busy||!active())return;busy=true;qs('[data-allocation-send]',root).disabled=true;
+  qs('[data-allocation-status]',root).textContent='Сохраняем план и отправляем поручения…';
+  try{
+   if(!plan.locked){plan=await api('/api/gbu-cash-allocation',{method:'POST',body:JSON.stringify({month,half,snapshot:plan.snapshot})});if(!active())return}
+   plan=await api('/api/gbu-cash-allocation/'+encodeURIComponent(plan.plan_id)+'/send',{method:'POST',body:'{}'});
+   if(!active())return;busy=false;draw();
+   const rows=plan.deliveries||[];qs('[data-allocation-status]',root).textContent='Сообщений отправлено: '+rows.filter(d=>d.status==='sent').length+'. Не отправлено: '+rows.filter(d=>d.status==='failed').length+'. Требуют проверки: '+rows.filter(d=>['pending','unknown'].includes(d.status)).length+'.';
+  }catch(e){if(active()){busy=false;qs('[data-allocation-status]',root).textContent=e.message+' Закройте и снова откройте распределение для проверки результата.';qs('[data-allocation-send]',root).disabled=true}}
+ }
+ try{plan=await api('/api/gbu-cash-allocation?month='+encodeURIComponent(month)+'&half='+half,{cache:'no-store'});if(active())draw()}
+ catch(e){if(active()){root.textContent=e.message;const back=document.createElement('button');back.textContent='← К зарплате';back.onclick=()=>openGbuPayroll(month,period);root.append(back)}}
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML = _gbu_cash_allocation_html(INLINE_INDEX_HTML)
+
+
+async def gbu_allocation_deliver_message(chat_id, message):
+    # A lost response can follow a successful send. Only Telegram's explicit
+    # rejection is retryable; network/JSON failures remain uncertain.
+    import httpx
+    try:
+        token = os.getenv('BOT_TOKEN', '').strip()
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(f'https://api.telegram.org/bot{token}/sendMessage',
+                json={'chat_id': chat_id, 'text': message, 'parse_mode': 'HTML'})
+        data = response.json()
+        if isinstance(data, dict) and data.get('ok') is False:
+            return 'failed'
+        if isinstance(data, dict) and data.get('ok') is True and isinstance(data.get('result'), dict) and data['result'].get('message_id'):
+            return 'sent'
+    except Exception:
+        pass
+    return 'unknown'
