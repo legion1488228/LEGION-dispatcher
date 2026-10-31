@@ -1342,6 +1342,9 @@ def gbu_staff_payroll(month: str, db: Session = Depends(get_db), user: TelegramU
         if profile:
             row.update(first_name=str(profile.full_name or '').split()[0] if profile.full_name else '—',
                        metro=getattr(profile, 'metro', '') or '', height_cm=getattr(profile, 'height_cm', None))
+        row['payroll_card_role'] = 'brigadier' if (
+            (profile and profile.group_code == 'brigadier') or
+            any(order['role'] == 'brigadier' for order in row['orders'])) else 'member'
     for note in db.scalars(select(GbuPayrollComment).where(GbuPayrollComment.month == month)):
         if note.employee_id in people:
             people[note.employee_id].setdefault('payroll_comments', {})[note.period] = {'text': note.text, 'version': note.version}
@@ -18792,3 +18795,29 @@ def _crew_saved_return_to_cards_html(html: str) -> str:
 
 
 INLINE_INDEX_HTML = _crew_saved_return_to_cards_html(INLINE_INDEX_HTML)
+
+
+
+def _gbu_payroll_single_employee_card_html(html: str) -> str:
+    """Combine all roles on one brigadier card while retaining role-specific reports."""
+    start = html.rindex('function gbuPayrollGroupsHtml(data){')
+    end = html.index('function wireGbuPayrollPeople(', start)
+    part = html[start:end]
+    old = 'return gbuPayrollRoleGroups(data).map('
+    if part.count(old) != 1:
+        raise RuntimeError('Payroll card grouping anchor missing')
+    html = html[:start] + part.replace(old, 'return gbuPayrollCardGroups(data).map(', 1) + html[end:]
+    return html.replace('</body>', r"""<script>
+function gbuPayrollCardGroups(data){
+ const cardRole=employee=>employee.payroll_card_role==='brigadier'||employee.orders.some(order=>order.role==='brigadier')?'brigadier':'member';
+ return [{role:'brigadier',title:'Бригадир'},{role:'member',title:'Грузчик'}].map(group=>{
+  const employees=data.employees.filter(employee=>cardRole(employee)===group.role).map(employee=>({
+   ...employee,exits:employee.orders.length,amount:employee.orders.reduce((sum,order)=>sum+Number(order.amount||0),0)
+  })).filter(employee=>employee.exits>0).sort((a,b)=>b.amount-a.amount||String(a.name||'').localeCompare(String(b.name||''),'ru'));
+  return {...group,employees,total:employees.reduce((sum,employee)=>sum+employee.amount,0)};
+ });
+}
+</script></body>""", 1)
+
+
+INLINE_INDEX_HTML = _gbu_payroll_single_employee_card_html(INLINE_INDEX_HTML)
