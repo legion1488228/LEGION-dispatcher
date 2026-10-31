@@ -19007,3 +19007,42 @@ def _gbu_payroll_owner_only_clean_html(html):
 
 
 INLINE_INDEX_HTML = _gbu_payroll_owner_only_clean_html(INLINE_INDEX_HTML)
+
+
+def _gbu_payroll_report_identity_html(html):
+    old='<h3>${esc(label.name)}</h3><p class="muted">${esc(label.location)} · ${esc(monthLabel)}'
+    new='<h3 class="gbu-payroll-report-identity">${esc(gbuPayrollReportIdentity(employee,label))}</h3><p class="muted">${esc(monthLabel)}'
+    if html.count(old)!=1:
+        raise RuntimeError('Payroll report identity anchor missing')
+    html=html.replace(old,new,1)
+    return html.replace('</body>',r'''<style>
+.gbu-payroll-report-dialog .gbu-payroll-report-identity{white-space:normal;overflow-wrap:anywhere;line-height:1.3}
+</style><script>
+function gbuPayrollReportIdentity(employee,label){
+ if(Number(employee.id)===-1)return label.name;
+ const location=String(label.location||'').trim();
+ return [label.name,location].filter(Boolean).join(' ');
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML = _gbu_payroll_report_identity_html(INLINE_INDEX_HTML)
+
+
+def _gbu_payroll_report_period_top_html(html):
+    period="<p class=\"muted\">${esc(monthLabel)} · ${period==='first'?'1–15':'16–'+end}</p>"
+    if html.count(period)!=1:
+        raise RuntimeError('Payroll report period anchor missing')
+    html=html.replace(period,'',1)
+    back='<button type="button" class="secondary" data-payroll-back>← Назад</button>'
+    if html.count(back)!=1:
+        raise RuntimeError('Payroll report back button anchor missing')
+    html=html.replace(back,'<div class="gbu-payroll-report-topline">'+back+period+'</div>',1)
+    return html.replace('</head>',r'''<style>
+.gbu-payroll-report-topline{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+.gbu-payroll-report-topline>p{margin:0;text-align:right;font-size:12px;line-height:1.3;min-width:0;overflow-wrap:anywhere}
+.gbu-payroll-report-dialog .gbu-payroll-report-topline>[data-payroll-back]{flex-shrink:0;margin:0}
+</style></head>''',1)
+
+
+INLINE_INDEX_HTML = _gbu_payroll_report_period_top_html(INLINE_INDEX_HTML)
