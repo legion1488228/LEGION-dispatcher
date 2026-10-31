@@ -18482,3 +18482,24 @@ def _gbu_crew_clear_selected_search_html(html: str) -> str:
 
 
 INLINE_INDEX_HTML = _gbu_crew_clear_selected_search_html(INLINE_INDEX_HTML)
+
+
+def _gbu_crew_search_archive_html(html: str) -> str:
+    """Search archive rows even when the archive is collapsed."""
+    start = html.index('async function openGbuOrderRoster(')
+    end = html.index('async function openGbuPayrollRoster(', start)
+    part = html[start:end]
+    replacements = {
+        'row.hidden=(inArchive&&!showArchived)||!tokens.every(token=>words.some(word=>word.startsWith(token)));':
+        'row.hidden=(inArchive&&!showArchived&&!term)||!tokens.every(token=>words.some(word=>word.startsWith(token)));',
+        "group.hidden=inArchive?!showArchived:!!term&&![...group.querySelectorAll('[data-crew-name]')].some(row=>!row.hidden);":
+        "const hasMatches=[...group.querySelectorAll('[data-crew-name]')].some(row=>!row.hidden);\n    group.hidden=inArchive?(term?!hasMatches:!showArchived):!!term&&!hasMatches;",
+    }
+    for old, new in replacements.items():
+        if part.count(old) != 1:
+            raise RuntimeError('GBU archive search anchor not found')
+        part = part.replace(old, new, 1)
+    return html[:start] + part + html[end:]
+
+
+INLINE_INDEX_HTML = _gbu_crew_search_archive_html(INLINE_INDEX_HTML)
