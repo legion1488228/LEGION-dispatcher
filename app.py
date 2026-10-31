@@ -4330,9 +4330,11 @@ def sync_cash_reminder_settings(data: CashReminderSettings, db: Session = Depend
 
 
 @app.post("/api/cash/reminder")
-async def send_cash_reminder(month: str | None = None, half: Literal[0, 1, 2] = 0,
+async def send_cash_reminder(month: str | None = None, half: int = 0,
                              db: Session = Depends(get_db),
                              user: TelegramUser = Depends(require_admin)):
+    if half not in (0, 1, 2):
+        raise HTTPException(422, 'Выберите период: месяц, 1–15 или 16–конец месяца.')
     _require_cash_manager(db, user)
     now = datetime.utcnow()
     row = db.execute(select(CashReminderConfig).where(
