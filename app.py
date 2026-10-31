@@ -18667,3 +18667,26 @@ def _gbu_crew_confirm_under_search_html(html: str) -> str:
 
 
 INLINE_INDEX_HTML = _gbu_crew_confirm_under_search_html(INLINE_INDEX_HTML)
+
+
+def _gbu_crew_direct_confirm_html(html: str) -> str:
+    """Keep a tap on submit stable while the mobile keyboard is open."""
+    start = html.index('async function openGbuOrderRoster(')
+    end = html.index('async function openGbuPayrollRoster(', start)
+    part = html[start:end]
+    anchor = "toolbar.append(crewSearch,crewFooter);"
+    if part.count(anchor) != 1:
+        raise RuntimeError('Crew toolbar action anchor missing')
+    part = part.replace(anchor, "toolbar.append(crewSearch,crewFooter,error);", 1)
+    anchor = "  form.onsubmit=async event=>{event.preventDefault();if(button.disabled||busy)return;const ids=selected();if(ids.length!==need)return;busy=true;update();error.textContent='';"
+    new = """  button.addEventListener('pointerdown',event=>event.preventDefault());
+  button.addEventListener('mousedown',event=>event.preventDefault());
+  button.onclick=event=>{event.preventDefault();event.stopPropagation();if(!button.disabled&&!busy)form.requestSubmit(button)};
+  form.onsubmit=async event=>{event.preventDefault();event.stopPropagation();if(button.disabled||busy)return;const ids=selected();if(ids.length!==need)return;busy=true;update();error.textContent='';form.querySelector('[data-crew-search]')?.blur();"""
+    if part.count(anchor) != 1:
+        raise RuntimeError('Crew direct submit anchor missing')
+    part = part.replace(anchor, new, 1)
+    return html[:start] + part + html[end:]
+
+
+INLINE_INDEX_HTML = _gbu_crew_direct_confirm_html(INLINE_INDEX_HTML)
