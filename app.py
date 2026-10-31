@@ -19263,7 +19263,9 @@ def gbu_allocation_view(db, row):
     deliveries = list(db.scalars(select(GbuCashAllocationDelivery).where(
         GbuCashAllocationDelivery.plan_id == row.plan_id)))
     plan.update(plan_id=row.plan_id, locked=bool(row.locked),
-        deliveries=[{'tg_id': d.tg_id, 'part': d.part, 'status': d.status} for d in deliveries])
+        deliveries=[{'tg_id': d.tg_id, 'part': d.part, 'status': d.status} for d in deliveries if d.part > 0],
+        comment_deliveries=[{'tg_id': d.tg_id, 'version': -d.part, 'status': d.status}
+                            for d in deliveries if d.part < 0])
     confirmations = list(db.scalars(select(GbuCashAllocationPayout).where(
         GbuCashAllocationPayout.plan_id == row.plan_id)))
     plan['payout_confirmations'] = [{'tg_id': c.tg_id,
@@ -19276,6 +19278,8 @@ def gbu_allocation_view(db, row):
     plan['confirmation_buttons_sent'] = all(any(d.tg_id == int(c['tg_id']) and
         d.part == len(gbu_allocation_messages(plan, c))+1 and d.status == 'sent'
         for d in deliveries) for c in plan['cashiers'])
+    for cashier in plan['cashiers']:
+        cashier['delivery_parts_expected'] = len(gbu_allocation_messages(plan, cashier))+1
     return plan
 
 
@@ -19347,8 +19351,15 @@ def gbu_allocation_messages(plan, cashier):
     return messages
 
 
+class GbuCashAllocationResendInput(BaseModel):
+    tg_id: StrictInt | None = Field(default=None, gt=0)
+    missing_checked: StrictBool = False
+    comment_only: StrictBool = False
+
+
 @app.post('/api/gbu-cash-allocation/{plan_id}/send')
-async def gbu_cash_allocation_send(plan_id: str, db: Session=Depends(get_db),
+async def gbu_cash_allocation_send(plan_id: str, data: GbuCashAllocationResendInput | None = None,
+        db: Session=Depends(get_db),
         user: TelegramUser=Depends(require_app_user)):
     _require_gbu_payroll_owner(db, user)
     row = db.scalar(select(GbuCashAllocation).where(GbuCashAllocation.plan_id==plan_id))
@@ -19377,11 +19388,39 @@ async def gbu_cash_allocation_send(plan_id: str, db: Session=Depends(get_db),
         blocked = {int(p['tg_id']) for p in payload.get('blocked', [])}
     except (ValueError, TypeError, KeyError, AttributeError):
         raise HTTPException(409, 'Не удалось проверить группы кассы.')
+    comment_only = bool(data and data.comment_only)
+    if comment_only and (data.tg_id is None or not row.locked):
+        raise HTTPException(409, 'Сначала отправьте поручение бригадиру.')
+    selected = plan['cashiers']
+    if data is not None and data.tg_id is not None:
+        if not comment_only and not data.missing_checked:
+            raise HTTPException(409, 'Сначала проверьте, что списка получателей нет в группе кассы.')
+        selected = [c for c in selected if int(c['tg_id']) == data.tg_id]
+        if not selected:
+            raise HTTPException(404, 'Бригадир отсутствует в этом распределении')
+        payout = db.get(GbuCashAllocationPayout, (plan_id, data.tg_id))
+        if not comment_only and payout and payout.confirmed_at:
+            raise HTTPException(409, 'Выплаты уже подтверждены. Повторное поручение не отправлено.')
+        existing = list(db.scalars(select(GbuCashAllocationDelivery).where(
+            GbuCashAllocationDelivery.plan_id == plan_id,
+            GbuCashAllocationDelivery.tg_id == data.tg_id)))
+        if any(d.chat_id != routes.get(data.tg_id) and d.status != 'failed' for d in existing):
+            raise HTTPException(409, 'Группа кассы изменилась. Проверьте исходную группу бригадира.')
+        if any(d.status == 'pending' and datetime.utcnow()-d.updated_at < timedelta(minutes=5)
+               for d in existing):
+            raise HTTPException(409, 'Отправка ещё выполняется. Подождите и проверьте группу кассы.')
+        # Only the owner, after checking this particular chat, may recover an
+        # ambiguous send. Confirmed deliveries and payment marks stay intact.
+        for d in existing:
+            if not comment_only and d.part > 0 and d.status in ('unknown', 'pending'):
+                d.status = 'failed'
     jobs = []
-    for cashier in plan['cashiers']:
+    for cashier in selected:
         uid = int(cashier['tg_id'])
         if uid in blocked or db.get(OwnerManagedBlock, uid) or uid not in routes:
             raise HTTPException(409, 'Нет доступной однозначной группы кассы: '+cashier['name'])
+        if comment_only:
+            continue
         confirmation = db.get(GbuCashAllocationPayout, (plan_id, uid))
         if confirmation is None:
             confirmation = GbuCashAllocationPayout(plan_id=plan_id, tg_id=uid,
@@ -19392,6 +19431,8 @@ async def gbu_cash_allocation_send(plan_id: str, db: Session=Depends(get_db),
         for part, message in enumerate(messages, 1):
             key = (plan_id, uid, part)
             delivery = db.get(GbuCashAllocationDelivery, key)
+            if delivery and delivery.chat_id != routes[uid] and delivery.status != 'failed':
+                raise HTTPException(409, 'Группа кассы изменилась. Проверьте исходную группу: '+cashier['name'])
             if delivery and delivery.status != 'failed':
                 continue
             if delivery is None:
@@ -19404,16 +19445,31 @@ async def gbu_cash_allocation_send(plan_id: str, db: Session=Depends(get_db),
             delivery.status = 'pending'
             delivery.updated_at = datetime.utcnow()
             markup = gbu_allocation_confirmation_markup(confirmation) if part == len(messages) else None
-            jobs.append((key, routes[uid], message, markup))
+            jobs.append((key, routes[uid], message, markup, delivery.updated_at))
     # Freeze all instructions and claim each message before external delivery.
     row.locked = True
     db.commit()
-    for key, chat_id, message, markup in jobs:
-        status = await gbu_allocation_deliver_message(chat_id, message, markup)
+    for key, chat_id, message, markup, claimed_at in jobs:
+        # A stopped worker must not resume messages already claimed by recovery.
+        db.expire_all()
         delivery = db.get(GbuCashAllocationDelivery, key)
+        if delivery.status != 'pending' or delivery.updated_at != claimed_at:
+            continue
+        earlier = list(db.scalars(select(GbuCashAllocationDelivery).where(
+            GbuCashAllocationDelivery.plan_id == key[0],
+            GbuCashAllocationDelivery.tg_id == key[1],
+            GbuCashAllocationDelivery.part > 0,
+            GbuCashAllocationDelivery.part < key[2])))
+        ready = len(earlier) == key[2]-1 and all(
+            d.status == 'sent' and d.chat_id == chat_id for d in earlier)
+        # Never send the confirmation button or continuation ahead of the list.
+        status = await gbu_allocation_deliver_message(chat_id, message, markup) if ready else 'failed'
         delivery.status = status
         delivery.updated_at = datetime.utcnow()
         db.commit()
+    for cashier in selected:
+        await gbu_allocation_send_card_comment(db, row, plan, cashier,
+            routes[int(cashier['tg_id'])], recover=bool(data and data.missing_checked))
     return gbu_allocation_view(db, row)
 
 
@@ -19448,9 +19504,15 @@ function gbuAllocationMoney(amount){return esc(cabinetMoney(amount))+' ₽'}
 function gbuAllocationDeliveryLabel(plan,uid){
  const rows=(plan.deliveries||[]).filter(d=>Number(d.tg_id)===Number(uid));
  if(!rows.length)return 'Поручение ещё не отправлено';
- if(rows.some(d=>d.status==='pending'||d.status==='unknown'))return 'Отправка не подтверждена. Проверьте группу кассы; повторная отправка этих сообщений отключена.';
+ if(rows.some(d=>d.status==='pending'||d.status==='unknown'))return 'Доставка списка не подтверждена. Если списка нет в чате, нажмите «Отправить недоставленные части». Уже доставленные части повторно не отправятся.';
  if(rows.some(d=>d.status==='failed'))return 'Есть неотправленные сообщения. Можно повторить отправку.';
  return 'Поручение отправлено в группу кассы';
+}
+function gbuAllocationResendHtml(plan,cashier){
+ const rows=(plan.deliveries||[]).filter(d=>Number(d.tg_id)===Number(cashier.tg_id));
+ const paid=(plan.payout_confirmations||[]).some(c=>Number(c.tg_id)===Number(cashier.tg_id));
+ const complete=rows.length===Number(cashier.delivery_parts_expected)&&rows.every(d=>d.status==='sent');
+ return plan.locked&&!paid&&!complete?`<button type="button" class="secondary" data-allocation-resend="${Number(cashier.tg_id)}">Отправить недоставленные части</button>`:'';
 }
 async function openGbuCashAllocation(month,period){
  if(state.bootstrap?.is_owner!==true){toast('Доступно только владельцу');return}
@@ -19466,7 +19528,7 @@ async function openGbuCashAllocation(month,period){
   ${plan.missing_count?`<p class="allocation-warn">Не заполнен состав: ${plan.missing_count}. Сначала завершите начисления.</p>`:''}
   ${plan.unverified?.length?`<p class="allocation-warn">Ещё не подтвердили сверку: ${esc(plan.unverified.join(', '))}. Проверь суммы перед отправкой.</p>`:''}
   ${plan.locked?'<p class="allocation-info">План зафиксирован. Повторное открытие сохраняет назначения. Поручение не означает, что деньги уже выплачены.</p>':''}
-  ${plan.cashiers.map(c=>`<section><h4>${esc(c.name)}${plan.allocation_rule==='smallest_first_height3_fallback_v3'?' · '+(c.height_cm?esc(c.height_cm)+' см':'рост не указан'):''}</h4>${line('Касса + откат',c.total)}${line('Оставить себе',c.own_salary)}${c.payments.map(p=>gbuAllocationRecipientHtml(p)).join('')||'<p class="allocation-info">Выплаты другим не назначены.</p>'}${line('Остаток к сдаче тебе',c.remaining)}<p class="allocation-info">${esc(gbuAllocationDeliveryLabel(plan,c.tg_id))}</p>${gbuAllocationCardCommentHtml(comments,c.tg_id,commentDrafts)}${gbuAllocationPayoutStatus(plan,c.tg_id)}</section>`).join('')}
+  ${plan.cashiers.map(c=>`<section><h4>${esc(c.name)}${plan.allocation_rule==='smallest_first_height3_fallback_v3'?' · '+(c.height_cm?esc(c.height_cm)+' см':'рост не указан'):''}</h4>${line('Касса + откат',c.total)}${line('Оставить себе',c.own_salary)}${c.payments.map(p=>gbuAllocationRecipientHtml(p)).join('')||'<p class="allocation-info">Выплаты другим не назначены.</p>'}${line('Остаток к сдаче тебе',c.remaining)}<p class="allocation-info">${esc(gbuAllocationDeliveryLabel(plan,c.tg_id))}</p>${gbuAllocationResendHtml(plan,c)}${gbuAllocationCardCommentHtml(comments,c.tg_id,commentDrafts)}${gbuAllocationCommentSendHtml(plan,comments,c.tg_id)}${gbuAllocationPayoutStatus(plan,c.tg_id)}</section>`).join('')}
   <section><h4>Мой список выплат · ${gbuAllocationMoney(plan.owner_due)}</h4>${gbuAllocationOwnerProgressHtml(plan)}${plan.owner_payments.map(p=>gbuAllocationOwnerRecipientHtml(p)).join('')||'<p>Доплат сотрудникам нет.</p>'}<button type="button" class="secondary" data-allocation-copy>Скопировать мой список</button>${gbuAllocationCardCommentHtml(comments,0,commentDrafts)}${plan.owner_due?gbuAllocationPayoutStatus(plan,0):''}</section>
   ${plan.unspent_cash?`<p class="allocation-info">Не распределено у бригадиров: ${gbuAllocationMoney(plan.unspent_cash)}. Эти деньги нужно передать тебе.</p>`:''}
   ${plan.owner_surplus?`<p class="allocation-info">Останется после зарплаты: ${gbuAllocationMoney(plan.owner_surplus)}.</p>`:''}
@@ -19482,6 +19544,7 @@ async function openGbuCashAllocation(month,period){
   if(allSent)button.textContent='Все поручения отправлены';
   if(plan.locked&&deliveries.some(d=>['pending','unknown'].includes(d.status))&&!deliveries.some(d=>d.status==='failed')){button.disabled=true;button.textContent='Проверьте отправку в группах кассы'}
   button.onclick=send;
+  root.querySelectorAll('[data-allocation-resend]').forEach(b=>{b.disabled=busy;b.onclick=()=>resend(Number(b.dataset.allocationResend))});
   root.querySelectorAll('[data-payout-confirm]').forEach(b=>{b.disabled=busy||(Number(b.dataset.payoutConfirm)===0&&!plan.owner_payments.every(p=>p.paid===true));b.onclick=()=>confirmPayout(Number(b.dataset.payoutConfirm))});
   root.querySelectorAll('[data-owner-payment]').forEach(input=>{input.disabled=busy;input.onchange=()=>markOwnerPayment(Number(input.dataset.ownerPayment),input.checked,Number(input.dataset.version))});
   root.querySelectorAll('[data-allocation-comment-toggle]').forEach(b=>{b.disabled=busy;b.onclick=()=>{
@@ -19491,7 +19554,20 @@ async function openGbuCashAllocation(month,period){
   }});
   root.querySelectorAll('[data-allocation-comment-text]').forEach(t=>{t.disabled=busy;t.oninput=()=>{const d=commentDrafts.get(Number(t.dataset.allocationCommentText));if(d)d.text=t.value}});
   root.querySelectorAll('[data-allocation-comment-save]').forEach(b=>{b.disabled=busy;b.onclick=()=>saveComment(Number(b.dataset.allocationCommentSave),false)});
+  root.querySelectorAll('[data-allocation-comment-send]').forEach(b=>{b.disabled=busy||commentDrafts.has(Number(b.dataset.allocationCommentSend));b.onclick=()=>sendComment(Number(b.dataset.allocationCommentSend))});
   root.querySelectorAll('[data-allocation-comment-delete]').forEach(b=>{b.disabled=busy;b.onclick=()=>saveComment(Number(b.dataset.allocationCommentDelete),true)});
+ }
+ async function sendComment(uid){
+  if(busy||!active()||commentDrafts.has(uid))return;
+  const note=comments.find(c=>Number(c.tg_id)===uid),delivery=(plan.comment_deliveries||[]).find(d=>Number(d.tg_id)===uid&&Number(d.version)===Number(note?.version));
+  const uncertain=delivery&&['unknown','pending'].includes(delivery.status);
+  if(uncertain&&!window.confirm('Доставка комментария не подтверждена. Проверьте чат кассы. Отправить комментарий повторно, если его там нет?'))return;
+  busy=true;root.querySelectorAll('button,input,textarea').forEach(e=>e.disabled=true);
+  qs('[data-allocation-status]',root).textContent='Отправляем комментарий в чат кассы…';
+  try{
+   plan=await api('/api/gbu-cash-allocation/'+encodeURIComponent(plan.plan_id)+'/send',{method:'POST',body:JSON.stringify({tg_id:uid,comment_only:true,missing_checked:!!uncertain})});
+   if(active()){busy=false;redraw();qs('[data-allocation-status]',root).textContent=gbuAllocationCommentDeliveryLabel(plan,comments,uid)}
+  }catch(e){if(active()){busy=false;redraw();qs('[data-allocation-status]',root).textContent=e.message}}
  }
  async function saveComment(uid,remove){
   const draft=commentDrafts.get(uid);if(busy||!active()||!draft)return;busy=true;
@@ -19546,6 +19622,21 @@ async function openGbuCashAllocation(month,period){
    }catch(e){/* Keep the last confirmed view until the connection returns. */}
   }
   if(active())setTimeout(poll,7000);
+ }
+ async function resend(uid){
+  if(busy||!active())return;
+  const cashier=plan.cashiers.find(c=>Number(c.tg_id)===uid);
+  if(!cashier||!window.confirm('Проверьте группу кассы: '+cashier.name+'. Недоставленных частей поручения там точно нет? Они будут отправлены повторно. Назначения и отметки выплат сохранятся.'))return;
+  busy=true;root.querySelectorAll('button,input,textarea').forEach(e=>e.disabled=true);
+  qs('[data-allocation-status]',root).textContent='Отправляем недоставленные части поручения…';
+  try{
+   plan=await api('/api/gbu-cash-allocation/'+encodeURIComponent(plan.plan_id)+'/send',{method:'POST',body:JSON.stringify({tg_id:uid,missing_checked:true})});
+   if(active()){busy=false;redraw();qs('[data-allocation-status]',root).textContent=gbuAllocationDeliveryLabel(plan,uid)}
+  }catch(e){
+   if(!active())return;const message=e.message;
+   try{const latest=await api('/api/gbu-cash-allocation?month='+encodeURIComponent(month)+'&half='+half,{cache:'no-store'});if(active())plan=latest}catch(ignore){}
+   if(active()){busy=false;redraw();qs('[data-allocation-status]',root).textContent=message}
+  }
  }
  async function send(){
   if(busy||!active())return;busy=true;qs('[data-allocation-send]',root).disabled=true;
@@ -19973,3 +20064,68 @@ function gbuAllocationCardCommentHtml(comments,uid,drafts){
  (draft?`<label><span class="allocation-info">Комментарий к карточке</span><textarea maxlength="2000" data-allocation-comment-text="${uid}" placeholder="Введите комментарий">${esc(draft.text)}</textarea></label><div class="allocation-comment-actions"><button type="button" class="primary" data-allocation-comment-save="${uid}">Сохранить</button>${saved?.text?`<button type="button" class="secondary" data-allocation-comment-delete="${uid}">Удалить</button>`:''}</div><p class="allocation-comment-error" role="status">${esc(draft.error||'')}</p>`:'')+'</div>';
 }
 </script></body>''',1)
+
+
+async def gbu_allocation_send_card_comment(db, row, plan, cashier, chat_id, recover=False):
+    dispatch_day_lock(db, row.salary_start)
+    db.expire_all()
+    uid = int(cashier['tg_id'])
+    note = db.get(GbuCashAllocationComment, (row.salary_start, uid))
+    if note is None or not note.text.strip():
+        return
+    expected = len(gbu_allocation_messages(plan, cashier))
+    sent = {d.part: d for d in db.scalars(select(GbuCashAllocationDelivery).where(
+        GbuCashAllocationDelivery.plan_id == row.plan_id,
+        GbuCashAllocationDelivery.tg_id == uid))}
+    if not all(i in sent and sent[i].status == 'sent' and sent[i].chat_id == chat_id
+               for i in range(1, expected+1)):
+        return  # A comment must not substitute for a missing payment list.
+    key = (row.plan_id, uid, -note.version)
+    delivery = db.get(GbuCashAllocationDelivery, key)
+    if delivery:
+        if delivery.chat_id != chat_id:
+            raise HTTPException(409, 'Группа кассы изменилась. Проверьте исходную группу бригадира.')
+        if delivery.status == 'sent':
+            return
+        if delivery.status == 'pending' and datetime.utcnow()-delivery.updated_at < timedelta(minutes=5):
+            return
+        if delivery.status in ('pending', 'unknown') and not recover:
+            return
+    else:
+        delivery = GbuCashAllocationDelivery(plan_id=row.plan_id, tg_id=uid, part=-note.version)
+        db.add(delivery)
+    salary = f"{date.fromisoformat(plan['salary_start']):%d.%m.%Y}–{date.fromisoformat(plan['salary_end']):%d.%m.%Y}"
+    message = (f'💬 <b>Комментарий к распределению кассы · ЛЕГИОН</b>\nЗарплата: {salary}\n'
+               f"{escape(cashier['name'])}\n\n{escape(note.text)}")
+    delivery.chat_id = chat_id
+    delivery.status = 'pending'
+    delivery.updated_at = claimed_at = datetime.utcnow()
+    db.commit()
+    status = await gbu_allocation_deliver_message(chat_id, message)
+    db.expire_all()
+    delivery = db.get(GbuCashAllocationDelivery, key)
+    if delivery.status == 'pending' and delivery.updated_at == claimed_at:
+        delivery.status = status
+        delivery.updated_at = datetime.utcnow()
+        db.commit()
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<script>
+function gbuAllocationCommentDeliveryLabel(plan,comments,uid){
+ const note=comments.find(c=>Number(c.tg_id)===Number(uid));
+ const delivery=(plan.comment_deliveries||[]).find(d=>Number(d.tg_id)===Number(uid)&&Number(d.version)===Number(note?.version));
+ if(delivery?.status==='sent')return 'Комментарий отправлен в чат кассы';
+ if(delivery&&['unknown','pending'].includes(delivery.status))return 'Доставка комментария не подтверждена. Проверьте чат кассы перед повторной отправкой.';
+ return 'Комментарий ещё не отправлен в чат кассы';
+}
+function gbuAllocationCommentSendHtml(plan,comments,uid){
+ const note=comments.find(c=>Number(c.tg_id)===Number(uid));
+ if(!note?.text?.trim())return '';
+ if(!plan.locked)return '<p class="allocation-info">Комментарий будет отправлен вместе с поручением.</p>';
+ const rows=(plan.deliveries||[]).filter(d=>Number(d.tg_id)===Number(uid));
+ const cashier=plan.cashiers.find(c=>Number(c.tg_id)===Number(uid));
+ const listSent=rows.filter(d=>Number(d.part)<Number(cashier?.delivery_parts_expected)).length===Number(cashier?.delivery_parts_expected)-1&&rows.filter(d=>Number(d.part)<Number(cashier?.delivery_parts_expected)).every(d=>d.status==='sent');
+ const label=gbuAllocationCommentDeliveryLabel(plan,comments,uid);
+ return '<p class="allocation-info">'+esc(label)+'</p>'+(listSent&&label!=='Комментарий отправлен в чат кассы'?`<button type="button" class="secondary" data-allocation-comment-send="${Number(uid)}">Отправить комментарий</button>`:'');
+}
+</script></body>''', 1)
