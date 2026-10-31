@@ -19493,6 +19493,11 @@ def _gbu_cash_allocation_html(html):
 #gbuAllocation .allocation-warn{color:var(--gold2);font-size:12px}
 #gbuAllocation [data-allocation-send]{width:100%;min-height:44px;margin:10px 0}
 #gbuAllocation [data-allocation-status]{white-space:pre-line;font-size:13px}
+#gbuAllocation .allocation-group-settings{margin:10px 0;padding:10px;border:1px solid var(--line);border-radius:12px;min-width:0}
+#gbuAllocation .allocation-group-settings label{display:block;margin:10px 0;font-size:13px}
+#gbuAllocation .allocation-group-settings input,#gbuAllocation .allocation-group-settings select{display:block;width:100%;min-width:0;max-width:100%;margin-top:6px;padding:10px;font-size:16px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text)}
+#gbuAllocation .allocation-group-actions{display:flex;flex-wrap:wrap;gap:8px}
+
 </style><script>
 function addGbuCashAllocationButton(body,month,period){
  if(state.bootstrap?.is_owner!==true)return;
@@ -19540,17 +19545,39 @@ async function openGbuCashAllocation(month,period){
   };
   qs('[data-owner-group]',root).onclick=async()=>{
    if(busy)return;busy=true;
+   const panel=document.createElement('div');panel.className='allocation-group-settings';
+   panel.innerHTML='<h4>Группа выплат</h4><p class="allocation-info">Создайте группу и добавьте бота администратором с правом приглашения.</p><p data-group-status role="status">Загрузка групп…</p><button type="button" class="secondary" data-group-cancel>Отмена</button>';
+   qs('[data-owner-group]',root).after(panel);
+   let saving=false;
+   const close=()=>{if(saving)return;panel.querySelector('input')?.blur();panel.remove();busy=false};
+   qs('[data-group-cancel]',panel).onclick=close;
+   panel.scrollIntoView({block:'nearest'});
    try{
     const cfg=await api('/api/gbu-owner-payment-group',{cache:'no-store'});
-    if(!active())return;
-    const known=(cfg.known_chats||[]).map(c=>c.title+' — '+c.chat_id).join('\n');
-    const id=window.prompt('Создайте группу «ЛЕГИОН · Выплаты Ивана» и добавьте бота администратором с правом приглашения.\nУкажите ID группы. Доступные боту группы:\n'+known,cfg.chat_id||'');
-    if(id===null)return;
-    if(!/^-\d+$/.test(id.trim()))throw Error('Нужен отрицательный числовой ID группы');
-    const saved=await api('/api/gbu-owner-payment-group',{method:'POST',body:JSON.stringify({chat_id:Number(id.trim())})});
-    if(active())qs('[data-allocation-status]',root).textContent='Подключена группа: '+saved.title;
-   }catch(e){if(active())qs('[data-allocation-status]',root).textContent=e.message}
-   finally{busy=false}
+    if(!active()||!panel.isConnected)return;
+    const known=(cfg.known_chats||[]).filter(c=>Number.isSafeInteger(Number(c.chat_id))&&Number(c.chat_id)<0);
+    panel.innerHTML=`<h4>Группа выплат</h4><p class="allocation-info">Создайте группу и добавьте бота администратором с правом приглашения.</p><form data-group-form>
+     <label>Выберите известную боту группу<select data-group-select><option value="">Указать ID вручную</option>${known.map(c=>`<option value="${Number(c.chat_id)}" ${Number(c.chat_id)===Number(cfg.chat_id)?'selected':''}>${esc(c.title)} · ${Number(c.chat_id)}</option>`).join('')}</select></label>
+     <label>ID группы<input data-group-id type="text" inputmode="text" autocomplete="off" placeholder="Например: -1001234567890" value="${cfg.chat_id?Number(cfg.chat_id):''}" required></label>
+     <p data-group-status class="allocation-info" role="status">${cfg.title?'Сейчас подключена: '+esc(cfg.title):'Выберите группу или введите её отрицательный ID.'}</p>
+     <div class="allocation-group-actions"><button type="submit" class="primary">Сохранить</button><button type="button" class="secondary" data-group-cancel>Отмена</button></div></form>`;
+    const input=qs('[data-group-id]',panel),select=qs('[data-group-select]',panel),status=qs('[data-group-status]',panel);
+    qs('[data-group-cancel]',panel).onclick=close;
+    select.onchange=()=>{input.value=select.value};
+    input.oninput=()=>{select.value=known.some(c=>String(c.chat_id)===input.value.trim())?input.value.trim():''};
+    qs('[data-group-form]',panel).onsubmit=async event=>{
+     event.preventDefault();if(saving)return;
+     const id=input.value.trim();
+     if(!/^-\d+$/.test(id)||!Number.isSafeInteger(Number(id))||Number(id)>=0){status.textContent='Укажите отрицательный числовой ID группы';return}
+     saving=true;input.blur();panel.querySelectorAll('button,input,select').forEach(e=>e.disabled=true);status.textContent='Проверяем права бота и сохраняем…';
+     try{
+      const saved=await api('/api/gbu-owner-payment-group',{method:'POST',body:JSON.stringify({chat_id:Number(id)})});
+      if(active()&&panel.isConnected){saving=false;close();qs('[data-allocation-status]',root).textContent='Подключена группа: '+saved.title;toast('Группа выплат подключена')}
+     }catch(e){if(active()&&panel.isConnected)status.textContent=e.message}
+     finally{saving=false;if(panel.isConnected)panel.querySelectorAll('button,input,select').forEach(e=>e.disabled=false)}
+    };
+   }catch(e){if(active()&&panel.isConnected)qs('[data-group-status]',panel).textContent=e.message}
+   finally{if(!panel.isConnected)busy=false}
   };
   qs('[data-owner-invite]',root).onclick=async()=>{
    if(busy||!plan.locked)return;
