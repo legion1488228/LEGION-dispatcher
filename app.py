@@ -19046,3 +19046,27 @@ def _gbu_payroll_report_period_top_html(html):
 
 
 INLINE_INDEX_HTML = _gbu_payroll_report_period_top_html(INLINE_INDEX_HTML)
+
+
+def _gbu_payroll_report_toolbar_html(html):
+    old="<p class=\"muted\">${esc(monthLabel)} · ${period==='first'?'1–15':'16–'+end}</p>"
+    new="<p class=\"gbu-payroll-report-period\"><strong>${period==='first'?'1–15':'16–'+end} ${esc(new Intl.DateTimeFormat('ru-RU',{month:'long',timeZone:'UTC'}).format(new Date(month+'-01T12:00:00Z')))}</strong></p>"
+    if html.count(old)!=1:
+        raise RuntimeError('Payroll compact period anchor missing')
+    html=html.replace(old,new,1)
+    old="const heading=report.querySelector('.gbu-payroll-person-report h3');heading.after(box);"
+    new="const periodLabel=report.querySelector('.gbu-payroll-report-period');periodLabel.before(box);"
+    if html.count(old)!=1:
+        raise RuntimeError('Payroll comment placement anchor missing')
+    html=html.replace(old,new,1)
+    return html.replace('</head>',r'''<style>
+.gbu-payroll-report-topline{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:7px}
+.gbu-payroll-report-topline>[data-payroll-back]{grid-column:1;grid-row:1}
+.gbu-payroll-report-topline>.gbu-payroll-report-period{grid-column:3;grid-row:1;color:var(--text);font-weight:700;font-size:12px}
+.gbu-payroll-report-topline>.gbu-payroll-comment{display:contents}
+.gbu-payroll-report-topline>.gbu-payroll-comment>[data-comment-toggle]{grid-column:2;grid-row:1;justify-self:start;min-width:0;max-width:100%;padding:6px;font-size:11px;overflow-wrap:anywhere}
+.gbu-payroll-report-topline>.gbu-payroll-comment>:not([data-comment-toggle]){grid-column:1/-1;min-width:0;margin:0}
+</style></head>''',1)
+
+
+INLINE_INDEX_HTML = _gbu_payroll_report_toolbar_html(INLINE_INDEX_HTML)
