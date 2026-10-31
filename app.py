@@ -1317,6 +1317,7 @@ def gbu_payroll_cards(db, month):
 
 @app.get('/api/gbu-staff-payroll')
 def gbu_staff_payroll(month: str, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    _require_gbu_payroll_owner(db, user)
     if not _dispatcher_access(db,user.id):
         raise HTTPException(403,'Доступ только диспетчеру')
     if not re.fullmatch(r'[1-9]\d{3}-(0[1-9]|1[0-2])',month):
@@ -16910,6 +16911,7 @@ class GbuPayrollCommentInput(BaseModel):
 @app.put('/api/gbu-staff-payroll/comments/{employee_id}')
 def save_gbu_payroll_comment(employee_id: int, data: GbuPayrollCommentInput,
         db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    _require_gbu_payroll_owner(db, user)
     if not _dispatcher_access(db, user.id):
         raise HTTPException(403, 'Доступ только диспетчеру')
     if not db.get(Employee, employee_id):
@@ -18289,6 +18291,7 @@ class GbuRecoverySelection(BaseModel):
 
 @app.get('/api/gbu-staff-payroll/recovery-oct2026')
 def gbu_recovery_preview(db: Session=Depends(get_db),user: TelegramUser=Depends(require_admin)):
+    _require_gbu_payroll_owner(db, user)
     people=list(db.scalars(select(Employee).where(_visible_employee()).order_by(Employee.full_name,Employee.id)))
     return {'orders':[{'date':d,'surname':n,'category':c,'names':names,
         'saved':db.get(GbuPayrollRoster,gbu_recovery_key(i)) is not None}
@@ -18302,6 +18305,7 @@ def gbu_recovery_preview(db: Session=Depends(get_db),user: TelegramUser=Depends(
 @app.post('/api/gbu-staff-payroll/recovery-oct2026')
 def gbu_recovery_apply(data:GbuRecoverySelection,db:Session=Depends(get_db),user:TelegramUser=Depends(require_admin)):
     # A transaction and the existing day lock serialize retries across workers.
+    _require_gbu_payroll_owner(db, user)
     dispatch_day_lock(db,date(2026,10,1))
     prepared=[];skipped=0
     for i,((day,surname,category,names),ids) in enumerate(zip(GBU_OCT_RECOVERY,data.crews)):
@@ -18400,6 +18404,7 @@ GBU_OCT2_PHOTOS = {'Добранова': ['data:image/jpeg;base64,/9j/4AAQSkZJRg
 
 @app.post('/api/gbu-staff-payroll/recover-oct2-photos')
 def recover_gbu_oct2_photos(db:Session=Depends(get_db),user:TelegramUser=Depends(require_admin)):
+    _require_gbu_payroll_owner(db, user)
     if cabinet_kind(db,user.id) not in {'owner','assistant'}:
         raise HTTPException(403,'Восстановление доступно владельцу и помощникам')
     day=date(2026,10,2)
@@ -18976,3 +18981,29 @@ def _cash_reconciliation_required_today_html(html):
 
 
 INLINE_INDEX_HTML = _cash_reconciliation_required_today_html(INLINE_INDEX_HTML)
+
+
+# Temporarily keep payroll figures private to the owner. Roster editing in
+# order cards remains available to dispatch assistants.
+def _require_gbu_payroll_owner(db, user):
+    if not _is_owner(db, user.id):
+        raise HTTPException(403, 'Зарплата ГБУ временно доступна только владельцу')
+
+
+def _gbu_payroll_owner_only_clean_html(html):
+    old="  if(month==='2026-10'&&period==='first')addGbuRecoveryButton(body,month,period);"
+    if html.count(old)!=1:
+        raise RuntimeError('Payroll recovery buttons anchor missing')
+    html=html.replace(old,'',1)
+    old="payroll.hidden=!canEdit;payroll.onclick=()=>openGbuPayroll();"
+    if html.count(old)!=1:
+        raise RuntimeError('Payroll visibility anchor missing')
+    html=html.replace(old,"payroll.hidden=state.bootstrap?.is_owner!==true;payroll.onclick=()=>openGbuPayroll();",1)
+    old='async function openGbuPayroll('
+    start=html.index(old);opening=html.index('{',start)
+    # Arguments have defaults but no object literal in this function signature.
+    html=html[:opening+1]+"\n if(state.bootstrap?.is_owner!==true){toast('Зарплата ГБУ временно доступна только владельцу');return}\n"+html[opening+1:]
+    return html
+
+
+INLINE_INDEX_HTML = _gbu_payroll_owner_only_clean_html(INLINE_INDEX_HTML)
