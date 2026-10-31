@@ -4406,7 +4406,9 @@ async def send_cash_reminder(month: str | None = None, half: int = 0,
             delivered = await send_telegram_message(chat_id,
                 f'🔔 Напоминание о сверке кассы\nПериод: {periods}\n\n'
                 'Вы ещё не подтвердили сверку за этот период. '
-                'Откройте «Касса» в личном кабинете и нажмите кнопку сверки кассы.')
+                'Если вы ещё не выставили кассу за сегодня, сначала выставите её, '
+                'а затем нажимайте кнопку сверки.\n\n'
+                'Кнопка сверки кассы находится в разделе «Касса» в личном кабинете.')
             outcome = 'sent' if delivered else 'failed'
         except Exception as exc:
             # An explicit Telegram 4xx response rejected the send. A timeout or
@@ -8132,6 +8134,7 @@ def cabinet_command_create(data: CabinetCommandInput, db: Session = Depends(get_
         if data.card_id is not None:
             raise HTTPException(422, 'Подсчёт относится к периоду, а не к заказу')
         payload['values'] = period.model_dump()
+        require_cash_reconciliation_ready(db, user.id, period.month, period.half)
         # Serialize submissions per account; double taps/reopened forms reuse a job.
         db.scalar(select(Employee).where(Employee.tg_id == user.id).with_for_update().limit(1))
         recent = db.scalars(select(CabinetCommand).where(CabinetCommand.tg_id == user.id,
@@ -8651,6 +8654,7 @@ def cabinet_finance(on_date: date, db: Session = Depends(get_db), user: Telegram
             'allowance': sum(r['allowance'] for r in period_days), 'total': sum(r['total'] for r in period_days), 'cash': sum(r['cash'] for r in period_cash),
             'kickback': sum(r['kickback'] for r in period_cash), 'orders': sum(r['orders'] for r in period_cash)})
     return JSONResponse({'user_id': user.id, 'start': start.isoformat(), 'end': end.isoformat(),
+        'cash_reconciliation_check': cabinet_cash_reconciliation_check(db, user.id),
         'has_allowance': has_allowance, 'days': days, 'cash_entries': entries, 'cash_days': list(cash_days.values()), 'period_totals': period_totals,
         'totals': {'salary': sum(r['salary'] or 0 for r in days), 'tea': sum(r['tea'] or 0 for r in days),
             'allowance': sum(r['allowance'] for r in days), 'total': sum(r['total'] for r in days), 'cash': sum(r['cash'] for r in entries),
@@ -8675,6 +8679,7 @@ def cabinet_cash_summary_data(request_id: str, db: Session = Depends(get_db)):
         if not grant or payload.get('access_version') != grant.version:
             raise HTTPException(403, 'Доступ изменён')
     period = CabinetCashSummaryPeriod(**payload['values'])
+    require_cash_reconciliation_ready(db, uid, period.month, period.half)
     # Reuse the cabinet calculation, including source-qualified historical rows.
     finance = json.loads(cabinet_finance(date.fromisoformat(period.month+'-01'), db,
         TelegramUser(id=uid, first_name='')).body)
@@ -18821,3 +18826,153 @@ function gbuPayrollCardGroups(data){
 
 
 INLINE_INDEX_HTML = _gbu_payroll_single_employee_card_html(INLINE_INDEX_HTML)
+
+
+def _crew_second_order_first_tap_html(html: str) -> str:
+    """Prevent keyboard blur from moving second-order buttons before their click."""
+    start = html.index('function installPhotoCrewKeyboard(dialog,host){')
+    end = html.index('\n</script>', start)
+    part = html[start:end]
+    old = "if(searchFocus&&event.target.matches('input[type=checkbox],input[type=radio]'))event.preventDefault();"
+    new = "if(searchFocus&&event.target.closest('input[type=checkbox],input[type=radio],[data-crew-second],[data-plan-second]'))event.preventDefault();"
+    if part.count(old) != 1:
+        raise RuntimeError('Crew keyboard pointer anchor missing')
+    part = part.replace(old, new, 1)
+    part = part.replace("host.addEventListener('pointerdown',down);", "host.addEventListener('pointerdown',down);host.addEventListener('mousedown',down);", 1)
+    part = part.replace("host.removeEventListener('pointerdown',down);", "host.removeEventListener('pointerdown',down);host.removeEventListener('mousedown',down);", 1)
+    html = html[:start] + part + html[end:]
+    start = html.index('async function openGbuOrderRoster(')
+    end = html.index('async function openGbuPayrollRoster(', start)
+    part = html[start:end]
+    old = "   error.textContent='';update();\n  });\n  form.querySelectorAll('[data-crew-name]')"
+    new = "   error.textContent='';update();if(box?.checked&&search.value){search.value='';filterCrew()}\n  });\n  form.querySelectorAll('[data-crew-name]')"
+    if part.count(old) != 1:
+        raise RuntimeError('Second-order selection search anchor missing')
+    return html[:start] + part.replace(old, new, 1) + html[end:]
+
+
+INLINE_INDEX_HTML = _crew_second_order_first_tap_html(INLINE_INDEX_HTML)
+
+
+
+def _cash_unrecorded_cards(cards, saved_event_ids, legacy_rows, specs):
+    """A saved row covers one order; zero commission is still a saved cash entry."""
+    remaining = [card for card in cards if card.id not in saved_event_ids]
+    normalize = lambda value: ' '.join(str(value or '').casefold().replace('ё', 'е').split())
+    # Native bot cash has no card id. Match its date/account in the caller,
+    # then category/size and, when recorded, the exact deceased surname.
+    named, unnamed = [], []
+    for row in legacy_rows:
+        note = str(row.notes or '').strip()
+        match = re.fullmatch(r'ум\s*:\s*(.+)', note, re.I)
+        if match:
+            named.append((row, normalize(match[1])))
+        elif not note:
+            unnamed.append((row, None))
+    for row, surname in named + unnamed:
+        for card in remaining:
+            spec = specs.get(card.id) or {}
+            if (spec.get('category') == row.category and spec.get('team_size') == row.team_size
+                    and (surname is None or normalize(card.surname) == surname)):
+                remaining.remove(card)
+                break
+    return remaining
+
+
+def cabinet_cash_reconciliation_check(db, uid, month=None, half=None):
+    today = datetime.now(MOSCOW).date()
+    result = {'work_date': today.isoformat(), 'blocked': False, 'missing_orders': [], 'message': ''}
+    if month is not None:
+        start, end = cash_reconciliation_period(month, half)
+        # Past-period reconciliation does not depend on another period's orders.
+        if not start <= today <= end:
+            return result
+    cards = list(db.scalars(select(NumberCardEvent).where(
+        NumberCardEvent.tg_id == uid, NumberCardEvent.work_date == today,
+        NumberCardEvent.source == 'private', _visible_number_card()).order_by(NumberCardEvent.id)))
+    if not cards:
+        return result
+    saved = set(db.scalars(select(CabinetOrderCash.event_id).where(
+        CabinetOrderCash.tg_id == uid, CabinetOrderCash.work_date == today)))
+    legacy = list(db.scalars(select(CashEntry).where(
+        CashEntry.brigadier_tg_id == uid, CashEntry.work_date == today)))
+    specs = {card.id: cabinet_assigned_spec(db, card) for card in cards if card.id not in saved} if legacy else {}
+    missing = _cash_unrecorded_cards(cards, saved, legacy, specs)
+    result['missing_orders'] = [{'card_id': card.id, 'surname': str(card.surname or 'Без фамилии')}
+                                for card in missing]
+    if missing:
+        names = ', '.join(item['surname'] for item in result['missing_orders'])
+        result['blocked'] = True
+        result['message'] = (f'Сначала выставите кассу за сегодня ({today:%d.%m}) по заказам: {names}. '
+                             'Затем нажмите кнопку сверки кассы.')
+    return result
+
+
+def require_cash_reconciliation_ready(db, uid, month, half):
+    check = cabinet_cash_reconciliation_check(db, uid, month, half)
+    if check['blocked']:
+        raise HTTPException(409, check['message'])
+    return check
+
+
+@app.get('/api/owner/brigadier-cabinet/cash-reconciliation-check')
+def cabinet_cash_reconciliation_status(month: str, half: int,
+        db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    cabinet_finance_access(db, user.id)
+    if not cabinet_can_cash(db, user.id):
+        raise HTTPException(403, 'В вашем кабинете ведение кассы отключено')
+    return JSONResponse(cabinet_cash_reconciliation_check(db, user.id, month, half),
+                        headers={'Cache-Control': 'private, no-store'})
+
+
+def _cash_reconciliation_required_today_html(html):
+    start = html.index('function bindCabinetCashSummary(panel,data,active,tab){')
+    end = html.index('\n</script>', start)
+    part = html[start:end]
+    old = " let busy=false;\n qsa('[data-summary-half]',picker).forEach(button=>button.onclick=async()=>{"
+    new = r""" let busy=false;
+ const periodBlocked=half=>{
+  const check=data.cash_reconciliation_check;
+  if(!check?.blocked||check.work_date?.slice(0,7)!==data.start.slice(0,7))return false;
+  return (Number(check.work_date.slice(8))<=15?1:2)===half;
+ };
+ let notice=qs('.cabinet-summary-cash-required',heading);
+ if(!notice){notice=document.createElement('p');notice.className='cabinet-summary-cash-required';notice.setAttribute('role','status');heading.append(notice)}
+ notice.textContent=data.cash_reconciliation_check?.message||'';
+ notice.hidden=tab!=='cash'||!qsa('[data-summary-half]',picker).some(b=>periodBlocked(Number(b.dataset.summaryHalf)));
+ const updateButtons=()=>qsa('[data-summary-half]',picker).forEach(b=>{
+  const blocked=periodBlocked(Number(b.dataset.summaryHalf));b.disabled=busy||blocked;
+  b.title=blocked?data.cash_reconciliation_check.message:'';
+ });
+ updateButtons();
+ trigger.onclick=async()=>{
+  const open=picker.hidden;toggle(open);if(!open)return;
+  status.textContent=notice.hidden?'Выберите период для отправки':notice.textContent;
+  busy=true;updateButtons();
+  try{
+   const day=data.cash_reconciliation_check?.work_date;
+   const half=day&&day.slice(0,7)===data.start.slice(0,7)&&Number(day.slice(8))>15?2:1;
+   const check=await api('/api/owner/brigadier-cabinet/cash-reconciliation-check?month='+encodeURIComponent(data.start.slice(0,7))+'&half='+half,{cache:'no-store'});
+   if(!active())return;data.cash_reconciliation_check=check;notice.textContent=check.message||'';notice.hidden=tab!=='cash'||!check.blocked;
+   status.textContent=check.blocked?check.message:'Выберите период для отправки';
+  }catch(error){if(active())status.textContent=error.message}
+  finally{busy=false;if(active())updateButtons()}
+ };
+ qsa('[data-summary-half]',picker).forEach(button=>button.onclick=async()=>{
+  if(periodBlocked(Number(button.dataset.summaryHalf)))return;"""
+    if part.count(old) != 1:
+        raise RuntimeError('Cash summary readiness UI anchor missing')
+    part = part.replace(old, new, 1)
+    old = "finally{busy=false;if(active())qsa('[data-summary-half]',picker).forEach(b=>b.disabled=false)}"
+    if part.count(old) != 1:
+        raise RuntimeError('Cash summary readiness cleanup anchor missing')
+    part = part.replace(old, "finally{busy=false;if(active())updateButtons()}", 1)
+    html = html[:start] + part + html[end:]
+    return html.replace('</head>', r'''<style>
+#cabinetFinance .cabinet-finance-summary-heading{flex-wrap:wrap}
+#cabinetFinance .cabinet-summary-cash-required{flex:0 0 100%;margin:3px 0 8px;color:var(--gold);font-size:12px;line-height:1.4;white-space:normal}
+#cabinetFinance .cabinet-summary-cash-required[hidden]{display:none}
+</style></head>''', 1)
+
+
+INLINE_INDEX_HTML = _cash_reconciliation_required_today_html(INLINE_INDEX_HTML)
