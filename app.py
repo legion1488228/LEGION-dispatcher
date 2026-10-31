@@ -19528,8 +19528,8 @@ async function openGbuCashAllocation(month,period){
   ${plan.missing_count?`<p class="allocation-warn">Не заполнен состав: ${plan.missing_count}. Сначала завершите начисления.</p>`:''}
   ${plan.unverified?.length?`<p class="allocation-warn">Ещё не подтвердили сверку: ${esc(plan.unverified.join(', '))}. Проверь суммы перед отправкой.</p>`:''}
   ${plan.locked?'<p class="allocation-info">План зафиксирован. Повторное открытие сохраняет назначения. Поручение не означает, что деньги уже выплачены.</p>':''}
-  ${plan.cashiers.map(c=>`<section><h4>${esc(c.name)}${plan.allocation_rule==='smallest_first_height3_fallback_v3'?' · '+(c.height_cm?esc(c.height_cm)+' см':'рост не указан'):''}</h4>${line('Касса + откат',c.total)}${line('Оставить себе',c.own_salary)}${c.payments.map(p=>gbuAllocationRecipientHtml(p)).join('')||'<p class="allocation-info">Выплаты другим не назначены.</p>'}${line('Остаток к сдаче тебе',c.remaining)}<p class="allocation-info">${esc(gbuAllocationDeliveryLabel(plan,c.tg_id))}</p>${gbuAllocationResendHtml(plan,c)}${gbuAllocationCardCommentHtml(comments,c.tg_id,commentDrafts)}${gbuAllocationCommentSendHtml(plan,comments,c.tg_id)}${gbuAllocationPayoutStatus(plan,c.tg_id)}</section>`).join('')}
-  <section><h4>Мой список выплат · ${gbuAllocationMoney(plan.owner_due)}</h4>${gbuAllocationOwnerProgressHtml(plan)}<div class="allocation-owner-grid">${plan.owner_payments.map(p=>gbuAllocationOwnerRecipientHtml(p)).join('')||'<p>Доплат сотрудникам нет.</p>'}</div><button type="button" class="secondary" data-allocation-copy>Скопировать мой список</button>${gbuAllocationCardCommentHtml(comments,0,commentDrafts)}${plan.owner_due?gbuAllocationPayoutStatus(plan,0):''}</section>
+  ${plan.cashiers.map(c=>`<section class="allocation-cashier-card"><h4>${esc(c.name)}${plan.allocation_rule==='smallest_first_height3_fallback_v3'?' · '+(c.height_cm?esc(c.height_cm)+' см':'рост не указан'):''}</h4>${line('Касса + откат',c.total)}${line('Оставить себе',c.own_salary)}<div class="allocation-cashier-grid">${c.payments.map(p=>gbuAllocationRecipientHtml(p)).join('')||'<p class="allocation-info">Выплаты другим не назначены.</p>'}</div>${line('Остаток к сдаче тебе',c.remaining)}<p class="allocation-info">${esc(gbuAllocationDeliveryLabel(plan,c.tg_id))}</p>${gbuAllocationResendHtml(plan,c)}${gbuAllocationCardCommentHtml(comments,c.tg_id,commentDrafts)}${gbuAllocationCommentSendHtml(plan,comments,c.tg_id)}${gbuAllocationPayoutStatus(plan,c.tg_id)}</section>`).join('')}
+  <section><h4>Мой список выплат · ${gbuAllocationMoney(plan.owner_due)}</h4>${gbuAllocationOwnerProgressHtml(plan)}<div class="allocation-owner-grid">${plan.owner_payments.map(p=>gbuAllocationOwnerRecipientHtml(p)).join('')||'<p>Доплат сотрудникам нет.</p>'}</div><button type="button" class="secondary" data-allocation-copy>Скопировать мой список</button><button type="button" class="secondary" data-owner-invite ${!plan.locked?'disabled':''}>✈ Пригласить в группу</button><button type="button" class="secondary" data-owner-group>Настроить группу выплат</button><p class="allocation-info">Приглашения получат только сотрудники из вашего списка без отметки о выплате. Сначала подтвердите распределение. В группу они вступают сами.</p>${gbuAllocationCardCommentHtml(comments,0,commentDrafts)}${plan.owner_due?gbuAllocationPayoutStatus(plan,0):''}</section>
   ${plan.unspent_cash?`<p class="allocation-info">Не распределено у бригадиров: ${gbuAllocationMoney(plan.unspent_cash)}. Эти деньги нужно передать тебе.</p>`:''}
   ${plan.owner_surplus?`<p class="allocation-info">Останется после зарплаты: ${gbuAllocationMoney(plan.owner_surplus)}.</p>`:''}
   <p class="allocation-payout-total ${plan.all_payouts_confirmed?'paid':'unpaid'}" role="status">${plan.locked?(plan.all_payouts_confirmed?'Все выплаты подтверждены':'Есть неподтверждённые выплаты'):'План ещё не подтверждён'}</p><p data-allocation-status role="status" aria-live="polite"></p><button type="button" class="primary" data-allocation-send>${plan.locked?'Отправить неотправленные поручения':'Подтвердить план и отправить бригадирам'}</button>`;
@@ -19537,6 +19537,31 @@ async function openGbuCashAllocation(month,period){
   qs('[data-allocation-copy]',root).onclick=async()=>{
    const text='Зарплата '+gbuAllocationPeriod(plan.salary_start,plan.salary_end)+'\nМой список выплат:\n'+plan.owner_payments.map(p=>(p.paid?'✅ ':'☐ ')+p.name+' — '+cabinetMoney(p.amount)+' ₽'+(p.telegram_url?'\n'+p.telegram_url:'')+'\nТелефон: '+(p.phone||'не указан')).join('\n')+'\nИтого: '+cabinetMoney(plan.owner_due)+' ₽\nКасса у меня: '+cabinetMoney(plan.owner_cash)+' ₽\nДобавить своих: '+cabinetMoney(plan.owner_topup)+' ₽';
    try{await navigator.clipboard.writeText(text);toast('Список скопирован')}catch(e){qs('[data-allocation-status]',root).textContent=text}
+  };
+  qs('[data-owner-group]',root).onclick=async()=>{
+   if(busy)return;busy=true;
+   try{
+    const cfg=await api('/api/gbu-owner-payment-group',{cache:'no-store'});
+    if(!active())return;
+    const known=(cfg.known_chats||[]).map(c=>c.title+' — '+c.chat_id).join('\n');
+    const id=window.prompt('Создайте группу «ЛЕГИОН · Выплаты Ивана» и добавьте бота администратором с правом приглашения.\nУкажите ID группы. Доступные боту группы:\n'+known,cfg.chat_id||'');
+    if(id===null)return;
+    if(!/^-\d+$/.test(id.trim()))throw Error('Нужен отрицательный числовой ID группы');
+    const saved=await api('/api/gbu-owner-payment-group',{method:'POST',body:JSON.stringify({chat_id:Number(id.trim())})});
+    if(active())qs('[data-allocation-status]',root).textContent='Подключена группа: '+saved.title;
+   }catch(e){if(active())qs('[data-allocation-status]',root).textContent=e.message}
+   finally{busy=false}
+  };
+  qs('[data-owner-invite]',root).onclick=async()=>{
+   if(busy||!plan.locked)return;
+   if(!window.confirm('Отправить приглашение в группу всем ещё не рассчитанным сотрудникам из вашего списка? Уже отправленные приглашения повторяться не будут.'))return;
+   busy=true;root.querySelectorAll('button,input,textarea').forEach(e=>e.disabled=true);
+   qs('[data-allocation-status]',root).textContent='Рассылаем приглашения…';
+   try{
+    const r=await api('/api/gbu-cash-allocation/'+encodeURIComponent(plan.plan_id)+'/invite-owner-recipients',{method:'POST',body:'{}'});
+    if(active()){busy=false;redraw();qs('[data-allocation-status]',root).textContent='Группа: '+r.title+'. Отправлено: '+r.sent+'. Уже отправлено: '+r.already_sent+'. Не отправлено: '+r.failed+'. Доставка требует проверки: '+r.unknown+'. Нет привязки Telegram: '+r.missing+'.'+(r.details.length?'\n'+r.details.join('\n'):'')}
+   }catch(e){if(active()){busy=false;redraw();qs('[data-allocation-status]',root).textContent=e.message}}
+   finally{busy=false}
   };
   const button=qs('[data-allocation-send]',root),deliveries=plan.deliveries||[];
   const allSent=plan.locked&&plan.confirmation_buttons_sent&&deliveries.length>0&&deliveries.every(d=>d.status==='sent');
@@ -19981,14 +20006,16 @@ def gbu_cash_allocation_owner_payment(plan_id: str, data: GbuCashAllocationOwner
 
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>',r'''<style>
 #gbuAllocation .allocation-owner-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;margin:8px 0}
-#gbuAllocation .allocation-owner-payment{position:relative;min-width:0;padding:6px;border:1px solid var(--line);border-radius:6px}
+#gbuAllocation .allocation-owner-payment{position:relative;min-width:0;height:96px;box-sizing:border-box;padding:6px;border:1px solid var(--line);border-radius:6px}
 #gbuAllocation .allocation-owner-payment.is-paid{background:#e0f1e7}
-#gbuAllocation .allocation-owner-payment>.allocation-recipient{min-width:0;margin:0}
-#gbuAllocation .allocation-owner-payment .allocation-line{display:flex;flex-direction:column;gap:2px;margin:0 0 3px}
-#gbuAllocation .allocation-owner-payment .allocation-line>span{padding-right:28px;font-size:11px;line-height:1.2;min-height:0}
-#gbuAllocation .allocation-owner-payment .allocation-line>b{font-size:12px;line-height:1.2}
+#gbuAllocation .allocation-owner-payment>.allocation-recipient{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:minmax(0,1fr) 30px;gap:4px;min-width:0;height:100%;margin:0}
+#gbuAllocation .allocation-owner-payment .allocation-line{display:contents}
+#gbuAllocation .allocation-owner-payment .allocation-line>span{grid-column:1 / -1;grid-row:1;padding-right:0;font-size:11px;line-height:1.2;min-height:0;overflow-wrap:anywhere;overflow:auto}
+#gbuAllocation .allocation-owner-payment .allocation-line>b{grid-column:2;grid-row:2;align-self:center;justify-self:end;white-space:nowrap;font-size:12px;line-height:1.2}
+#gbuAllocation .allocation-owner-payment .allocation-contact-actions{grid-column:1;grid-row:2;align-self:center;gap:4px;margin:0}
+#gbuAllocation .allocation-owner-payment .allocation-contact-action{box-sizing:border-box;flex-basis:28px;width:28px;height:28px;min-height:28px;padding:4px}
 #gbuAllocation .allocation-owner-payment small{font-size:10px;line-height:1.25}
-#gbuAllocation .allocation-owner-check{position:absolute;top:0;right:0;display:flex;align-items:center;justify-content:center;width:34px;height:44px;cursor:pointer}
+#gbuAllocation .allocation-owner-check{position:absolute;top:30px;right:0;display:flex;align-items:center;justify-content:center;width:34px;height:24px;cursor:pointer}
 #gbuAllocation input[data-owner-payment]{width:20px;height:20px;min-width:20px;margin:0;padding:0;accent-color:#237453;cursor:pointer}
 #gbuAllocation .allocation-owner-progress{display:flex;flex-wrap:wrap;gap:6px 16px;margin:8px 0;font-size:13px}
 </style><script>
@@ -20145,3 +20172,159 @@ function gbuAllocationCommentSendHtml(plan,comments,uid){
  return '<p class="allocation-info">'+esc(label)+'</p>'+(listSent&&label!=='Комментарий отправлен в чат кассы'?`<button type="button" class="secondary" data-allocation-comment-send="${Number(uid)}">Отправить комментарий</button>`:'');
 }
 </script></body>''', 1)
+
+
+# Compact two-column recipients in every cashier allocation card.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style>
+#gbuAllocation .allocation-cashier-card{padding:8px;margin:8px 0;min-width:0}
+#gbuAllocation .allocation-cashier-card h4{font-size:14px;line-height:1.25;margin:0 0 5px;overflow-wrap:anywhere}
+#gbuAllocation .allocation-cashier-card>.allocation-line{font-size:12px;margin:4px 0}
+#gbuAllocation .allocation-cashier-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;margin:7px 0;align-items:start}
+#gbuAllocation .allocation-cashier-grid>.allocation-recipient{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:minmax(28px,auto) 26px;gap:4px;min-width:0;box-sizing:border-box;margin:0;padding:6px;border:1px solid var(--line);border-radius:6px;align-self:start}
+#gbuAllocation .allocation-cashier-grid .allocation-line{display:contents}
+#gbuAllocation .allocation-cashier-grid .allocation-line>span{grid-column:1 / -1;grid-row:1;font-size:11px;line-height:1.25;overflow-wrap:anywhere}
+#gbuAllocation .allocation-cashier-grid .allocation-line>b{grid-column:2;grid-row:2;align-self:center;justify-self:end;font-size:12px;line-height:1.2;white-space:nowrap}
+#gbuAllocation .allocation-cashier-grid .allocation-contact-actions{grid-column:1;grid-row:2;align-self:center;gap:3px;margin:0}
+#gbuAllocation .allocation-cashier-grid .allocation-contact-action{box-sizing:border-box;flex-basis:24px;width:24px;height:26px;min-height:26px;padding:3px;border-radius:6px}
+#gbuAllocation .allocation-cashier-grid .allocation-contact-action svg{width:16px;height:16px}
+#gbuAllocation .allocation-cashier-grid>.allocation-info{grid-column:1 / -1}
+#gbuAllocation .allocation-cashier-card>.allocation-info{font-size:11px;line-height:1.3;margin:6px 0}
+#gbuAllocation .allocation-cashier-card>button{width:auto;min-height:32px;padding:6px 10px;font-size:12px;margin-top:5px}
+#gbuAllocation .allocation-cashier-card .allocation-payout-state{font-size:12px;padding:6px 8px;margin:7px 0}
+</style></body>''', 1)
+
+
+# Owner payroll group and per-period invitations are independent of cashier chats.
+class GbuOwnerPaymentGroup(Base):
+    __tablename__ = 'gbu_owner_payment_groups'
+    owner_id = Column(BigInteger, primary_key=True)
+    chat_id = Column(BigInteger, nullable=False)
+    title = Column(String(512), nullable=False)
+    invite_link = Column(String(2048), nullable=False)
+
+
+class GbuOwnerPaymentInvite(Base):
+    __tablename__ = 'gbu_owner_payment_invites'
+    plan_id = Column(String(64), primary_key=True)
+    chat_id = Column(BigInteger, primary_key=True)
+    tg_id = Column(BigInteger, primary_key=True)
+    status = Column(String(20), nullable=False)
+
+
+class GbuOwnerPaymentGroupInput(BaseModel):
+    chat_id: StrictInt = Field(lt=0)
+
+
+@app.get('/api/gbu-owner-payment-group')
+def gbu_owner_payment_group(db: Session=Depends(get_db), user: TelegramUser=Depends(require_app_user)):
+    _require_gbu_payroll_owner(db, user)
+    cfg = db.get(GbuOwnerPaymentGroup, user.id)
+    snapshot = db.get(OwnerBotSnapshot, 1)
+    try:
+        payload = json.loads(snapshot.payload) if snapshot else {}
+        known = payload.get('known_chats', []) if payload.get('owner_id') == user.id else []
+    except (ValueError, TypeError):
+        known = []
+    return {'chat_id': cfg.chat_id if cfg else None, 'title': cfg.title if cfg else '', 'known_chats': known}
+
+
+async def gbu_owner_group_check(chat_id, user_id):
+    try:
+        chat = await free_staff_telegram_call('getChat', {'chat_id': chat_id})
+        me = await free_staff_telegram_call('getMe', {})
+        member = await free_staff_telegram_call('getChatMember', {'chat_id': chat_id, 'user_id': user_id})
+        bot = await free_staff_telegram_call('getChatMember', {'chat_id': chat_id, 'user_id': me['id']})
+    except Exception:
+        raise HTTPException(409, 'Не удалось проверить группу. Добавьте бота администратором и проверьте ID.')
+    if chat.get('type') not in ('group', 'supergroup') or member.get('status') not in ('creator', 'administrator'):
+        raise HTTPException(403, 'Вы должны быть администратором выбранной группы.')
+    if bot.get('status') != 'administrator' or not bot.get('can_invite_users'):
+        raise HTTPException(409, 'Дайте боту права администратора и право приглашать участников.')
+    return chat
+
+
+@app.post('/api/gbu-owner-payment-group')
+async def gbu_owner_payment_group_save(data: GbuOwnerPaymentGroupInput,
+        db: Session=Depends(get_db), user: TelegramUser=Depends(require_app_user)):
+    _require_gbu_payroll_owner(db, user)
+    chat = await gbu_owner_group_check(data.chat_id, user.id)
+    cfg = db.get(GbuOwnerPaymentGroup, user.id)
+    if not cfg or cfg.chat_id != data.chat_id:
+        try:
+            link = await free_staff_telegram_call('createChatInviteLink',
+                {'chat_id': data.chat_id, 'name': 'Выплаты Ивана'})
+        except Exception:
+            raise HTTPException(409, 'Не удалось создать приглашение. Проверьте права бота.')
+        if cfg is None:
+            cfg = GbuOwnerPaymentGroup(owner_id=user.id)
+            db.add(cfg)
+        cfg.chat_id = data.chat_id
+        cfg.invite_link = link['invite_link']
+    cfg.title = chat.get('title', 'Выплаты Ивана')
+    db.commit()
+    return {'chat_id': cfg.chat_id, 'title': cfg.title}
+
+
+@app.post('/api/gbu-cash-allocation/{plan_id}/invite-owner-recipients')
+async def gbu_owner_payment_invite_send(plan_id: str,
+        db: Session=Depends(get_db), user: TelegramUser=Depends(require_app_user)):
+    _require_gbu_payroll_owner(db, user)
+    row = db.scalar(select(GbuCashAllocation).where(GbuCashAllocation.plan_id == plan_id))
+    if not row or not row.locked:
+        raise HTTPException(409, 'Сначала подтвердите распределение выплат.')
+    cfg = db.get(GbuOwnerPaymentGroup, user.id)
+    if cfg is None:
+        raise HTTPException(409, 'Сначала нажмите «Настроить группу выплат».')
+    await gbu_owner_group_check(cfg.chat_id, user.id)
+    # Capture the destination once: settings changed during delivery cannot redirect a batch.
+    chat_id, title, link = cfg.chat_id, cfg.title, cfg.invite_link
+    plan = gbu_allocation_view(db, row)
+    recipients = [p for p in plan['owner_payments'] if not p['paid']]
+    result = dict(title=title, sent=0, already_sent=0, failed=0, unknown=0, missing=0, details=[])
+    seen = set()
+    for person in recipients:
+        profile = db.get(Employee, int(person['employee_id'])) if int(person['employee_id']) > 0 else None
+        tg_id = int(profile.tg_id or 0) if profile else 0
+        if tg_id <= 0:
+            result['missing'] += 1
+            result['details'].append(person['name']+': нет привязки Telegram')
+            continue
+        if tg_id in seen:
+            continue
+        seen.add(tg_id)
+        # Commit a claim before any external send. Concurrent requests and restarts
+        # treat pending delivery as uncertain and never send it again automatically.
+        dispatch_day_lock(db, row.salary_start)
+        db.refresh(row)
+        if row.plan_id != plan_id:
+            raise HTTPException(409, 'Распределение изменилось. Откройте его заново.')
+        current = gbu_allocation_view(db, row)
+        if not any(int(p['employee_id']) == int(person['employee_id']) and not p['paid'] for p in current['owner_payments']):
+            db.commit()
+            continue
+        key = (plan_id, chat_id, tg_id)
+        delivery = db.get(GbuOwnerPaymentInvite, key)
+        if delivery and delivery.status != 'failed':
+            field = 'already_sent' if delivery.status == 'sent' else 'unknown'
+            result[field] += 1
+            if field == 'unknown':
+                result['details'].append(person['name']+': доставка требует проверки, повтор не отправлен')
+            db.commit()
+            continue
+        if delivery is None:
+            delivery = GbuOwnerPaymentInvite(plan_id=plan_id, chat_id=chat_id, tg_id=tg_id)
+            db.add(delivery)
+        delivery.status = 'pending'
+        db.commit()
+        text = (f'💰 <b>ЛЕГИОН · Расчёт зарплаты</b>\n'
+                f"Период: {escape(plan['salary_start'])} — {escape(plan['salary_end'])}\n"
+                'Расчёт проводит Иван. Вступите в группу по кнопке ниже.\n'
+                'Это приглашение, а не подтверждение выплаты.')
+        status = await gbu_allocation_deliver_message(tg_id, text,
+            {'inline_keyboard': [[{'text': 'Вступить в группу выплат', 'url': link}]]})
+        delivery.status = status
+        db.commit()
+        result[status] += 1
+        if status != 'sent':
+            result['details'].append(person['name']+(': не отправлено — сотруднику нужно запустить бота и проверить блокировку' if status == 'failed' else ': доставка требует проверки, повтор не отправлен'))
+    return result
