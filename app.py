@@ -18756,3 +18756,39 @@ def _cash_pending_reminders_html(html: str) -> str:
 
 
 INLINE_INDEX_HTML = _cash_pending_reminders_html(INLINE_INDEX_HTML)
+
+
+def _crew_saved_return_to_cards_html(html: str) -> str:
+    """Close the photo card only after the crew API confirms success."""
+    start = html.index('async function openGbuOrderRoster(')
+    end = html.index('async function openGbuPayrollRoster(', start)
+    part = html[start:end]
+    old = 'markGbuCrewConfirmed(cardId);if(!dialog.open)return;dialog.close();'
+    new = "markGbuCrewConfirmed(cardId);if(photoHost){photoHost.dispatchEvent(new Event('crew-editor-saved'));return}if(!dialog.open)return;dialog.close();"
+    if part.count(old) != 1:
+        raise RuntimeError('GBU crew save navigation anchor missing')
+    html = html[:start] + part.replace(old, new, 1) + html[end:]
+    old = "if(photoHost)photoHost.dispatchEvent(new Event('crew-editor-close'));else{closeModal();await loadDispatchBoard()}"
+    new = "if(photoHost)photoHost.dispatchEvent(new Event('crew-editor-saved'));else{closeModal();await loadDispatchBoard()}"
+    if html.count(old) != 1:
+        raise RuntimeError('Dispatch crew save navigation anchor missing')
+    html = html.replace(old, new, 1)
+    start = html.index('function openPhotoCrewEditor(')
+    end = html.index('\n}', start)
+    part = html[start:end]
+    anchor = " host.addEventListener('crew-editor-close',finish);"
+    new = """ host.addEventListener('crew-editor-saved',async()=>{
+  if(finished)return;
+  dialog.close();finish();
+  try{
+   if(currentViewId()==='ownerBrigadeControlView')await loadOwnerBrigadeControl();
+   else if(currentViewId()==='controlView')await loadControl();
+  }catch(error){toast(error.message||'Состав сохранён. Обновите список карточек.')}
+ },{once:true});
+""" + anchor
+    if part.count(anchor) != 1:
+        raise RuntimeError('Photo crew saved event anchor missing')
+    return html[:start] + part.replace(anchor, new, 1) + html[end:]
+
+
+INLINE_INDEX_HTML = _crew_saved_return_to_cards_html(INLINE_INDEX_HTML)
