@@ -19630,6 +19630,12 @@ def _gbu_cash_allocation_html(html):
 #gbuAllocation .allocation-line>span{min-width:0;overflow-wrap:anywhere}
 #gbuAllocation .allocation-line b{white-space:nowrap}
 #gbuAllocation .allocation-info{font-size:12px;color:var(--muted);white-space:pre-line}
+#gbuAllocation .allocation-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:0;margin:6px 0 10px}
+#gbuAllocation .allocation-toolbar>[data-allocation-back]{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:auto;min-height:40px;margin:0;padding:8px 12px;font-size:13px;line-height:1.2;white-space:nowrap;border-radius:12px}
+#gbuAllocation .allocation-periods{flex:0 1 auto;min-width:0;margin:0;text-align:right;font-size:11px;line-height:1.5;color:var(--muted)}
+#gbuAllocation .allocation-periods>span{display:block;white-space:nowrap}
+@media(max-width:350px){#gbuAllocation .allocation-toolbar{gap:6px}#gbuAllocation .allocation-toolbar>[data-allocation-back]{font-size:12px;padding:8px}#gbuAllocation .allocation-periods{font-size:10px}}
+
 #gbuAllocation .allocation-warn{color:var(--gold2);font-size:12px}
 #gbuAllocation [data-allocation-send]{width:100%;min-height:44px;margin:10px 0}
 #gbuAllocation [data-allocation-status]{white-space:pre-line;font-size:13px}
@@ -19653,6 +19659,7 @@ function addGbuCashAllocationButton(body,month,period){
  b.onclick=()=>openGbuCashAllocation(month,period);const heading=qs('.gbu-payroll-total-row',body);heading?heading.after(b):body.prepend(b);
 }
 function gbuAllocationPeriod(start,end){return fmtDate(start)+' — '+fmtDate(end)}
+function gbuAllocationShortPeriod(start,end){const short=d=>String(d).slice(8,10)+'.'+String(d).slice(5,7);return short(start)+' — '+short(end)}
 function gbuAllocationMoney(amount){return esc(cabinetMoney(amount))+' ₽'}
 function gbuAllocationDeliveryLabel(plan,uid){
  const rows=(plan.deliveries||[]).filter(d=>Number(d.tg_id)===Number(uid));
@@ -19677,11 +19684,11 @@ async function openGbuCashAllocation(month,period){
  function draw(){
   const paidCashierIds=new Set((plan.payout_confirmations||[]).map(p=>Number(p.tg_id)));
   const sortedCashiers=[...plan.cashiers].sort((a,b)=>Number(paidCashierIds.has(Number(b.tg_id)))-Number(paidCashierIds.has(Number(a.tg_id))));
-  root.innerHTML=`<div data-allocation-overview ${selectedCashier!==null?'hidden':''}><button type="button" class="secondary" data-allocation-back>← К зарплате</button><p class="allocation-info">Зарплата: ${esc(gbuAllocationPeriod(plan.salary_start,plan.salary_end))}\nКасса: ${esc(gbuAllocationPeriod(plan.cash_start,plan.cash_end))}</p>
+  root.innerHTML=`<div data-allocation-overview ${selectedCashier!==null?'hidden':''}><div class="allocation-toolbar"><button type="button" class="secondary" data-allocation-back>← К зарплате</button><p class="allocation-periods"><span title="${esc(gbuAllocationPeriod(plan.salary_start,plan.salary_end))}">Зарплата: ${esc(gbuAllocationShortPeriod(plan.salary_start,plan.salary_end))}</span><span title="${esc(gbuAllocationPeriod(plan.cash_start,plan.cash_end))}">Касса: ${esc(gbuAllocationShortPeriod(plan.cash_start,plan.cash_end))}</span></p></div>
   <div class="allocation-summary">${summary('Начислено',plan.salary_total)}${summary('Касса с откатами',plan.cash_total)}<div><small>Из кассы уже у тебя${plan.owner_cash_manual?' · вручную':''}</small><b>${gbuAllocationMoney(plan.owner_cash)}</b><button type="button" class="secondary" data-owner-cash-edit>Изменить</button></div>${summary('Бригадиры выплатят, включая себе',plan.cashier_payouts)}${summary('Выплатить через тебя',plan.owner_due)}${summary('Добавить своих денег',plan.owner_topup)}<div class="allocation-owner-remaining" role="status"><small>Мне осталось выплатить</small><b>${gbuAllocationMoney(gbuAllocationOwnerRemaining(plan))}</b><small>Выплачено: ${gbuAllocationMoney(plan.owner_payments.filter(p=>p.paid===true).reduce((sum,p)=>sum+Number(p.amount),0))}</small></div></div>
   ${plan.missing_count?`<p class="allocation-warn">Не заполнен состав: ${plan.missing_count}. Сначала завершите начисления.</p>`:''}
   ${plan.unverified?.length?`<p class="allocation-warn">Ещё не подтвердили сверку: ${esc(plan.unverified.join(', '))}. Проверь суммы перед отправкой.</p>`:''}
-  <section><h4>Мой список выплат · ${gbuAllocationMoney(gbuAllocationOwnerRemaining(plan))}</h4>${gbuAllocationOwnerProgressHtml(plan)}${gbuOwnerMembersSummaryHtml(ownerMembers)}<div class="allocation-owner-grid">${plan.owner_payments.map((p,index)=>gbuAllocationOwnerRecipientHtml(p,index+1,ownerMembers?.items?.find(m=>Number(m.employee_id)===Number(p.employee_id)))).join('')||'<p>Доплат сотрудникам нет.</p>'}</div><button type="button" class="secondary" data-allocation-copy>Скопировать мой список</button><button type="button" class="secondary" data-owner-invite ${!plan.locked?'disabled':''}>✈ Пригласить в группу</button><button type="button" class="secondary" data-owner-group>Настроить группу выплат</button><p class="allocation-info">Приглашения получат только сотрудники из вашего списка без отметки о выплате. Сначала подтвердите распределение. В группу они вступают сами.</p>${gbuAllocationCardCommentHtml(comments,0,commentDrafts)}${plan.owner_due?gbuAllocationPayoutStatus(plan,0):''}</section>
+  <section><h4>Мой список выплат · ${gbuAllocationMoney(gbuAllocationOwnerRemaining(plan))}</h4>${gbuAllocationOwnerProgressHtml(plan)}${gbuOwnerMembersSummaryHtml(ownerMembers)}<div class="allocation-owner-grid">${plan.owner_payments.map((p,index)=>gbuAllocationOwnerRecipientHtml(p,index+1,ownerMembers?.items?.find(m=>Number(m.employee_id)===Number(p.employee_id)))).join('')||'<p>Доплат сотрудникам нет.</p>'}</div>${gbuAllocationCardCommentHtml(comments,0,commentDrafts)}${plan.owner_due?gbuAllocationPayoutStatus(plan,0):''}</section>
   <h4>Бригадиры</h4>
   <div class="allocation-cashier-list">${sortedCashiers.map(c=>{const paid=paidCashierIds.has(Number(c.tg_id));return `<button type="button" class="allocation-cashier-summary" data-allocation-cashier-open="${Number(c.tg_id)}"><span>${esc(c.name)}${c.height_cm?' · '+esc(c.height_cm):''}</span><small class="${paid?'paid':'unpaid'}">${paid?'Рассчитаны':'Не рассчитаны'}</small></button>`}).join('')}</div>
   ${plan.unspent_cash?`<p class="allocation-info">Не распределено у бригадиров: ${gbuAllocationMoney(plan.unspent_cash)}. Эти деньги нужно передать тебе.</p>`:''}
@@ -19725,57 +19732,6 @@ async function openGbuCashAllocation(month,period){
    overviewScroll.forEach(([e,y])=>e.scrollTop=y);
    qs('[data-allocation-cashier-open="'+uid+'"]',root)?.focus({preventScroll:true});
   }});
-  qs('[data-allocation-copy]',root).onclick=async()=>{
-   const text='Зарплата '+gbuAllocationPeriod(plan.salary_start,plan.salary_end)+'\nМой список выплат:\n'+plan.owner_payments.map(p=>(p.paid?'✅ ':'☐ ')+p.name+' — '+cabinetMoney(p.amount)+' ₽'+(p.telegram_url?'\n'+p.telegram_url:'')+'\nТелефон: '+(p.phone||'не указан')).join('\n')+'\nИтого: '+cabinetMoney(plan.owner_due)+' ₽\nКасса у меня: '+cabinetMoney(plan.owner_cash)+' ₽\nДобавить своих: '+cabinetMoney(plan.owner_topup)+' ₽';
-   try{await navigator.clipboard.writeText(text);toast('Список скопирован')}catch(e){qs('[data-allocation-status]',root).textContent=text}
-  };
-  qs('[data-owner-group]',root).onclick=async()=>{
-   if(busy)return;busy=true;
-   const panel=document.createElement('div');panel.className='allocation-group-settings';
-   panel.innerHTML='<h4>Группа выплат</h4><p class="allocation-info">Создайте группу и добавьте бота администратором с правом приглашения.</p><p data-group-status role="status">Загрузка групп…</p><button type="button" class="secondary" data-group-cancel>Отмена</button>';
-   qs('[data-owner-group]',root).after(panel);
-   let saving=false;
-   const close=()=>{if(saving)return;panel.querySelector('input')?.blur();panel.remove();busy=false};
-   qs('[data-group-cancel]',panel).onclick=close;
-   panel.scrollIntoView({block:'nearest'});
-   try{
-    const cfg=await api('/api/gbu-owner-payment-group',{cache:'no-store'});
-    if(!active()||!panel.isConnected)return;
-    const known=(cfg.known_chats||[]).filter(c=>Number.isSafeInteger(Number(c.chat_id))&&Number(c.chat_id)<0);
-    panel.innerHTML=`<h4>Группа выплат</h4><p class="allocation-info">Создайте группу и добавьте бота администратором с правом приглашения.</p><form data-group-form>
-     <label>Выберите известную боту группу<select data-group-select><option value="">Указать ID вручную</option>${known.map(c=>`<option value="${Number(c.chat_id)}" ${Number(c.chat_id)===Number(cfg.chat_id)?'selected':''}>${esc(c.title)} · ${Number(c.chat_id)}</option>`).join('')}</select></label>
-     <label>ID группы<input data-group-id type="text" inputmode="text" autocomplete="off" placeholder="Например: -1001234567890" value="${cfg.chat_id?Number(cfg.chat_id):''}" required></label>
-     <p data-group-status class="allocation-info" role="status">${cfg.title?'Сейчас подключена: '+esc(cfg.title):'Выберите группу или введите её отрицательный ID.'}</p>
-     <div class="allocation-group-actions"><button type="submit" class="primary">Сохранить</button><button type="button" class="secondary" data-group-cancel>Отмена</button></div></form>`;
-    const input=qs('[data-group-id]',panel),select=qs('[data-group-select]',panel),status=qs('[data-group-status]',panel);
-    qs('[data-group-cancel]',panel).onclick=close;
-    select.onchange=()=>{input.value=select.value};
-    input.oninput=()=>{select.value=known.some(c=>String(c.chat_id)===input.value.trim())?input.value.trim():''};
-    qs('[data-group-form]',panel).onsubmit=async event=>{
-     event.preventDefault();if(saving)return;
-     const id=input.value.trim();
-     if(!/^-\d+$/.test(id)||!Number.isSafeInteger(Number(id))||Number(id)>=0){status.textContent='Укажите отрицательный числовой ID группы';return}
-     saving=true;input.blur();panel.querySelectorAll('button,input,select').forEach(e=>e.disabled=true);status.textContent='Проверяем права бота и сохраняем…';
-     try{
-      const saved=await api('/api/gbu-owner-payment-group',{method:'POST',body:JSON.stringify({chat_id:Number(id)})});
-      if(active()&&panel.isConnected){saving=false;close();ownerMembers=null;qs('[data-allocation-status]',root).textContent='Подключена группа: '+saved.title;toast('Группа выплат подключена');refreshOwnerMembers()}
-     }catch(e){if(active()&&panel.isConnected)status.textContent=e.message}
-     finally{saving=false;if(panel.isConnected)panel.querySelectorAll('button,input,select').forEach(e=>e.disabled=false)}
-    };
-   }catch(e){if(active()&&panel.isConnected)qs('[data-group-status]',panel).textContent=e.message}
-   finally{if(!panel.isConnected)busy=false}
-  };
-  qs('[data-owner-invite]',root).onclick=async()=>{
-   if(busy||!plan.locked)return;
-   if(!window.confirm('Отправить приглашение в группу всем ещё не рассчитанным сотрудникам из вашего списка? Уже отправленные приглашения повторяться не будут.'))return;
-   busy=true;root.querySelectorAll('button,input,textarea').forEach(e=>e.disabled=true);
-   qs('[data-allocation-status]',root).textContent='Рассылаем приглашения…';
-   try{
-    const r=await api('/api/gbu-cash-allocation/'+encodeURIComponent(plan.plan_id)+'/invite-owner-recipients',{method:'POST',body:'{}'});
-    if(active()){busy=false;redraw();qs('[data-allocation-status]',root).textContent='Группа: '+r.title+'. Отправлено: '+r.sent+'. Уже отправлено: '+r.already_sent+'. Не отправлено: '+r.failed+'. Доставка требует проверки: '+r.unknown+'. Нет привязки Telegram: '+r.missing+'.'+(r.details.length?'\n'+r.details.join('\n'):'')}
-   }catch(e){if(active()){busy=false;redraw();qs('[data-allocation-status]',root).textContent=e.message}}
-   finally{busy=false;refreshOwnerMembers()}
-  };
   const button=qs('[data-allocation-send]',root),deliveries=plan.deliveries||[];
   const allSent=plan.locked&&plan.confirmation_buttons_sent&&deliveries.length>0&&deliveries.every(d=>d.status==='sent');
   button.disabled=busy||!!plan.missing_count||!plan.salary_total||!plan.cashiers.length||allSent;
