@@ -19630,9 +19630,12 @@ def _gbu_cash_allocation_html(html):
 #gbuAllocation .allocation-line>span{min-width:0;overflow-wrap:anywhere}
 #gbuAllocation .allocation-line b{white-space:nowrap}
 #gbuAllocation .allocation-info{font-size:12px;color:var(--muted);white-space:pre-line}
-#gbuAllocation .allocation-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:0;margin:6px 0 10px}
+#modal:has(#gbuAllocation)>.modal-head{position:relative;top:auto;min-height:34px;margin:0 0 10px;gap:10px}
+#modal:has(#gbuAllocation)>.modal-head::before{display:none}
+#modal:has(#gbuAllocation)>.modal-head h3{margin:0;min-width:0;line-height:1.2}
+#gbuAllocation .allocation-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:0;min-height:40px;margin:0 0 10px}
 #gbuAllocation .allocation-toolbar>[data-allocation-back]{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:auto;min-height:40px;margin:0;padding:8px 12px;font-size:13px;line-height:1.2;white-space:nowrap;border-radius:12px}
-#gbuAllocation .allocation-periods{flex:0 1 auto;min-width:0;margin:0;text-align:right;font-size:11px;line-height:1.5;color:var(--muted)}
+#gbuAllocation .allocation-periods{display:flex;flex-direction:column;justify-content:center;align-self:center;flex:0 1 auto;min-width:0;min-height:40px;margin:0;padding:0;text-align:right;font-size:11px;line-height:1.5;color:var(--muted)}
 #gbuAllocation .allocation-periods>span{display:block;white-space:nowrap}
 @media(max-width:350px){#gbuAllocation .allocation-toolbar{gap:6px}#gbuAllocation .allocation-toolbar>[data-allocation-back]{font-size:12px;padding:8px}#gbuAllocation .allocation-periods{font-size:10px}}
 
