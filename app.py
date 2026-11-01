@@ -19297,11 +19297,11 @@ def gbu_allocation_source(db, user, month, half):
         profile = own_ids[0] if own_ids else None
         cashiers.append(dict(entry, employee_id=profile.id if profile else None,
                              height_cm=profile.height_cm if profile else None))
-    source = {'contact_format': 1, 'split_payment_format': 1, 'allocation_rule': 'smallest_first_height3_fallback_v3', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
+    source = {'contact_format': 1, 'split_payment_format': 1, 'employee_notice_format': 1, 'allocation_rule': 'smallest_first_height3_fallback_v3', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
               'cashiers': sorted(cashiers, key=lambda p:p['tg_id']), 'missing': missing}
     digest = hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     plan = dict(build_gbu_cash_allocation(people, cashiers), **periods, snapshot=digest,
-                allocation_rule='smallest_first_height3_fallback_v3', height_tolerance_cm=3, contact_format=1, split_payment_format=1,
+                allocation_rule='smallest_first_height3_fallback_v3', height_tolerance_cm=3, contact_format=1, split_payment_format=1, employee_notice_format=1,
                 missing_count=len(missing), unverified=[c['name'] for c in cashiers
                     if c['total'] and not c['received'] and not c['checked']])
     return gbu_allocation_split_payment_view(plan)
@@ -19402,6 +19402,19 @@ def gbu_allocation_messages(plan, cashier):
         if any(p.get('split_payment_note') or gbu_allocation_split_note(
                 plan, p['employee_id'], cashier['tg_id']) for p in cashier['payments']):
             header += 'Передайте сотрудникам пояснения в скобках о других выплатах.\n\n'
+    # Version the instruction so locked plans retain their original delivery parts.
+    if plan.get('employee_notice_format') == 1 and cashier['payments']:
+        notice = (
+            '📩 <b>Заранее предупредите сотрудников</b>\n'
+            'Сразу после получения этого поручения напишите каждому сотруднику текстом в личные сообщения: '
+            'что вы будете его рассчитывать, какую сумму выплатите и в какой день планируете выплату. '
+            'Сделайте это сразу, даже если рассчитаете через несколько дней.\n'
+            'Если зарплата разделена между несколькими бригадирами или руководителем, '
+            'объясните сотруднику, какую часть выплатите вы, сколько составляет остаток и кто его выплатит. '
+            'Укажите имя, метро и рост другого бригадира из пояснения в скобках рядом с сотрудником. '
+            'Так сотрудник заранее будет понимать, от кого и когда ждать деньги.\n\n'
+        )
+        header = header.replace('Кому выплатить:\n', notice + 'Кому выплатить:\n', 1)
     if not lines:
         lines = ['Другим сотрудникам выплаты не назначены.']
     lines += [f"\nОстаток кассы к сдаче владельцу: <b>{money(cashier['remaining'])}</b>",
@@ -19600,13 +19613,13 @@ async function openGbuCashAllocation(month,period){
  const line=(name,amount)=>`<div class="allocation-line"><span>${esc(name)}</span><b>${gbuAllocationMoney(amount)}</b></div>`;
  const summary=(label,amount)=>`<div><small>${label}</small><b>${gbuAllocationMoney(amount)}</b></div>`;
  function draw(){
+  const paidCashierIds=new Set((plan.payout_confirmations||[]).map(p=>Number(p.tg_id)));
+  const sortedCashiers=[...plan.cashiers].sort((a,b)=>Number(paidCashierIds.has(Number(b.tg_id)))-Number(paidCashierIds.has(Number(a.tg_id))));
   root.innerHTML=`<div data-allocation-overview ${selectedCashier!==null?'hidden':''}><button type="button" class="secondary" data-allocation-back>← К зарплате</button><p class="allocation-info">Зарплата: ${esc(gbuAllocationPeriod(plan.salary_start,plan.salary_end))}\nКасса: ${esc(gbuAllocationPeriod(plan.cash_start,plan.cash_end))}</p>
   <div class="allocation-summary">${summary('Начислено',plan.salary_total)}${summary('Касса с откатами',plan.cash_total)}${summary('Из кассы уже у тебя',plan.owner_cash)}${summary('Бригадиры выплатят, включая себе',plan.cashier_payouts)}${summary('Выплатить через тебя',plan.owner_due)}${summary('Добавить своих денег',plan.owner_topup)}</div>
-  <p class="allocation-info">Бригадир сначала оставляет себе зарплату, затем выплачивает другим от меньших сумм к большим. ${plan.allocation_rule==='smallest_first_height3_fallback_v3'?'В первую очередь подбирается бригадир с разницей в росте до 3 см. Если у подходящих бригадиров денег не хватает, выплата распределяется из оставшейся кассы других бригадиров. Рост не ограничивает использование кассы. ':''}Крупные остатки остаются в твоём списке. Откаты включены. Сданная касса учтена у тебя. Сторонние сотрудники остаются в твоём списке.</p>
   ${plan.missing_count?`<p class="allocation-warn">Не заполнен состав: ${plan.missing_count}. Сначала завершите начисления.</p>`:''}
   ${plan.unverified?.length?`<p class="allocation-warn">Ещё не подтвердили сверку: ${esc(plan.unverified.join(', '))}. Проверь суммы перед отправкой.</p>`:''}
-  ${plan.locked?'<p class="allocation-info">План зафиксирован. Повторное открытие сохраняет назначения. Поручение не означает, что деньги уже выплачены.</p>':''}
-  <div class="allocation-cashier-list">${plan.cashiers.map(c=>{const paid=(plan.payout_confirmations||[]).some(p=>Number(p.tg_id)===Number(c.tg_id));return `<button type="button" class="allocation-cashier-summary" data-allocation-cashier-open="${Number(c.tg_id)}"><span>${esc(c.name)}${c.height_cm?' · '+esc(c.height_cm)+' см':''}</span><small class="${paid?'paid':'unpaid'}">${paid?'Рассчитаны':'Не рассчитаны'}</small></button>`}).join('')}</div>
+  <div class="allocation-cashier-list">${sortedCashiers.map(c=>{const paid=paidCashierIds.has(Number(c.tg_id));return `<button type="button" class="allocation-cashier-summary" data-allocation-cashier-open="${Number(c.tg_id)}"><span>${esc(c.name)}${c.height_cm?' · '+esc(c.height_cm)+' см':''}</span><small class="${paid?'paid':'unpaid'}">${paid?'Рассчитаны':'Не рассчитаны'}</small></button>`}).join('')}</div>
   <section><h4>Мой список выплат · ${gbuAllocationMoney(gbuAllocationOwnerRemaining(plan))}</h4>${gbuAllocationOwnerProgressHtml(plan)}${gbuOwnerMembersSummaryHtml(ownerMembers)}<div class="allocation-owner-grid">${plan.owner_payments.map((p,index)=>gbuAllocationOwnerRecipientHtml(p,index+1,ownerMembers?.items?.find(m=>Number(m.employee_id)===Number(p.employee_id)))).join('')||'<p>Доплат сотрудникам нет.</p>'}</div><button type="button" class="secondary" data-allocation-copy>Скопировать мой список</button><button type="button" class="secondary" data-owner-invite ${!plan.locked?'disabled':''}>✈ Пригласить в группу</button><button type="button" class="secondary" data-owner-group>Настроить группу выплат</button><p class="allocation-info">Приглашения получат только сотрудники из вашего списка без отметки о выплате. Сначала подтвердите распределение. В группу они вступают сами.</p>${gbuAllocationCardCommentHtml(comments,0,commentDrafts)}${plan.owner_due?gbuAllocationPayoutStatus(plan,0):''}</section>
   ${plan.unspent_cash?`<p class="allocation-info">Не распределено у бригадиров: ${gbuAllocationMoney(plan.unspent_cash)}. Эти деньги нужно передать тебе.</p>`:''}
   ${plan.owner_surplus?`<p class="allocation-info">Останется после зарплаты: ${gbuAllocationMoney(plan.owner_surplus)}.</p>`:''}
