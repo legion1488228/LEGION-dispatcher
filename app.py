@@ -20041,18 +20041,19 @@ def gbu_cash_allocation_owner_payment(plan_id: str, data: GbuCashAllocationOwner
 
 
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>',r'''<style>
-#gbuAllocation .allocation-owner-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;margin:8px 0}
-#gbuAllocation .allocation-owner-payment{position:relative;min-width:0;height:96px;box-sizing:border-box;padding:6px;border:1px solid var(--line);border-radius:6px}
+#gbuAllocation .allocation-owner-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;margin:8px 0}
+#gbuAllocation .allocation-owner-payment{position:relative;min-width:0;height:88px;box-sizing:border-box;padding:4px;border:1px solid var(--line);border-radius:6px}
 #gbuAllocation .allocation-owner-payment.is-paid{background:#e0f1e7}
-#gbuAllocation .allocation-owner-number{position:absolute;top:30px;left:6px;display:flex;align-items:center;height:24px;font-size:11px;line-height:1;font-weight:600;color:var(--muted);pointer-events:none}
-#gbuAllocation .allocation-owner-payment>.allocation-recipient{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:minmax(0,1fr) 30px;gap:4px;min-width:0;height:100%;margin:0}
+#gbuAllocation .allocation-owner-number{position:absolute;bottom:4px;left:4px;display:flex;align-items:center;height:16px;font-size:10px;line-height:1;font-weight:600;color:var(--muted);pointer-events:none}
+#gbuAllocation .allocation-owner-payment>.allocation-recipient{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:26px 16px;align-content:space-between;gap:4px;min-width:0;height:100%;margin:0}
 #gbuAllocation .allocation-owner-payment .allocation-line{display:contents}
-#gbuAllocation .allocation-owner-payment .allocation-line>span{grid-column:1 / -1;grid-row:1;padding-right:0;font-size:11px;line-height:1.2;min-height:0;overflow-wrap:anywhere;overflow:auto}
-#gbuAllocation .allocation-owner-payment .allocation-line>b{grid-column:2;grid-row:2;align-self:center;justify-self:end;white-space:nowrap;font-size:12px;line-height:1.2}
-#gbuAllocation .allocation-owner-payment .allocation-contact-actions{grid-column:1;grid-row:2;align-self:center;gap:4px;margin:0}
-#gbuAllocation .allocation-owner-payment .allocation-contact-action{box-sizing:border-box;flex-basis:28px;width:28px;height:28px;min-height:28px;padding:4px}
+#gbuAllocation .allocation-owner-payment .allocation-line>span{grid-column:1 / -1;grid-row:1;padding-right:0;font-size:10.5px;line-height:1.2;min-height:0;overflow-wrap:anywhere;overflow:auto}
+#gbuAllocation .allocation-owner-payment .allocation-line>b{grid-column:2;grid-row:2;align-self:center;justify-self:end;white-space:nowrap;font-size:11px;line-height:1.2}
+#gbuAllocation .allocation-owner-payment .allocation-contact-actions{position:absolute;bottom:24px;left:4px;gap:3px;margin:0}
+#gbuAllocation .allocation-owner-payment .allocation-contact-action{box-sizing:border-box;flex-basis:22px;width:22px;height:22px;min-height:22px;padding:2px;border-radius:5px}
+#gbuAllocation .allocation-owner-payment .allocation-contact-action svg{width:16px;height:16px}
 #gbuAllocation .allocation-owner-payment small{font-size:10px;line-height:1.25}
-#gbuAllocation .allocation-owner-check{position:absolute;top:30px;right:0;display:flex;align-items:center;justify-content:center;width:34px;height:24px;cursor:pointer}
+#gbuAllocation .allocation-owner-check{position:absolute;bottom:24px;right:1px;display:flex;align-items:center;justify-content:center;width:26px;height:22px;cursor:pointer}
 #gbuAllocation input[data-owner-payment]{width:20px;height:20px;min-width:20px;margin:0;padding:0;accent-color:#237453;cursor:pointer}
 #gbuAllocation .allocation-owner-progress{display:flex;flex-wrap:wrap;gap:6px 16px;margin:8px 0;font-size:13px}
 </style><script>
@@ -20539,8 +20540,8 @@ async def gbu_owner_payment_members_refresh(plan_id: str,
 
 
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style>
-#gbuAllocation .allocation-owner-membership{position:absolute;top:35px;left:34px;right:33px;height:16px;line-height:16px;font-size:9px;font-weight:700;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted);pointer-events:none}
-#gbuAllocation .allocation-owner-payment .allocation-line>span{align-self:start;max-height:27px}
+#gbuAllocation .allocation-owner-membership{position:absolute;top:31px;left:4px;right:4px;height:12px;line-height:12px;font-size:8.5px;font-weight:700;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted);pointer-events:none}
+#gbuAllocation .allocation-owner-payment .allocation-line>span{align-self:start;max-height:26px}
 #gbuAllocation .allocation-owner-membership.joined,#gbuAllocation .allocation-owner-membership.member{color:#58c785}
 #gbuAllocation .allocation-owner-membership.waiting,#gbuAllocation .allocation-owner-membership.left{color:#e3b454}
 #gbuAllocation .is-paid .allocation-owner-membership.joined,#gbuAllocation .is-paid .allocation-owner-membership.member{color:#17683e}
