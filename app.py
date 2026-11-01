@@ -19122,6 +19122,55 @@ class GbuCashAllocationDelivery(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
+class GbuCashAllocationOwnerCash(Base):
+    __tablename__ = 'gbu_cash_allocation_owner_cash'
+    salary_start = Column(Date, primary_key=True)
+    amount = Column(BigInteger, nullable=True)
+    version = Column(Integer, nullable=False, default=1)
+    updated_by = Column(BigInteger, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class GbuCashAllocationOwnerCashInput(BaseModel):
+    month: str = Field(pattern=r'^[1-9]\d{3}-(0[1-9]|1[0-2])$')
+    half: StrictInt = Field(ge=1, le=2)
+    amount: StrictInt | None = Field(default=None, ge=0, le=1000000000000)
+    expected_version: StrictInt = Field(ge=0)
+
+
+def gbu_allocation_owner_cash_view(db, plan):
+    setting = db.get(GbuCashAllocationOwnerCash, date.fromisoformat(plan['salary_start']))
+    plan['owner_cash_automatic'] = int(plan['owner_cash'])
+    plan['owner_cash_manual'] = bool(setting and setting.amount is not None)
+    plan['owner_cash_version'] = setting.version if setting else 0
+    if plan['owner_cash_manual']:
+        plan['owner_cash'] = int(setting.amount)
+    available = int(plan['owner_cash']) + int(plan['unspent_cash'])
+    plan['owner_topup'] = max(0, int(plan['owner_due']) - available)
+    plan['owner_surplus'] = max(0, available - int(plan['owner_due']))
+    return plan
+
+
+@app.put('/api/gbu-cash-allocation/owner-cash')
+def gbu_cash_allocation_owner_cash(data: GbuCashAllocationOwnerCashInput,
+        db: Session=Depends(get_db), user: TelegramUser=Depends(require_app_user)):
+    _require_gbu_payroll_owner(db, user)
+    start, _ = cash_reconciliation_period(data.month, data.half)
+    dispatch_day_lock(db, start)
+    setting = db.get(GbuCashAllocationOwnerCash, start)
+    if (setting.version if setting else 0) != data.expected_version:
+        raise HTTPException(409, 'Сумма уже изменена. Откройте распределение заново.')
+    if setting is None:
+        setting = GbuCashAllocationOwnerCash(salary_start=start, version=0)
+        db.add(setting)
+    setting.amount = data.amount
+    setting.version += 1
+    setting.updated_by = user.id
+    setting.updated_at = datetime.utcnow()
+    db.commit()
+    return {'saved': True, 'version': setting.version}
+
+
 class GbuCashAllocationInput(BaseModel):
     month: str = Field(pattern=r'^[1-9]\d{3}-(0[1-9]|1[0-2])$')
     half: StrictInt = Field(ge=1, le=2)
@@ -19337,7 +19386,7 @@ def gbu_allocation_view(db, row):
         for d in deliveries) for c in plan['cashiers'])
     for cashier in plan['cashiers']:
         cashier['delivery_parts_expected'] = len(gbu_allocation_messages(plan, cashier))+1
-    return gbu_allocation_split_payment_view(plan)
+    return gbu_allocation_owner_cash_view(db, gbu_allocation_split_payment_view(plan))
 
 
 @app.get('/api/gbu-cash-allocation')
@@ -19349,7 +19398,7 @@ def gbu_cash_allocation_preview(month: str, half: int, db: Session=Depends(get_d
     # Sent plans retain their recipients and amounts when source ledgers change.
     if saved and saved.locked:
         return JSONResponse(gbu_allocation_view(db, saved), headers={'Cache-Control':'private, no-store'})
-    return JSONResponse(gbu_allocation_source(db, user, month, half), headers={'Cache-Control':'private, no-store'})
+    return JSONResponse(gbu_allocation_owner_cash_view(db, gbu_allocation_source(db, user, month, half)), headers={'Cache-Control':'private, no-store'})
 
 
 @app.post('/api/gbu-cash-allocation')
@@ -19571,6 +19620,8 @@ def _gbu_cash_allocation_html(html):
 .gbu-allocation-open{margin:8px 0;width:100%;min-height:42px}
 #gbuAllocation .allocation-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin:10px 0}
 #gbuAllocation .allocation-summary>div{padding:8px;border:1px solid var(--line);border-radius:9px;min-width:0}
+#gbuAllocation .allocation-summary .allocation-owner-remaining{grid-column:1/-1;border-color:var(--gold2);background:var(--panel)}
+#gbuAllocation [data-owner-cash-edit]{font-size:11px;padding:3px 7px;min-height:26px;margin-top:4px}
 #gbuAllocation .allocation-summary small{display:block;color:var(--muted);font-size:11px}
 #gbuAllocation .allocation-summary b{display:block;font-size:16px;overflow-wrap:anywhere}
 #gbuAllocation section{border:1px solid var(--gold2);border-radius:11px;padding:10px;margin:10px 0}
@@ -19627,17 +19678,41 @@ async function openGbuCashAllocation(month,period){
   const paidCashierIds=new Set((plan.payout_confirmations||[]).map(p=>Number(p.tg_id)));
   const sortedCashiers=[...plan.cashiers].sort((a,b)=>Number(paidCashierIds.has(Number(b.tg_id)))-Number(paidCashierIds.has(Number(a.tg_id))));
   root.innerHTML=`<div data-allocation-overview ${selectedCashier!==null?'hidden':''}><button type="button" class="secondary" data-allocation-back>← К зарплате</button><p class="allocation-info">Зарплата: ${esc(gbuAllocationPeriod(plan.salary_start,plan.salary_end))}\nКасса: ${esc(gbuAllocationPeriod(plan.cash_start,plan.cash_end))}</p>
-  <div class="allocation-summary">${summary('Начислено',plan.salary_total)}${summary('Касса с откатами',plan.cash_total)}${summary('Из кассы уже у тебя',plan.owner_cash)}${summary('Бригадиры выплатят, включая себе',plan.cashier_payouts)}${summary('Выплатить через тебя',plan.owner_due)}${summary('Добавить своих денег',plan.owner_topup)}</div>
+  <div class="allocation-summary">${summary('Начислено',plan.salary_total)}${summary('Касса с откатами',plan.cash_total)}<div><small>Из кассы уже у тебя${plan.owner_cash_manual?' · вручную':''}</small><b>${gbuAllocationMoney(plan.owner_cash)}</b><button type="button" class="secondary" data-owner-cash-edit>Изменить</button></div>${summary('Бригадиры выплатят, включая себе',plan.cashier_payouts)}${summary('Выплатить через тебя',plan.owner_due)}${summary('Добавить своих денег',plan.owner_topup)}<div class="allocation-owner-remaining" role="status"><small>Мне осталось выплатить</small><b>${gbuAllocationMoney(gbuAllocationOwnerRemaining(plan))}</b><small>Выплачено: ${gbuAllocationMoney(plan.owner_payments.filter(p=>p.paid===true).reduce((sum,p)=>sum+Number(p.amount),0))}</small></div></div>
   ${plan.missing_count?`<p class="allocation-warn">Не заполнен состав: ${plan.missing_count}. Сначала завершите начисления.</p>`:''}
   ${plan.unverified?.length?`<p class="allocation-warn">Ещё не подтвердили сверку: ${esc(plan.unverified.join(', '))}. Проверь суммы перед отправкой.</p>`:''}
-  <div class="allocation-cashier-list">${sortedCashiers.map(c=>{const paid=paidCashierIds.has(Number(c.tg_id));return `<button type="button" class="allocation-cashier-summary" data-allocation-cashier-open="${Number(c.tg_id)}"><span>${esc(c.name)}${c.height_cm?' · '+esc(c.height_cm):''}</span><small class="${paid?'paid':'unpaid'}">${paid?'Рассчитаны':'Не рассчитаны'}</small></button>`}).join('')}</div>
   <section><h4>Мой список выплат · ${gbuAllocationMoney(gbuAllocationOwnerRemaining(plan))}</h4>${gbuAllocationOwnerProgressHtml(plan)}${gbuOwnerMembersSummaryHtml(ownerMembers)}<div class="allocation-owner-grid">${plan.owner_payments.map((p,index)=>gbuAllocationOwnerRecipientHtml(p,index+1,ownerMembers?.items?.find(m=>Number(m.employee_id)===Number(p.employee_id)))).join('')||'<p>Доплат сотрудникам нет.</p>'}</div><button type="button" class="secondary" data-allocation-copy>Скопировать мой список</button><button type="button" class="secondary" data-owner-invite ${!plan.locked?'disabled':''}>✈ Пригласить в группу</button><button type="button" class="secondary" data-owner-group>Настроить группу выплат</button><p class="allocation-info">Приглашения получат только сотрудники из вашего списка без отметки о выплате. Сначала подтвердите распределение. В группу они вступают сами.</p>${gbuAllocationCardCommentHtml(comments,0,commentDrafts)}${plan.owner_due?gbuAllocationPayoutStatus(plan,0):''}</section>
+  <h4>Бригадиры</h4>
+  <div class="allocation-cashier-list">${sortedCashiers.map(c=>{const paid=paidCashierIds.has(Number(c.tg_id));return `<button type="button" class="allocation-cashier-summary" data-allocation-cashier-open="${Number(c.tg_id)}"><span>${esc(c.name)}${c.height_cm?' · '+esc(c.height_cm):''}</span><small class="${paid?'paid':'unpaid'}">${paid?'Рассчитаны':'Не рассчитаны'}</small></button>`}).join('')}</div>
   ${plan.unspent_cash?`<p class="allocation-info">Не распределено у бригадиров: ${gbuAllocationMoney(plan.unspent_cash)}. Эти деньги нужно передать тебе.</p>`:''}
   ${plan.owner_surplus?`<p class="allocation-info">Останется после зарплаты: ${gbuAllocationMoney(plan.owner_surplus)}.</p>`:''}
   <p class="allocation-payout-total ${plan.all_payouts_confirmed?'paid':'unpaid'}" role="status">${plan.locked?(plan.all_payouts_confirmed?'Все выплаты подтверждены':'Есть неподтверждённые выплаты'):'План ещё не подтверждён'}</p><button type="button" class="primary" data-allocation-send>${plan.locked?'Отправить неотправленные поручения':'Подтвердить план и отправить бригадирам'}</button></div>
   ${plan.cashiers.map(c=>`<section class="allocation-cashier-card" data-allocation-cashier-panel="${Number(c.tg_id)}" ${Number(c.tg_id)!==selectedCashier?'hidden':''}><button type="button" class="secondary" data-allocation-cashier-back>← Все бригадиры</button><h4>${esc(c.name)}${c.height_cm?' · '+esc(c.height_cm):''}</h4>${line('Касса + откат',c.total)}${line('Оставить себе',c.own_salary)}${c.own_salary&&c.own_salary_split_note?`<small class="allocation-split-note">${esc(c.own_salary_split_note)}</small>`:''}<div class="allocation-cashier-grid">${c.payments.map(p=>gbuAllocationRecipientHtml(p)).join('')||'<p class="allocation-info">Выплаты другим не назначены.</p>'}</div>${line('Остаток к сдаче тебе',c.remaining)}<p class="allocation-info">${esc(gbuAllocationDeliveryLabel(plan,c.tg_id))}</p>${gbuAllocationResendHtml(plan,c)}${gbuAllocationCardCommentHtml(comments,c.tg_id,commentDrafts)}${gbuAllocationCommentSendHtml(plan,comments,c.tg_id)}${gbuAllocationPayoutStatus(plan,c.tg_id)}</section>`).join('')}
   <p data-allocation-status role="status" aria-live="polite"></p>`;
   qs('[data-allocation-back]',root).onclick=()=>openGbuPayroll(month,period);
+  qs('[data-owner-cash-edit]',root).onclick=()=>{
+   if(busy)return;busy=true;
+   const panel=document.createElement('div');panel.className='allocation-group-settings';
+   panel.innerHTML=`<form><h4>Из кассы уже у тебя</h4><label>Фактически получено, ₽<input data-cash-amount type="text" inputmode="numeric" autocomplete="off" value="${Number(plan.owner_cash)}" required></label><p class="allocation-info">Сумма учитывается в расчёте своих денег. Назначенные выплаты бригадиров сохраняются.</p><p data-cash-error role="status"></p><div class="allocation-group-actions"><button type="submit" class="primary">Сохранить</button><button type="button" class="secondary" data-cash-auto>По учёту кассы</button><button type="button" class="secondary" data-cash-cancel>Отмена</button></div></form>`;
+   qs('.allocation-summary',root).after(panel);
+   let saving=false;
+   qs('[data-cash-cancel]',panel).onclick=()=>{if(!saving){panel.remove();busy=false}};
+   const save=async amount=>{
+    if(saving)return;saving=true;panel.querySelectorAll('button,input').forEach(e=>e.disabled=true);
+    try{
+     await api('/api/gbu-cash-allocation/owner-cash',{method:'PUT',body:JSON.stringify({month,half,amount,expected_version:Number(plan.owner_cash_version||0)})});
+     const latest=await api('/api/gbu-cash-allocation?month='+encodeURIComponent(month)+'&half='+half,{cache:'no-store'});
+     if(active()){plan=latest;busy=false;redraw()}
+    }catch(e){if(active()&&panel.isConnected){saving=false;panel.querySelectorAll('button,input').forEach(e=>e.disabled=false);qs('[data-cash-error]',panel).textContent=e.message}}
+   };
+   qs('form',panel).onsubmit=e=>{
+    e.preventDefault();const raw=qs('[data-cash-amount]',panel).value.replace(/\s/g,'');
+    if(!/^\d+$/.test(raw)||!Number.isSafeInteger(Number(raw))||Number(raw)>1000000000000){qs('[data-cash-error]',panel).textContent='Введите целую сумму от 0 до 1 000 000 000 000 ₽';return}
+    save(Number(raw));
+   };
+   qs('[data-cash-auto]',panel).onclick=()=>save(null);
+   qs('[data-cash-amount]',panel).focus();panel.scrollIntoView({block:'nearest'});
+  };
   root.querySelectorAll('[data-allocation-cashier-open]').forEach(b=>{b.disabled=busy;b.onclick=()=>{
    if(busy)return;
    overviewScroll=[];for(let e=root.parentElement;e;e=e.parentElement)overviewScroll.push([e,e.scrollTop]);
