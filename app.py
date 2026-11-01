@@ -19211,6 +19211,55 @@ def build_gbu_cash_allocation(people, cashiers):
             'owner_surplus': max(0, owner_cash+unspent-owner_due)}
 
 
+def gbu_allocation_split_note(plan, employee_id, payer_tg_id):
+    """Describe other assigned shares, without changing amounts or payment marks."""
+    if employee_id is None:
+        return ''
+    employee_id, payer_tg_id = int(employee_id), int(payer_tg_id)
+    others, retained = [], 0
+    for cashier in plan['cashiers']:
+        if int(cashier['tg_id']) == payer_tg_id:
+            continue
+        amount = sum(int(p['amount']) for p in cashier['payments']
+                     if int(p['employee_id']) == employee_id)
+        # A retained own-salary share is already with its recipient; do not
+        # describe it as another future transfer.
+        if cashier.get('employee_id') == employee_id:
+            retained += int(cashier['own_salary'])
+        if amount > 0:
+            name = str(cashier['name'])
+            if cashier.get('height_cm'):
+                name += f", {cashier['height_cm']} см"
+            others.append((f'бригадир {name}', amount))
+    if payer_tg_id != 0:
+        amount = sum(int(p['amount']) for p in plan['owner_payments']
+                     if int(p['employee_id']) == employee_id)
+        if amount > 0:
+            others.append(('руководитель ЛЕГИОН', amount))
+    money = lambda n: f'{int(n):,}'.replace(',', ' ') + ' ₽'
+    if not others:
+        return f'(Ещё {money(retained)} оставлены у вас в счёт зарплаты)' if retained else ''
+    total = money(sum(amount for _, amount in others))
+    if len(others) == 1:
+        note = f'Остаток {total} вам выплатит {others[0][0]}'
+    else:
+        details = '; '.join(f'{name} — {money(amount)}' for name, amount in others)
+        note = f'Остаток {total} вам выплатят: {details}'
+    if retained:
+        note += f'; ещё {money(retained)} оставлены у вас в счёт зарплаты'
+    return f'({note})'
+
+
+def gbu_allocation_split_payment_view(plan):
+    for cashier in plan['cashiers']:
+        for person in cashier['payments']:
+            person['split_payment_note'] = gbu_allocation_split_note(
+                plan, person['employee_id'], cashier['tg_id'])
+        cashier['own_salary_split_note'] = gbu_allocation_split_note(
+            plan, cashier.get('employee_id'), cashier['tg_id'])
+    return plan
+
+
 def gbu_allocation_source(db, user, month, half):
     _require_gbu_payroll_owner(db, user)
     periods = gbu_allocation_periods(month, half)
@@ -19248,14 +19297,14 @@ def gbu_allocation_source(db, user, month, half):
         profile = own_ids[0] if own_ids else None
         cashiers.append(dict(entry, employee_id=profile.id if profile else None,
                              height_cm=profile.height_cm if profile else None))
-    source = {'contact_format': 1, 'allocation_rule': 'smallest_first_height3_fallback_v3', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
+    source = {'contact_format': 1, 'split_payment_format': 1, 'allocation_rule': 'smallest_first_height3_fallback_v3', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
               'cashiers': sorted(cashiers, key=lambda p:p['tg_id']), 'missing': missing}
     digest = hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     plan = dict(build_gbu_cash_allocation(people, cashiers), **periods, snapshot=digest,
-                allocation_rule='smallest_first_height3_fallback_v3', height_tolerance_cm=3, contact_format=1,
+                allocation_rule='smallest_first_height3_fallback_v3', height_tolerance_cm=3, contact_format=1, split_payment_format=1,
                 missing_count=len(missing), unverified=[c['name'] for c in cashiers
                     if c['total'] and not c['received'] and not c['checked']])
-    return plan
+    return gbu_allocation_split_payment_view(plan)
 
 
 def gbu_allocation_view(db, row):
@@ -19280,7 +19329,7 @@ def gbu_allocation_view(db, row):
         for d in deliveries) for c in plan['cashiers'])
     for cashier in plan['cashiers']:
         cashier['delivery_parts_expected'] = len(gbu_allocation_messages(plan, cashier))+1
-    return plan
+    return gbu_allocation_split_payment_view(plan)
 
 
 @app.get('/api/gbu-cash-allocation')
@@ -19337,6 +19386,22 @@ def gbu_allocation_messages(plan, cashier):
              (f" · {escape(p['phone'])}" if p.get('phone') else '') for i,p in enumerate(cashier['payments'],1)]
     if plan.get('contact_format') == 1:
         lines = [gbu_allocation_recipient_line(i, p, money) for i, p in enumerate(cashier['payments'], 1)]
+    # Locked legacy plans retain the exact message parts used by delivery and
+    # confirmation records. New plans explicitly opt into the expanded text.
+    if plan.get('split_payment_format') == 1:
+        own_note = gbu_allocation_split_note(plan, cashier.get('employee_id'), cashier['tg_id'])
+        if own_note and cashier['own_salary']:
+            header = header.replace('\n\nКому выплатить:\n', '\n' + escape(own_note) + '\n\nКому выплатить:\n', 1)
+        expanded = []
+        for person, line in zip(cashier['payments'], lines):
+            note = gbu_allocation_split_note(plan, person['employee_id'], cashier['tg_id'])
+            # Keep the explanation with its recipient when splitting a list
+            # across multiple Telegram messages.
+            expanded.append(line + ('\n' + escape(note) if note else ''))
+        lines = expanded
+        if any(p.get('split_payment_note') or gbu_allocation_split_note(
+                plan, p['employee_id'], cashier['tg_id']) for p in cashier['payments']):
+            header += 'Передайте сотрудникам пояснения в скобках о других выплатах.\n\n'
     if not lines:
         lines = ['Другим сотрудникам выплаты не назначены.']
     lines += [f"\nОстаток кассы к сдаче владельцу: <b>{money(cashier['remaining'])}</b>",
@@ -19546,7 +19611,7 @@ async function openGbuCashAllocation(month,period){
   ${plan.unspent_cash?`<p class="allocation-info">Не распределено у бригадиров: ${gbuAllocationMoney(plan.unspent_cash)}. Эти деньги нужно передать тебе.</p>`:''}
   ${plan.owner_surplus?`<p class="allocation-info">Останется после зарплаты: ${gbuAllocationMoney(plan.owner_surplus)}.</p>`:''}
   <p class="allocation-payout-total ${plan.all_payouts_confirmed?'paid':'unpaid'}" role="status">${plan.locked?(plan.all_payouts_confirmed?'Все выплаты подтверждены':'Есть неподтверждённые выплаты'):'План ещё не подтверждён'}</p><button type="button" class="primary" data-allocation-send>${plan.locked?'Отправить неотправленные поручения':'Подтвердить план и отправить бригадирам'}</button></div>
-  ${plan.cashiers.map(c=>`<section class="allocation-cashier-card" data-allocation-cashier-panel="${Number(c.tg_id)}" ${Number(c.tg_id)!==selectedCashier?'hidden':''}><button type="button" class="secondary" data-allocation-cashier-back>← Все бригадиры</button><h4>${esc(c.name)}${c.height_cm?' · '+esc(c.height_cm)+' см':''}</h4>${line('Касса + откат',c.total)}${line('Оставить себе',c.own_salary)}<div class="allocation-cashier-grid">${c.payments.map(p=>gbuAllocationRecipientHtml(p)).join('')||'<p class="allocation-info">Выплаты другим не назначены.</p>'}</div>${line('Остаток к сдаче тебе',c.remaining)}<p class="allocation-info">${esc(gbuAllocationDeliveryLabel(plan,c.tg_id))}</p>${gbuAllocationResendHtml(plan,c)}${gbuAllocationCardCommentHtml(comments,c.tg_id,commentDrafts)}${gbuAllocationCommentSendHtml(plan,comments,c.tg_id)}${gbuAllocationPayoutStatus(plan,c.tg_id)}</section>`).join('')}
+  ${plan.cashiers.map(c=>`<section class="allocation-cashier-card" data-allocation-cashier-panel="${Number(c.tg_id)}" ${Number(c.tg_id)!==selectedCashier?'hidden':''}><button type="button" class="secondary" data-allocation-cashier-back>← Все бригадиры</button><h4>${esc(c.name)}${c.height_cm?' · '+esc(c.height_cm)+' см':''}</h4>${line('Касса + откат',c.total)}${line('Оставить себе',c.own_salary)}${c.own_salary&&c.own_salary_split_note?`<small class="allocation-split-note">${esc(c.own_salary_split_note)}</small>`:''}<div class="allocation-cashier-grid">${c.payments.map(p=>gbuAllocationRecipientHtml(p)).join('')||'<p class="allocation-info">Выплаты другим не назначены.</p>'}</div>${line('Остаток к сдаче тебе',c.remaining)}<p class="allocation-info">${esc(gbuAllocationDeliveryLabel(plan,c.tg_id))}</p>${gbuAllocationResendHtml(plan,c)}${gbuAllocationCardCommentHtml(comments,c.tg_id,commentDrafts)}${gbuAllocationCommentSendHtml(plan,comments,c.tg_id)}${gbuAllocationPayoutStatus(plan,c.tg_id)}</section>`).join('')}
   <p data-allocation-status role="status" aria-live="polite"></p>`;
   qs('[data-allocation-back]',root).onclick=()=>openGbuPayroll(month,period);
   root.querySelectorAll('[data-allocation-cashier-open]').forEach(b=>{b.disabled=busy;b.onclick=()=>{
@@ -19837,7 +19902,7 @@ function gbuAllocationContactActionsHtml(person){
  return `<div class="allocation-contact-actions">${telegram}${phone}</div>`;
 }
 function gbuAllocationRecipientHtml(person){
- return `<div class="allocation-recipient"><div class="allocation-line"><span>${esc(person.name)}</span><b>${gbuAllocationMoney(person.amount)}</b></div>${gbuAllocationContactActionsHtml(person)}</div>`;
+ return `<div class="allocation-recipient"><div class="allocation-line"><span>${esc(person.name)}</span><b>${gbuAllocationMoney(person.amount)}</b></div>${gbuAllocationContactActionsHtml(person)}${person.split_payment_note?`<small class="allocation-split-note">${esc(person.split_payment_note)}</small>`:''}</div>`;
 }
 </script></body>''',1)
 
@@ -20262,6 +20327,8 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style>
 #gbuAllocation .allocation-cashier-grid .allocation-contact-actions{grid-column:1;grid-row:2;align-self:center;gap:3px;margin:0}
 #gbuAllocation .allocation-cashier-grid .allocation-contact-action{box-sizing:border-box;flex-basis:24px;width:24px;height:26px;min-height:26px;padding:3px;border-radius:6px}
 #gbuAllocation .allocation-cashier-grid .allocation-contact-action svg{width:16px;height:16px}
+#gbuAllocation .allocation-split-note{display:block;margin:4px 0;color:var(--muted);font-size:11px;line-height:1.35;white-space:normal;overflow-wrap:anywhere}
+#gbuAllocation .allocation-cashier-grid .allocation-split-note{grid-column:1 / -1;grid-row:3;margin:0;padding-top:4px;border-top:1px solid var(--line)}
 #gbuAllocation .allocation-cashier-grid>.allocation-info{grid-column:1 / -1}
 #gbuAllocation .allocation-cashier-card>.allocation-info{font-size:11px;line-height:1.3;margin:6px 0}
 #gbuAllocation .allocation-cashier-card>button{width:auto;min-height:32px;padding:6px 10px;font-size:12px;margin-top:5px}
