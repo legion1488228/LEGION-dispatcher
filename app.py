@@ -19523,7 +19523,7 @@ async function openGbuCashAllocation(month,period){
  if(state.bootstrap?.is_owner!==true){toast('Доступно только владельцу');return}
  showModal('Распределение кассы','<div id="gbuAllocation">Загрузка…</div>');
  const root=qs('#gbuAllocation'),active=()=>qs('#gbuAllocation')===root&&!qs('#modal').classList.contains('hidden');
- const half=period==='first'?1:2;let plan,busy=false,comments=[];const commentDrafts=new Map();
+ const half=period==='first'?1:2;let plan,busy=false,comments=[],ownerMembers=null,membersLoading=false;const commentDrafts=new Map();
  const line=(name,amount)=>`<div class="allocation-line"><span>${esc(name)}</span><b>${gbuAllocationMoney(amount)}</b></div>`;
  const summary=(label,amount)=>`<div><small>${label}</small><b>${gbuAllocationMoney(amount)}</b></div>`;
  function draw(){
@@ -19534,7 +19534,7 @@ async function openGbuCashAllocation(month,period){
   ${plan.unverified?.length?`<p class="allocation-warn">Ещё не подтвердили сверку: ${esc(plan.unverified.join(', '))}. Проверь суммы перед отправкой.</p>`:''}
   ${plan.locked?'<p class="allocation-info">План зафиксирован. Повторное открытие сохраняет назначения. Поручение не означает, что деньги уже выплачены.</p>':''}
   ${plan.cashiers.map(c=>`<section class="allocation-cashier-card"><h4>${esc(c.name)}${plan.allocation_rule==='smallest_first_height3_fallback_v3'?' · '+(c.height_cm?esc(c.height_cm)+' см':'рост не указан'):''}</h4>${line('Касса + откат',c.total)}${line('Оставить себе',c.own_salary)}<div class="allocation-cashier-grid">${c.payments.map(p=>gbuAllocationRecipientHtml(p)).join('')||'<p class="allocation-info">Выплаты другим не назначены.</p>'}</div>${line('Остаток к сдаче тебе',c.remaining)}<p class="allocation-info">${esc(gbuAllocationDeliveryLabel(plan,c.tg_id))}</p>${gbuAllocationResendHtml(plan,c)}${gbuAllocationCardCommentHtml(comments,c.tg_id,commentDrafts)}${gbuAllocationCommentSendHtml(plan,comments,c.tg_id)}${gbuAllocationPayoutStatus(plan,c.tg_id)}</section>`).join('')}
-  <section><h4>Мой список выплат · ${gbuAllocationMoney(plan.owner_due)}</h4>${gbuAllocationOwnerProgressHtml(plan)}<div class="allocation-owner-grid">${plan.owner_payments.map(p=>gbuAllocationOwnerRecipientHtml(p)).join('')||'<p>Доплат сотрудникам нет.</p>'}</div><button type="button" class="secondary" data-allocation-copy>Скопировать мой список</button><button type="button" class="secondary" data-owner-invite ${!plan.locked?'disabled':''}>✈ Пригласить в группу</button><button type="button" class="secondary" data-owner-group>Настроить группу выплат</button><p class="allocation-info">Приглашения получат только сотрудники из вашего списка без отметки о выплате. Сначала подтвердите распределение. В группу они вступают сами.</p>${gbuAllocationCardCommentHtml(comments,0,commentDrafts)}${plan.owner_due?gbuAllocationPayoutStatus(plan,0):''}</section>
+  <section><h4>Мой список выплат · ${gbuAllocationMoney(plan.owner_due)}</h4>${gbuAllocationOwnerProgressHtml(plan)}${gbuOwnerMembersSummaryHtml(ownerMembers)}<div class="allocation-owner-grid">${plan.owner_payments.map((p,index)=>gbuAllocationOwnerRecipientHtml(p,index+1,ownerMembers?.items?.find(m=>Number(m.employee_id)===Number(p.employee_id)))).join('')||'<p>Доплат сотрудникам нет.</p>'}</div><button type="button" class="secondary" data-allocation-copy>Скопировать мой список</button><button type="button" class="secondary" data-owner-invite ${!plan.locked?'disabled':''}>✈ Пригласить в группу</button><button type="button" class="secondary" data-owner-group>Настроить группу выплат</button><p class="allocation-info">Приглашения получат только сотрудники из вашего списка без отметки о выплате. Сначала подтвердите распределение. В группу они вступают сами.</p>${gbuAllocationCardCommentHtml(comments,0,commentDrafts)}${plan.owner_due?gbuAllocationPayoutStatus(plan,0):''}</section>
   ${plan.unspent_cash?`<p class="allocation-info">Не распределено у бригадиров: ${gbuAllocationMoney(plan.unspent_cash)}. Эти деньги нужно передать тебе.</p>`:''}
   ${plan.owner_surplus?`<p class="allocation-info">Останется после зарплаты: ${gbuAllocationMoney(plan.owner_surplus)}.</p>`:''}
   <p class="allocation-payout-total ${plan.all_payouts_confirmed?'paid':'unpaid'}" role="status">${plan.locked?(plan.all_payouts_confirmed?'Все выплаты подтверждены':'Есть неподтверждённые выплаты'):'План ещё не подтверждён'}</p><p data-allocation-status role="status" aria-live="polite"></p><button type="button" class="primary" data-allocation-send>${plan.locked?'Отправить неотправленные поручения':'Подтвердить план и отправить бригадирам'}</button>`;
@@ -19572,7 +19572,7 @@ async function openGbuCashAllocation(month,period){
      saving=true;input.blur();panel.querySelectorAll('button,input,select').forEach(e=>e.disabled=true);status.textContent='Проверяем права бота и сохраняем…';
      try{
       const saved=await api('/api/gbu-owner-payment-group',{method:'POST',body:JSON.stringify({chat_id:Number(id)})});
-      if(active()&&panel.isConnected){saving=false;close();qs('[data-allocation-status]',root).textContent='Подключена группа: '+saved.title;toast('Группа выплат подключена')}
+      if(active()&&panel.isConnected){saving=false;close();ownerMembers=null;qs('[data-allocation-status]',root).textContent='Подключена группа: '+saved.title;toast('Группа выплат подключена');refreshOwnerMembers()}
      }catch(e){if(active()&&panel.isConnected)status.textContent=e.message}
      finally{saving=false;if(panel.isConnected)panel.querySelectorAll('button,input,select').forEach(e=>e.disabled=false)}
     };
@@ -19588,7 +19588,7 @@ async function openGbuCashAllocation(month,period){
     const r=await api('/api/gbu-cash-allocation/'+encodeURIComponent(plan.plan_id)+'/invite-owner-recipients',{method:'POST',body:'{}'});
     if(active()){busy=false;redraw();qs('[data-allocation-status]',root).textContent='Группа: '+r.title+'. Отправлено: '+r.sent+'. Уже отправлено: '+r.already_sent+'. Не отправлено: '+r.failed+'. Доставка требует проверки: '+r.unknown+'. Нет привязки Telegram: '+r.missing+'.'+(r.details.length?'\n'+r.details.join('\n'):'')}
    }catch(e){if(active()){busy=false;redraw();qs('[data-allocation-status]',root).textContent=e.message}}
-   finally{busy=false}
+   finally{busy=false;refreshOwnerMembers()}
   };
   const button=qs('[data-allocation-send]',root),deliveries=plan.deliveries||[];
   const allSent=plan.locked&&plan.confirmation_buttons_sent&&deliveries.length>0&&deliveries.every(d=>d.status==='sent');
@@ -19661,6 +19661,15 @@ async function openGbuCashAllocation(month,period){
   const positions=[];for(let e=root.parentElement;e;e=e.parentElement)positions.push([e,e.scrollTop]);
   draw();positions.forEach(([e,y])=>e.scrollTop=y);
  }
+ async function refreshOwnerMembers(){
+  if(!active()||!plan?.plan_id||membersLoading)return;
+  const planId=plan.plan_id;membersLoading=true;
+  try{
+   const next=await api('/api/gbu-cash-allocation/'+encodeURIComponent(planId)+'/owner-group-members',{method:'POST',body:'{}',cache:'no-store'});
+   if(active()&&plan?.plan_id===planId){const changed=JSON.stringify(ownerMembers)!==JSON.stringify(next);ownerMembers=next;if(changed&&!busy&&!commentDrafts.size)redraw()}
+  }catch(e){/* Membership lookup must not interrupt payroll or clear saved payment marks. */}
+  finally{membersLoading=false}
+ }
  async function poll(){
   if(!active())return;
   if(!busy&&!commentDrafts.size&&plan){
@@ -19673,7 +19682,7 @@ async function openGbuCashAllocation(month,period){
     }
    }catch(e){/* Keep the last confirmed view until the connection returns. */}
   }
-  if(active())setTimeout(poll,7000);
+  if(active()){if(!busy&&!commentDrafts.size)refreshOwnerMembers();setTimeout(poll,7000)}
  }
  async function resend(uid){
   if(busy||!active())return;
@@ -19703,7 +19712,7 @@ async function openGbuCashAllocation(month,period){
  try{const [data,notes]=await Promise.all([
   api('/api/gbu-cash-allocation?month='+encodeURIComponent(month)+'&half='+half,{cache:'no-store'}),
   api('/api/gbu-cash-allocation/comments?month='+encodeURIComponent(month)+'&half='+half,{cache:'no-store'})]);
-  if(active()){plan=data;comments=notes.card_comments||[];draw();setTimeout(poll,7000)}}
+  if(active()){plan=data;comments=notes.card_comments||[];draw();refreshOwnerMembers();setTimeout(poll,7000)}}
  catch(e){if(active()){root.textContent=e.message;const back=document.createElement('button');back.textContent='← К зарплате';back.onclick=()=>openGbuPayroll(month,period);root.append(back)}}
 }
 </script></body>''',1)
@@ -20035,6 +20044,7 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>',r'''<style>
 #gbuAllocation .allocation-owner-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;margin:8px 0}
 #gbuAllocation .allocation-owner-payment{position:relative;min-width:0;height:96px;box-sizing:border-box;padding:6px;border:1px solid var(--line);border-radius:6px}
 #gbuAllocation .allocation-owner-payment.is-paid{background:#e0f1e7}
+#gbuAllocation .allocation-owner-number{position:absolute;top:30px;left:6px;display:flex;align-items:center;height:24px;font-size:11px;line-height:1;font-weight:600;color:var(--muted);pointer-events:none}
 #gbuAllocation .allocation-owner-payment>.allocation-recipient{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:minmax(0,1fr) 30px;gap:4px;min-width:0;height:100%;margin:0}
 #gbuAllocation .allocation-owner-payment .allocation-line{display:contents}
 #gbuAllocation .allocation-owner-payment .allocation-line>span{grid-column:1 / -1;grid-row:1;padding-right:0;font-size:11px;line-height:1.2;min-height:0;overflow-wrap:anywhere;overflow:auto}
@@ -20051,8 +20061,8 @@ function gbuAllocationOwnerProgressHtml(plan){
  const paid=plan.owner_payments.filter(p=>p.paid===true),sum=paid.reduce((s,p)=>s+Number(p.amount),0);
  return `<div class="allocation-owner-progress" role="status"><b>Выплачено: ${gbuAllocationMoney(sum)} · ${paid.length} из ${plan.owner_payments.length}</b><b>Осталось: ${gbuAllocationMoney(Number(plan.owner_due)-sum)}</b></div>`;
 }
-function gbuAllocationOwnerRecipientHtml(person){
- return `<div class="allocation-owner-payment ${person.paid?'is-paid':''}">${gbuAllocationRecipientHtml(person)}<label class="allocation-owner-check"><input type="checkbox" data-owner-payment="${Number(person.employee_id)}" data-version="${Number(person.payment_version||0)}" ${person.paid?'checked':''} aria-label="Выплачено: ${esc(person.name)}" title="Выплачено"></label></div>`;
+function gbuAllocationOwnerRecipientHtml(person,number,membership){
+ return `<div class="allocation-owner-payment ${person.paid?'is-paid':''}">${gbuAllocationRecipientHtml(person)}<span class="allocation-owner-number" aria-label="Номер ${number}">№ ${number}</span>${gbuOwnerMemberBadgeHtml(membership)}<label class="allocation-owner-check"><input type="checkbox" data-owner-payment="${Number(person.employee_id)}" data-version="${Number(person.payment_version||0)}" ${person.paid?'checked':''} aria-label="Выплачено: ${esc(person.name)}" title="Выплачено"></label></div>`;
 }
 </script></body>''',1)
 
@@ -20355,3 +20365,197 @@ async def gbu_owner_payment_invite_send(plan_id: str,
         if status != 'sent':
             result['details'].append(person['name']+(': не отправлено — сотруднику нужно запустить бота и проверить блокировку' if status == 'failed' else ': доставка требует проверки, повтор не отправлен'))
     return result
+
+
+# Private membership tracking for the owner's payroll group. This table is new;
+# create_all can add it without changing existing invitations or payout records.
+class GbuOwnerPaymentMember(Base):
+    __tablename__ = 'gbu_owner_payment_members'
+    chat_id = Column(BigInteger, primary_key=True)
+    tg_id = Column(BigInteger, primary_key=True)
+    status = Column(String(20), nullable=False, default='unknown')
+    joined_by_invite = Column(Boolean, nullable=False, default=False)
+    joined_at = Column(DateTime, nullable=True)
+    event_at = Column(DateTime, nullable=True)
+    checked_at = Column(DateTime, nullable=True)
+    check_error = Column(Boolean, nullable=False, default=False)
+
+
+def gbu_owner_member_lock(db, chat_id, tg_id):
+    if db.get_bind().dialect.name == 'postgresql':
+        db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),
+                   {'key': f'legion:owner-payroll-member:{chat_id}:{tg_id}'})
+
+
+class GbuOwnerPaymentMembershipInput(BaseModel):
+    chat_id: StrictInt = Field(lt=0)
+    tg_id: StrictInt = Field(gt=0)
+    present: StrictBool
+    was_present: StrictBool
+    event_at: datetime
+    invite_link: StrictStr = Field(default='', max_length=2048)
+
+
+@app.post('/api/bot/gbu-owner-payment-membership', dependencies=[Depends(_bot_key)])
+def gbu_owner_payment_membership_event(data: GbuOwnerPaymentMembershipInput,
+        db: Session=Depends(get_db)):
+    # Ignore unrelated groups and people who have never been invited to this group.
+    cfg = db.scalar(select(GbuOwnerPaymentGroup).where(GbuOwnerPaymentGroup.chat_id == data.chat_id))
+    invited = db.scalar(select(GbuOwnerPaymentInvite).where(
+        GbuOwnerPaymentInvite.chat_id == data.chat_id,
+        GbuOwnerPaymentInvite.tg_id == data.tg_id,
+        GbuOwnerPaymentInvite.status.in_(['pending', 'sent', 'unknown']))) if cfg else None
+    if not cfg or not invited:
+        return {'ok': True, 'tracked': False}
+    moment = data.event_at
+    if moment.tzinfo is None:
+        raise HTTPException(422, 'Время события должно содержать часовой пояс')
+    moment = moment.astimezone(timezone.utc).replace(tzinfo=None)
+    gbu_owner_member_lock(db, data.chat_id, data.tg_id)
+    member = db.get(GbuOwnerPaymentMember, (data.chat_id, data.tg_id), populate_existing=True)
+    if member is None:
+        member = GbuOwnerPaymentMember(chat_id=data.chat_id, tg_id=data.tg_id)
+        db.add(member)
+    if member.event_at and moment < member.event_at:
+        return {'ok': True, 'tracked': True}
+    member.event_at = moment
+    member.checked_at = datetime.utcnow()
+    member.check_error = False
+    member.status = 'member' if data.present else 'left'
+    if data.present and not data.was_present:
+        member.joined_at = moment
+        member.joined_by_invite = bool(data.invite_link and
+                                      secrets.compare_digest(data.invite_link, cfg.invite_link))
+    db.commit()
+    return {'ok': True, 'tracked': True}
+
+
+def gbu_owner_members_context(db, plan_id, user):
+    _require_gbu_payroll_owner(db, user)
+    row = db.scalar(select(GbuCashAllocation).where(GbuCashAllocation.plan_id == plan_id))
+    if row is None:
+        raise HTTPException(404, 'План не найден')
+    cfg = db.get(GbuOwnerPaymentGroup, user.id)
+    people = json.loads(row.payload).get('owner_payments', [])
+    ids = [int(p['employee_id']) for p in people if int(p['employee_id']) > 0]
+    profiles = {p.id: p for p in db.scalars(select(Employee).where(Employee.id.in_(ids)))} if ids else {}
+    return cfg, [(int(p['employee_id']), int(profiles[int(p['employee_id'])].tg_id or 0)
+                 if int(p['employee_id']) in profiles else 0) for p in people]
+
+
+def gbu_owner_members_view(db, cfg, people, plan_id):
+    if cfg is None:
+        return {'configured': False, 'items': []}
+    invites = {d.tg_id: d.status for d in db.scalars(select(GbuOwnerPaymentInvite).where(
+        GbuOwnerPaymentInvite.chat_id == cfg.chat_id,
+        GbuOwnerPaymentInvite.plan_id == plan_id))}
+    members = {m.tg_id: m for m in db.scalars(select(GbuOwnerPaymentMember).where(
+        GbuOwnerPaymentMember.chat_id == cfg.chat_id))}
+    items = []
+    for employee_id, tg_id in people:
+        member = members.get(tg_id)
+        invitation = invites.get(tg_id)
+        if tg_id <= 0:
+            state = 'missing'
+        elif member and member.check_error:
+            state = 'unknown'
+        elif member and member.status == 'member':
+            state = 'joined' if member.joined_by_invite else 'member'
+        elif member and member.joined_at and member.status == 'left':
+            state = 'left'
+        elif not invitation:
+            state = 'not_invited'
+        elif invitation == 'failed':
+            state = 'failed'
+        elif member and member.status == 'left':
+            state = 'waiting'
+        else:
+            state = 'unknown'
+        items.append({'employee_id': employee_id, 'state': state})
+    return {'configured': True, 'title': cfg.title, 'items': items}
+
+
+@app.post('/api/gbu-cash-allocation/{plan_id}/owner-group-members')
+async def gbu_owner_payment_members_refresh(plan_id: str,
+        db: Session=Depends(get_db), user: TelegramUser=Depends(require_app_user)):
+    import asyncio
+    cfg, people = gbu_owner_members_context(db, plan_id, user)
+    if cfg is None:
+        return gbu_owner_members_view(db, cfg, people, plan_id)
+    chat_id = cfg.chat_id
+    now = datetime.utcnow()
+    cached = {m.tg_id: m for m in db.scalars(select(GbuOwnerPaymentMember).where(
+        GbuOwnerPaymentMember.chat_id == chat_id))}
+    # Oldest checks first, including paid recipients. Bound a batch to keep the
+    # app responsive and cache attempts for 30 seconds across browser sessions.
+    due = sorted({tg for _, tg in people if tg > 0},
+                 key=lambda tg: cached[tg].checked_at or datetime.min if tg in cached else datetime.min)
+    claimed = []
+    for tg_id in due:
+        if len(claimed) >= 16:
+            break
+        gbu_owner_member_lock(db, chat_id, tg_id)
+        member = db.get(GbuOwnerPaymentMember, (chat_id, tg_id), populate_existing=True)
+        if member and member.checked_at and now-member.checked_at < timedelta(seconds=30):
+            continue
+        if member is None:
+            member = GbuOwnerPaymentMember(chat_id=chat_id, tg_id=tg_id)
+            db.add(member)
+        member.checked_at = now
+        claimed.append(tg_id)
+    db.commit()
+    gate = asyncio.Semaphore(4)
+    async def check(tg_id):
+        async with gate:
+            try:
+                result = await asyncio.wait_for(free_staff_telegram_call('getChatMember',
+                    {'chat_id': chat_id, 'user_id': tg_id}), timeout=3)
+                status = result.get('status')
+                if status not in ('creator', 'administrator', 'member', 'restricted', 'left', 'kicked'):
+                    return tg_id, None
+                present = status in ('creator', 'administrator', 'member') or (
+                    status == 'restricted' and result.get('is_member') is True)
+                return tg_id, present
+            except Exception:
+                return tg_id, None
+    results = await asyncio.gather(*(check(tg_id) for tg_id in claimed))
+    for tg_id, present in results:
+        gbu_owner_member_lock(db, chat_id, tg_id)
+        member = db.get(GbuOwnerPaymentMember, (chat_id, tg_id), populate_existing=True)
+        # A fresh join/leave event or newer lookup always wins over this lookup.
+        if member is None or member.checked_at != now:
+            continue
+        member.check_error = present is None
+        if present is not None:
+            member.status = 'member' if present else 'left'
+            if present and member.joined_at is None:
+                # Observed membership; exact link attribution requires a bot event.
+                member.joined_at = now
+    db.commit()
+    # Settings may change while Telegram is being queried; never show the old
+    # group's participants as members of the newly selected group.
+    cfg, people = gbu_owner_members_context(db, plan_id, user)
+    return JSONResponse(gbu_owner_members_view(db, cfg, people, plan_id), headers={'Cache-Control': 'private, no-store'})
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style>
+#gbuAllocation .allocation-owner-membership{position:absolute;top:35px;left:34px;right:33px;height:16px;line-height:16px;font-size:9px;font-weight:700;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted);pointer-events:none}
+#gbuAllocation .allocation-owner-payment .allocation-line>span{align-self:start;max-height:27px}
+#gbuAllocation .allocation-owner-membership.joined,#gbuAllocation .allocation-owner-membership.member{color:#58c785}
+#gbuAllocation .allocation-owner-membership.waiting,#gbuAllocation .allocation-owner-membership.left{color:#e3b454}
+#gbuAllocation .is-paid .allocation-owner-membership.joined,#gbuAllocation .is-paid .allocation-owner-membership.member{color:#17683e}
+#gbuAllocation .is-paid .allocation-owner-membership{color:#555}
+</style><script>
+function gbuOwnerMemberBadgeHtml(membership){
+ if(!membership)return '';
+ const labels={joined:'✅ Вступил',member:'✅ В группе',waiting:'⏳ Не вступил',left:'Вышел',not_invited:'Не приглашён',failed:'Не отправлено',missing:'Нет Telegram',unknown:'Проверка'};
+ const titles={joined:'Вступил по приглашению в группу выплат',member:'Уже находится в группе выплат',waiting:'Приглашение есть, в группу ещё не вступил',left:'Вышел из группы выплат',not_invited:'Приглашение ещё не отправлено',failed:'Telegram отклонил приглашение',missing:'Нет привязки Telegram',unknown:'Членство пока не подтверждено. Проверка повторится автоматически'};
+ const key=Object.hasOwn(labels,membership.state)?membership.state:'unknown';
+ return `<span class="allocation-owner-membership ${key}" title="${esc(titles[key])}" aria-label="${esc(titles[key])}">${esc(labels[key])}</span>`;
+}
+function gbuOwnerMembersSummaryHtml(members){
+ if(!members?.configured)return '';
+ const items=members.items||[],count=items.filter(m=>m.state==='joined'||m.state==='member').length;
+ return `<p class="allocation-info" role="status">${esc(members.title)} · В группе: ${count} из ${items.length}. Отметки видны только вам.</p>`;
+}
+</script></body>''', 1)
