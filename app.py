@@ -20156,16 +20156,17 @@ def gbu_cash_allocation_owner_payment(plan_id: str, data: GbuCashAllocationOwner
 
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>',r'''<style>
 #gbuAllocation .allocation-owner-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;margin:10px 0}
-#gbuAllocation .allocation-owner-payment{position:relative;display:grid;grid-template-rows:10px 32px 20px 21px;gap:1px;min-width:0;height:96px;box-sizing:border-box;padding:4px;border:1px solid var(--line);border-radius:9px;background:var(--panel);box-shadow:0 1px 3px rgba(0,0,0,.035)}
+#gbuAllocation .allocation-owner-payment{position:relative;display:grid;grid-template-rows:10px 35px 21px;gap:1px;min-width:0;height:78px;box-sizing:border-box;padding:4px;border:1px solid var(--line);border-radius:9px;background:var(--panel);box-shadow:0 1px 3px rgba(0,0,0,.035)}
 #gbuAllocation .allocation-owner-payment.is-paid{background:color-mix(in srgb,var(--panel) 88%,var(--green) 12%);border-color:var(--green)}
 #gbuAllocation .allocation-owner-card-head{display:flex;align-items:center;justify-content:space-between;gap:2px;min-width:0}
 #gbuAllocation .allocation-owner-number{position:static;flex-shrink:0;font-size:8px;line-height:10px;font-weight:600;color:var(--muted);pointer-events:none;font-variant-numeric:tabular-nums}
-#gbuAllocation .allocation-owner-identity{display:flex;flex-direction:column;justify-content:center;gap:0;min-width:0;overflow:hidden}
+#gbuAllocation .allocation-owner-identity{display:flex;flex-direction:column;justify-content:center;gap:2px;min-width:0;overflow:hidden}
+#gbuAllocation .allocation-owner-name-row{display:flex;align-items:baseline;justify-content:space-between;gap:3px;min-width:0}
 #gbuAllocation .allocation-owner-name{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:700;line-height:12px;color:var(--text)}
-#gbuAllocation .allocation-owner-meta{display:flex;align-items:flex-start;justify-content:space-between;gap:3px;min-width:0;font-size:9px;line-height:10px;color:var(--muted)}
-#gbuAllocation .allocation-owner-metro{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;min-width:0;max-height:20px;overflow:hidden;overflow-wrap:anywhere}
-#gbuAllocation .allocation-owner-height{flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums}
-#gbuAllocation .allocation-owner-payment .allocation-contact-actions{position:static;align-self:center;gap:4px;margin:0}
+#gbuAllocation .allocation-owner-meta{display:flex;align-items:center;justify-content:space-between;gap:3px;min-width:0;min-height:20px;font-size:9px;line-height:10px;color:var(--muted)}
+#gbuAllocation .allocation-owner-metro{flex:1 1 0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;min-width:0;max-height:20px;overflow:hidden;overflow-wrap:anywhere}
+#gbuAllocation .allocation-owner-height{flex-shrink:0;font-size:9px;line-height:10px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+#gbuAllocation .allocation-owner-payment .allocation-contact-actions{position:static;flex-shrink:0;align-self:center;gap:3px;margin:0}
 #gbuAllocation .allocation-owner-payment .allocation-contact-action{box-sizing:border-box;flex-basis:20px;width:20px;height:20px;min-height:20px;padding:3px;border:0;border-radius:5px;background:var(--panel2)}
 #gbuAllocation .allocation-owner-payment .allocation-contact-action svg{width:15px;height:15px}
 #gbuAllocation .allocation-owner-card-foot{display:flex;align-items:center;justify-content:space-between;gap:2px;min-width:0;border-top:1px solid var(--line)}
@@ -20189,7 +20190,7 @@ function gbuAllocationOwnerRecipientHtml(person,number,membership){
  const name=parts.shift()||'Без имени';
  const height=/^\d{3}$/.test(parts[parts.length-1]||'')?parts.pop():'';
  const metro=parts.join(' ');
- return `<div class="allocation-owner-payment ${person.paid?'is-paid':''}"><div class="allocation-owner-card-head"><span class="allocation-owner-number" aria-label="Номер ${number}">№ ${number}</span>${gbuOwnerMemberBadgeHtml(membership)}</div><div class="allocation-owner-identity" title="${esc(full)}"><strong class="allocation-owner-name">${esc(name)}</strong><div class="allocation-owner-meta"><span class="allocation-owner-metro">${esc(metro)}</span>${height?`<span class="allocation-owner-height">${esc(height)} см</span>`:''}</div></div>${gbuAllocationContactActionsHtml(person)}<div class="allocation-owner-card-foot"><b class="allocation-owner-amount">${gbuAllocationMoney(person.amount)}</b><label class="allocation-owner-check"><input type="checkbox" data-owner-payment="${Number(person.employee_id)}" data-version="${Number(person.payment_version||0)}" ${person.paid?'checked':''} aria-label="Выплачено: ${esc(person.name)}" title="Выплачено"></label></div></div>`;
+ return `<div class="allocation-owner-payment ${person.paid?'is-paid':''}"><div class="allocation-owner-card-head"><span class="allocation-owner-number" aria-label="Номер ${number}">№ ${number}</span>${gbuOwnerMemberBadgeHtml(membership)}</div><div class="allocation-owner-identity" title="${esc(full)}"><div class="allocation-owner-name-row"><strong class="allocation-owner-name">${esc(name)}</strong>${height?`<span class="allocation-owner-height">${esc(height)}</span>`:''}</div><div class="allocation-owner-meta"><span class="allocation-owner-metro">${esc(metro)}</span>${gbuAllocationContactActionsHtml(person)}</div></div><div class="allocation-owner-card-foot"><b class="allocation-owner-amount">${gbuAllocationMoney(person.amount)}</b><label class="allocation-owner-check"><input type="checkbox" data-owner-payment="${Number(person.employee_id)}" data-version="${Number(person.payment_version||0)}" ${person.paid?'checked':''} aria-label="Выплачено: ${esc(person.name)}" title="Выплачено"></label></div></div>`;
 }
 </script></body>''',1)
 
