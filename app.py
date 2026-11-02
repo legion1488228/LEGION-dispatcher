@@ -3793,6 +3793,7 @@ async def gbu_ocr(
     ).all()
     contact_pairs = [(str(name), str(phone)) for name, phone in contacts]
     for draft in drafts:
+        dispatch_mark_surname_review(draft)
         draft.update(dispatch_import_route_fields(draft))
         if import_category=='elite':
             reviewed_route=dispatch_ocr_route_reference(db,draft.get('route'))
@@ -5595,6 +5596,8 @@ def edit_number_card(data: NumberCardInput, db: Session = Depends(get_db)):
     surname = data.surname.strip().upper()
     if not surname:
         return {'saved': False, 'error': 'Укажите фамилию умершего.'}
+    if row.source == data.source:
+        dispatch_sync_corrected_surname(db, row, surname)
     row.surname, row.source = surname, data.source
     db.commit()
     return {'saved': True, 'id': row.id}
@@ -8269,6 +8272,10 @@ def cabinet_command_claim(db: Session = Depends(get_db)):
         return {'job':None}
     row.status='running'; row.lease_until=now+timedelta(minutes=10)
     payload=json.loads(row.payload)
+    if not dispatch_confirmed_surname_job_current(db, payload):
+        row.status='error';row.payload='{}';row.result=json.dumps({'error':'Фамилия или владелец заказа уже изменены. Автоисправление отменено.'})
+        db.commit()
+        return {'job':None}
     if not _is_cabinet_owner(db, row.tg_id):
         grant = db.get(BrigadierCabinetAccess, row.tg_id)
         if not grant or payload.get('access_version') != grant.version:
@@ -14922,7 +14929,7 @@ def dispatch_queue_activation(db,item):
     payload={'tg_id':uid,'action':'number','access_version':access['version'],
         'dispatch_activation':{'order_id':item['id'],'revision':item['revision']},
         'values':{'work_date':item['work_date'],'source':item['source'],
-            'surname':item['deceased_name'].strip().split()[0].upper(),
+            'surname':dispatch_number_surname(item['deceased_name']),
             'photo_time':item['arrival_time'] or item['issue_time']}}
     if not job:
         job=CabinetCommand(id=key,tg_id=uid,fingerprint=dispatch_hash(payload));db.add(job)
@@ -21043,3 +21050,192 @@ body[data-cabinet-kind="owner"] .role-navigation .role-nav-icon{flex-shrink:0}
 INLINE_INDEX_HTML = _owner_payroll_bottom_navigation_html(INLINE_INDEX_HTML)
 UI_USAGE_CONTROLS['nav.payroll'] = ('Зарплата ГБУ', 'Нижнее меню', '[data-role-nav="payroll"]')
 UI_USAGE_CONTROLS.pop('staff.payroll', None)
+
+
+# Previous/next order navigation is distinct from photo navigation.
+def _control_report_order_navigation_html(html):
+    start = html.index('function openControlReportViewer(')
+    end = html.index('\n</script>', start)
+    section = html[start:end]
+
+    def replace(old, new):
+        nonlocal section
+        if section.count(old) != 1:
+            raise ValueError('Control order navigation anchor missing: ' + old[:100])
+        section = section.replace(old, new, 1)
+
+    replace('function openControlReportViewer(card,stage=1,trigger){',
+            'function openControlReportViewer(card,stage=1,trigger,navigation=null){')
+    replace(" document.querySelector('.bc-photo-viewer')?.close();", """ const previous=document.querySelector('.bc-photo-viewer[open]');
+ if(navigation&&previous)previous.dataset.orderSwitch='true';
+ previous?.close();
+ const orderNavigation=navigation||controlReportOrderNavigation(card,trigger);""")
+    replace("document.body.classList.remove('bc-viewer-open');const target=", "if(!document.querySelector('.bc-photo-viewer[open]'))document.body.classList.remove('bc-viewer-open');if(dialog.dataset.orderSwitch)return;const target=")
+    replace(' document.body.append(dialog);document.body.classList.add(\'bc-viewer-open\');dialog.showModal();close.focus();render();', r'''
+ dialog.classList.add('bc-has-order-navigation');
+ if(navigation)dialog.classList.add('bc-card-switch');
+ const orderIndex=orderNavigation.items.findIndex(item=>Number(item.id)===Number(card.id));
+ const orderFooter=document.createElement('nav');orderFooter.className='bc-order-navigation';orderFooter.setAttribute('aria-label','Переключение заказов');
+ orderFooter.innerHTML='<button type="button" data-order-prev aria-label="Предыдущий заказ">‹</button><span role="status" aria-live="polite"></span><button type="button" data-order-next aria-label="Следующий заказ">›</button>';
+ const orderPrev=orderFooter.querySelector('[data-order-prev]'),orderNext=orderFooter.querySelector('[data-order-next]');
+ orderFooter.querySelector('[role=status]').textContent='Заказ '+(orderIndex+1)+' / '+orderNavigation.items.length;
+ orderPrev.disabled=orderIndex<=0;orderNext.disabled=orderIndex<0||orderIndex>=orderNavigation.items.length-1;
+ const moveOrder=delta=>{
+  if(closing||dialog.classList.contains('photo-crew-editing'))return;
+  const target=orderNavigation.items[orderIndex+delta];if(!target)return;
+  openControlReportViewer(target,1,orderNavigation.trigger,orderNavigation);
+  const current=document.querySelector('.bc-photo-viewer[open]');
+  const direction=delta<0?'[data-order-prev]':'[data-order-next]';
+  const button=current?.querySelector(direction);
+  if(button&&!button.disabled)button.focus({preventScroll:true});
+ };
+ orderPrev.onclick=()=>moveOrder(-1);orderNext.onclick=()=>moveOrder(1);
+ // Keyboard users can navigate orders when the footer has focus; photo keys
+ // and swipes in the image keep their existing photo-only meaning.
+ orderFooter.addEventListener('keydown',event=>{
+  if(event.key==='ArrowLeft'||event.key==='ArrowRight'){
+   event.preventDefault();event.stopPropagation();moveOrder(event.key==='ArrowLeft'?-1:1);
+  }
+ });
+ dialog.append(orderFooter);
+ document.body.append(dialog);document.body.classList.add('bc-viewer-open');dialog.showModal();close.focus();render();''')
+    helper = r'''function controlReportOrderNavigation(card,trigger){
+ const root=trigger?.closest?.('#ownerBrigadeControlContent');
+ const items=typeof ownerBrigadeControlData==='undefined'?[]:(ownerBrigadeControlData?.items||[]);
+ const byId=new Map(items.map(item=>[Number(item.id),item]));
+ const visible=root?[...root.querySelectorAll('details.bc-order[data-control-card]')]
+  .filter(row=>!row.hidden&&!row.closest('[hidden],.hidden'))
+  .map(row=>byId.get(Number(row.dataset.controlCard))).filter(Boolean):[];
+ // The payroll viewer may open an order from a different day. Never use a
+ // stale Control list to navigate away from that standalone order.
+ return {items:visible.some(item=>Number(item.id)===Number(card.id))?visible:[card],trigger};
+}
+'''
+    html = html[:start] + helper + section + html[end:]
+    return html.replace('</body>', r'''<style id="control-order-navigation-style">
+dialog.bc-photo-viewer.bc-has-order-navigation{inset:12px 0 calc(76px + env(safe-area-inset-bottom,0px));height:min(680px,calc(100dvh - 100px - env(safe-area-inset-bottom,0px)));max-height:calc(100dvh - 100px - env(safe-area-inset-bottom,0px));overflow:visible}
+.bc-has-order-navigation .bc-expanded-card{border-radius:inherit;overflow:hidden}
+.bc-photo-viewer .bc-order-navigation{position:absolute;top:calc(100% + 10px);left:8px;right:8px;display:flex;align-items:center;justify-content:space-between;gap:12px;height:48px}
+.bc-photo-viewer .bc-order-navigation button{display:grid;place-items:center;box-sizing:border-box;width:46px;height:46px;min-width:46px;min-height:46px;padding:0;border:1px solid var(--gold2);border-radius:50%;background:var(--panel);color:var(--text);font-size:32px;line-height:1;touch-action:manipulation}
+.bc-photo-viewer .bc-order-navigation button:disabled{opacity:.35}
+.bc-photo-viewer .bc-order-navigation span{color:#fff;font-size:13px;font-weight:600;text-shadow:0 1px 3px #0009;font-variant-numeric:tabular-nums}
+.bc-photo-viewer.bc-card-switch[open],.bc-photo-viewer.bc-card-switch[open]::backdrop{animation:none!important}
+.bc-photo-viewer.photo-crew-editing .bc-order-navigation{display:none}
+</style></body>''', 1)
+
+
+INLINE_INDEX_HTML = _control_report_order_navigation_html(INLINE_INDEX_HTML)
+
+
+def dispatch_number_surname(value):
+    """Do not silently publish an OCR fragment as the deceased's surname."""
+    words = str(value or '').strip().split()
+    if not words:
+        raise HTTPException(422, 'Укажите фамилию умершего')
+    first = words[0].strip('.,:;')
+    if (len(first) <= 3 and len(words) > 1
+            and re.fullmatch(r'[А-ЯЁа-яё-]+', words[1])
+            and re.search(r'(?:ова|ева|ёва|ина|ский|ская|цкий|цкая|енко|евич|ович)$', words[1], re.I)):
+        raise HTTPException(409, 'Фамилия могла разделиться пробелом: «' + ' '.join(words[:2])
+            + '». Исправьте поле ФИО умершего перед отправкой номера.')
+    return first.upper()
+
+
+def dispatch_replace_card_surname(value, old_surname, new_surname):
+    """Replace only the surname; preserve the rest of an existing full name."""
+    words = str(value or '').strip().split()
+    if not words:
+        return new_surname
+    normalize = lambda v: re.sub(r'\s+', '', v).casefold().replace('ё', 'е')
+    if normalize(words[0]) == normalize(new_surname):
+        return ' '.join([new_surname, *words[1:]])
+    if normalize(words[0]) != normalize(old_surname):
+        return value
+    # The confirmed replacement can also repair a surname wrapped by OCR:
+    # ЕВС ТИННЕЕВА <name> -> ЕВСТИННЕЕВА <name>. Never infer missing letters.
+    consumed = 1
+    for count in range(2, min(len(words), 4) + 1):
+        if normalize(''.join(words[:count])) == normalize(new_surname):
+            consumed = count
+            break
+    return ' '.join([new_surname, *words[consumed:]])
+
+
+def dispatch_sync_corrected_surname(db, card, surname):
+    order = dispatch_order_for_card(db, card)
+    if order is None:
+        return
+    updated = dispatch_replace_card_surname(order.deceased_name, card.surname, surname)
+    if updated == order.deceased_name:
+        return
+    plan = db.get(DispatchPlan, order.id)
+    if plan is None:
+        plan = DispatchPlan(order_id=order.id, request_key=secrets.token_hex(16), payload='{}')
+        db.add(plan)
+    meta = json.loads(plan.payload)
+    meta['number_card_id'] = card.id
+    plan.payload = json.dumps(meta, ensure_ascii=False)
+    order.deceased_name = updated
+
+
+def dispatch_mark_surname_review(draft):
+    words = str(draft.get('deceased_name') or '').split()
+    if not words or len(words[0].strip('.,:;')) <= 3:
+        fields = list(draft.get('ocr_review_fields') or [])
+        if 'deceased_name' not in fields:
+            fields.append('deceased_name')
+        draft['ocr_review_fields'] = fields
+    return draft
+
+
+@app.on_event('startup')
+def _repair_confirmed_evstinneyeva_number():
+    """User-confirmed correction, scoped to one date, category and phone.
+
+    The existing bot command worker edits the original Telegram message and
+    synchronizes the canonical card. No replacement order or photo is created.
+    """
+    import logging
+    with Session(engine) as db:
+        cards = list(db.scalars(select(NumberCardEvent).where(
+            NumberCardEvent.work_date == date(2026, 11, 3),
+            NumberCardEvent.source == 'gbu', _visible_number_card()).with_for_update()))
+        matches = [card for card in cards
+            if re.sub(r'\D', '', brigadier_phone8(card.phone)) == '89939000624'
+            and str(card.surname or '').strip().upper() == 'ЕВС']
+        if len(matches) != 1:
+            return
+        card = matches[0]
+        transfer = db.get(NumberReassignment, card.id)
+        if transfer and transfer.status == 'pending':
+            logging.warning('Surname correction postponed: number card %s is being reassigned', card.id)
+            return
+        access = bot_cabinet_access_data(db, card.tg_id)
+        if not access.get('allowed'):
+            logging.warning('Surname correction unavailable: cabinet access for card %s', card.id)
+            return
+        key = dispatch_hash({'surname_correction': '2026-11-03-evstinneyeva', 'card_id': card.id})
+        if db.get(CabinetCommand, key):
+            return
+        payload = {'tg_id': card.tg_id, 'action': 'edit', 'access_version': access['version'],
+            'confirmed_surname_correction': {'card_id': card.id, 'expected_surname': 'ЕВС'},
+            'report_key': f'card:{card.chat_id}:{card.message_id}',
+            'values': {'surname': 'ЕВСТИННЕЕВА', 'source': 'gbu'}}
+        db.add(CabinetCommand(id=key, tg_id=card.tg_id, payload=json.dumps(payload, ensure_ascii=False),
+            fingerprint=dispatch_hash(payload), status='queued'))
+        db.add(ImportLog(kind='confirmed_surname_correction',
+            raw_text='ЕВС → ЕВСТИННЕЕВА', result_json=json.dumps({
+                'card_id': card.id, 'work_date': '2026-11-03', 'command_id': key}, ensure_ascii=False)))
+        db.commit()
+
+
+def dispatch_confirmed_surname_job_current(db, payload):
+    correction = payload.get('confirmed_surname_correction')
+    if not correction:
+        return True
+    card = db.get(NumberCardEvent, correction['card_id'])
+    return bool(card and card.tg_id == payload.get('tg_id')
+        and card.work_date == date(2026, 11, 3) and card.source == 'gbu'
+        and re.sub(r'\D', '', brigadier_phone8(card.phone)) == '89939000624'
+        and str(card.surname or '').strip().upper() == correction['expected_surname']
+        and db.get(NumberCardDeletion, card.id) is None)
