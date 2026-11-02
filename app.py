@@ -15699,7 +15699,7 @@ function dispatchRenderPairMode(){
   qs('[data-plan-pair-cancel]',toolbar).onclick=cancelDispatchPair;
   const remove=qs('[data-plan-unpair]',toolbar);if(remove)remove.onclick=()=>dispatchSavePair(null);
  }
- qsa('[data-plan-add],[data-plan-blank],[data-plan-send],[data-plan-send-one],[data-plan-payroll],[data-plan-agents],[data-plan-import],[data-plan-comment],[data-plan-numbers]',root).forEach(button=>{
+ qsa('[data-plan-add],[data-plan-blank],[data-plan-send],[data-plan-payroll],[data-plan-agents],[data-plan-import],[data-plan-comment],[data-plan-numbers]',root).forEach(button=>{
   if(mode){if(button.dispatchPairDisabled===undefined)button.dispatchPairDisabled=button.disabled;button.disabled=true}
   else if(button.dispatchPairDisabled!==undefined){button.disabled=button.dispatchPairDisabled;delete button.dispatchPairDisabled}
  });
@@ -15787,7 +15787,6 @@ root.innerHTML=`${dispatchEveningHtml(data)}<div class="dispatch-tools"><button 
  qs('[data-plan-payroll]',root).onclick=()=>openGbuPayroll();qs('[data-plan-agents]',root).onclick=()=>openGbuAgents();
  qs('[data-plan-import]',root).onclick=()=>openDispatchGbuImport();
  qs('[data-plan-comment]',root).onclick=()=>openDayComment(day);
- qsa('[data-plan-send-one]',root).forEach(button=>button.onclick=()=>dispatchSendOne(data.items.find(o=>o.id===Number(button.dataset.planSendOne)),button));
  qsa('[data-plan-pair]',root).forEach(button=>button.onclick=()=>openDispatchPair(data.items.find(item=>item.id===Number(button.dataset.planPair))));
  qsa('[data-plan-add]',root).forEach(b=>b.onclick=async()=>{if(b.disabled)return;b.disabled=true;b.dispatchRequestKey=b.dispatchRequestKey||dispatchToken();try{await api('/api/dispatch-board/blank',{method:'POST',body:JSON.stringify({work_date:day,source:b.dataset.planAdd,request_key:b.dispatchRequestKey})});await loadDispatchBoard()}catch(error){if(root.contains(b)){qs('[data-plan-status]',root).textContent=error.message;b.disabled=false}}});
  qsa('[data-plan-blank]',root).forEach(b=>b.onclick=()=>openDispatchEditor(null,b.dataset.planSource,Number(b.dataset.planBlank)));
@@ -16542,7 +16541,7 @@ def _dispatch_visible_crew_html(html):
 function dispatchMini(o){
  const title=o.source==='gbu'?'ГБУ':String(o.organization||o.agent_name||'Частный');
  const head=`<header><b>№${o.number} · ${esc(title)}</b></header>`;
- if(o.is_draft)return `<article class="dispatch-mini dispatch-draft" data-plan-card="${o.id}">${dispatchDeleteButton(o)}${dispatchSingleSendHtml(o)}<button type="button" class="dispatch-card-main" data-plan-id="${o.id}">${head}<p class="dispatch-order-name"><b>${esc(o.deceased_name||'Черновик')}</b><small>Информацию можно добавить позже</small></p><div class="dispatch-card-meta"><span>${esc(o.category_label||'Категория не выбрана')}${o.team_size?' · '+Number(o.team_size)+' чел.':''}</span></div><p>${esc(o.issue_time||'Время не указано')}</p></button><footer><button type="button" data-plan-id="${o.id}">Дополнить заказ</button></footer>${dispatchSingleSendStatusHtml(o)}</article>`;
+ if(o.is_draft)return `<article class="dispatch-mini dispatch-draft" data-plan-card="${o.id}">${dispatchDeleteButton(o)}<button type="button" class="dispatch-card-main" data-plan-id="${o.id}">${head}<p class="dispatch-order-name"><b>${esc(o.deceased_name||'Черновик')}</b><small>Информацию можно добавить позже</small></p><div class="dispatch-card-meta"><span>${esc(o.category_label||'Категория не выбрана')}${o.team_size?' · '+Number(o.team_size)+' чел.':''}</span></div><p>${esc(o.issue_time||'Время не указано')}</p></button><footer><button type="button" data-plan-id="${o.id}">Дополнить заказ</button></footer>${dispatchSingleSendStatusHtml(o)}</article>`;
  const surname=String(o.deceased_name||'').trim().split(/\s+/)[0]||'—';
  const people=[o.brigadier,...(o.members||[])].filter(Boolean);
  const assigned=Number.isInteger(o.assigned_count)?o.assigned_count:people.length,complete=assigned===o.team_size&&Boolean(o.brigadier);
@@ -16554,7 +16553,7 @@ function dispatchMini(o){
   if(key==='church'&&typeof o.church_required==='boolean')value=o.church_required?(value||'Да'):'Нет';
   return /^(морг|храм|церковь|кладбище|крематорий|кремация)(?:\s|:|$)/i.test(value)?value:label+' '+(value||'—');
  });
- return `<article class="dispatch-mini dispatch-detailed ${complete?'dispatch-complete':''} ${o.paired_order?'dispatch-paired':''}" data-plan-card="${o.id}"${dispatchPairStyle(o)}>${dispatchDeleteButton(o)}${dispatchSingleSendHtml(o)}<button type="button" class="dispatch-pair-corner ${o.paired_order?'is-paired':''}" data-plan-pair="${o.id}" aria-label="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Сдвоить заказ №'+o.number}" title="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Выбрать заказ для сдвоения'}" ${o.approved||o.category==='carryout'?'disabled':''}>Х2</button><button type="button" class="dispatch-card-main" data-plan-id="${o.id}" aria-label="Изменить заказ №${o.number} · ${esc(o.deceased_name)}">${head}<p class="dispatch-card-agent">Агент: ${esc(o.agent_name||'—')}</p><p class="dispatch-card-phone">${esc(phone||'Телефон не указан')}</p><div class="dispatch-card-meta"><span class="dispatch-card-category">${esc(o.category_label||'—')} · ${Number(o.team_size)} чел.</span></div><p class="dispatch-order-name"><b>Ум: ${esc(surname)}</b></p><div class="dispatch-card-times"><span>Выдача <b>${esc(o.issue_time||'—')}</b></span><span>Быть <b>${esc(o.arrival_time||'—')}</b></span></div><div class="dispatch-card-route">${route.map(stop=>`<p>${esc(stop)}</p>`).join('')}</div></button><section class="dispatch-inline-crew" aria-label="Состав заказа №${o.number}"><div class="dispatch-inline-status ${complete?'dispatch-done':''}"><span>Состав</span><b>${assigned}/${o.team_size}${complete?' ✓':''}</b></div><div class="dispatch-inline-people">${people.map(p=>`<p>${p.id===o.brigadier?.id?'<strong>':''}${esc(dispatchPerson(p))}${p.id===o.brigadier?.id?'</strong>':''}</p>`).join('')||'<p class="muted">Пока не назначен</p>'}</div><button type="button" class="dispatch-edit-inline" data-plan-crew-id="${o.id}" ${o.approved?'disabled':''}>${assigned?'Изменить состав':'Назначить состав'}</button>${dispatchSingleSendStatusHtml(o)}</section></article>`;
+ return `<article class="dispatch-mini dispatch-detailed ${complete?'dispatch-complete':''} ${o.paired_order?'dispatch-paired':''}" data-plan-card="${o.id}"${dispatchPairStyle(o)}>${dispatchDeleteButton(o)}<button type="button" class="dispatch-pair-corner ${o.paired_order?'is-paired':''}" data-plan-pair="${o.id}" aria-label="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Сдвоить заказ №'+o.number}" title="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Выбрать заказ для сдвоения'}" ${o.approved||o.category==='carryout'?'disabled':''}>Х2</button><button type="button" class="dispatch-card-main" data-plan-id="${o.id}" aria-label="Изменить заказ №${o.number} · ${esc(o.deceased_name)}">${head}<p class="dispatch-card-agent">Агент: ${esc(o.agent_name||'—')}</p><p class="dispatch-card-phone">${esc(phone||'Телефон не указан')}</p><div class="dispatch-card-meta"><span class="dispatch-card-category">${esc(o.category_label||'—')} · ${Number(o.team_size)} чел.</span></div><p class="dispatch-order-name"><b>Ум: ${esc(surname)}</b></p><div class="dispatch-card-times"><span>Выдача <b>${esc(o.issue_time||'—')}</b></span><span>Быть <b>${esc(o.arrival_time||'—')}</b></span></div><div class="dispatch-card-route">${route.map(stop=>`<p>${esc(stop)}</p>`).join('')}</div></button><section class="dispatch-inline-crew" aria-label="Состав заказа №${o.number}"><div class="dispatch-inline-status ${complete?'dispatch-done':''}"><span>Состав</span><b>${assigned}/${o.team_size}${complete?' ✓':''}</b></div><div class="dispatch-inline-people">${people.map(p=>`<p>${p.id===o.brigadier?.id?'<strong>':''}${esc(dispatchPerson(p))}${p.id===o.brigadier?.id?'</strong>':''}</p>`).join('')||'<p class="muted">Пока не назначен</p>'}</div><button type="button" class="dispatch-edit-inline" data-plan-crew-id="${o.id}" ${o.approved?'disabled':''}>${assigned?'Изменить состав':'Назначить состав'}</button>${dispatchSingleSendStatusHtml(o)}</section></article>`;
 }
 ''' + html[last:]
     old = " qsa('[data-plan-crew-id]',root).forEach(b=>{const order=data.items.find(x=>x.id===Number(b.dataset.planCrewId));if(order.composition_complete)b.disabled=false;b.setAttribute('aria-expanded','false');b.onclick=()=>openDispatchCrew(order)});"
@@ -20808,59 +20807,21 @@ def _taxi_personal_table_html(html):
 INLINE_INDEX_HTML = _taxi_personal_table_html(INLINE_INDEX_HTML)
 
 
-# Compact pinned send action and manual delivery recovery on each order card.
+# Pinned bulk send action and delivery status on each order card.
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style id="dispatch-send-controls">
 #dispatchActionsView .dispatch-sticky-panel>.dispatch-send{display:block;box-sizing:border-box;width:100%;margin:4px 0;min-height:34px;padding:6px 10px;font-size:12px;border-radius:8px}
 #dispatchActionsView .dispatch-sticky-panel>.dispatch-status{font-size:11px;line-height:1.25;margin:3px 0;white-space:pre-line;max-height:64px;overflow:auto}
 #dispatchActionsView .dispatch-sticky-panel>.dispatch-status:empty{display:none}
-#dispatchActionsView .dispatch-mini .dispatch-send-one{position:absolute;right:5px;top:81px;display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:34px!important;max-width:34px;min-width:34px;height:34px;min-height:34px;margin:0;padding:0;border:1px solid var(--gold);border-radius:8px;background:var(--panel);color:var(--gold);line-height:1;z-index:2;touch-action:manipulation}
-#dispatchActionsView .dispatch-mini:has(>.dispatch-pair-corner.is-paired)>.dispatch-send-one{top:97px}
-#dispatchActionsView .dispatch-mini.dispatch-draft>.dispatch-send-one{top:43px}
-#dispatchActionsView .dispatch-send-one svg{pointer-events:none;flex:none}
-#dispatchActionsView .dispatch-send-one:disabled{opacity:.4}
 #dispatchActionsView .dispatch-detailed .dispatch-card-phone,#dispatchActionsView .dispatch-detailed .dispatch-card-meta,#dispatchActionsView .dispatch-detailed .dispatch-order-name{padding-right:38px;box-sizing:border-box}
 #dispatchActionsView .dispatch-detailed .dispatch-order-name{min-height:36px}
 #dispatchActionsView .dispatch-detailed:has(>.dispatch-pair-corner.is-paired) .dispatch-order-name{min-height:52px}
 #dispatchActionsView .dispatch-send-result:empty{display:none}
 #dispatchActionsView .dispatch-send-result{margin:0;font-size:10px;line-height:1.3;white-space:normal;overflow-wrap:anywhere}
 </style><script>
-function dispatchSingleSendHtml(o){
- const status=o.receipt?.status||'not_sent',retry=['sent','confirmed','unknown'].includes(status);
- const ready=!o.is_draft&&o.composition_complete&&Boolean(o.brigadier?.tg_id);
- const label=retry?'Отправить заказ повторно':'Отправить заказ';
- return `<button type="button" class="dispatch-send-one" data-plan-send-one="${o.id}" ${ready?'':'disabled'} title="${ready?label:'Нужен полный состав и Telegram ID бригадира'}" aria-label="${label} №${o.number}"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg></button>`;
-}
 function dispatchSingleSendStatusHtml(o){
  const status=o.receipt?.status||'not_sent';
  const label=status==='confirmed'?'Подтверждён ✓':status==='sent'?'Отправлен ✓':status==='unknown'?'Доставка не подтверждена':'';
  return `<p class="dispatch-send-result" data-plan-send-result="${o.id}" role="status">${label}</p>`;
-}
-const dispatchSingleRequests=new Map();
-async function dispatchSendOne(order,button){
- if(!order||button.disabled)return;
- const card=button.closest('[data-plan-card]'),status=card?.querySelector('[data-plan-send-result]');
- button.disabled=true;
- const previous=order.receipt?.status||'not_sent';
- if(['sent','confirmed','unknown'].includes(previous)&&!confirm('Повторно отправить заказ №'+order.number+' бригадиру '+dispatchPerson(order.brigadier)+'?')){button.disabled=false;return}
- const slot=order.work_date+':'+order.id+':'+order.revision;
- const requestKey=dispatchSingleRequests.get(slot)||dispatchToken();dispatchSingleRequests.set(slot,requestKey);
- if(status)status.textContent='Отправка…';
- try{
-  const result=await api('/api/dispatch-board/orders/'+order.id+'/send',{method:'POST',body:JSON.stringify({revision:order.revision,request_key:requestKey})});
-  dispatchSingleRequests.delete(slot);
-  if(result.failed?.length){
-   order.receipt={...(order.receipt||{}),status:'unknown'};
-   if(status)status.textContent=result.failed.join('\n');
-   button.title='Отправить заказ повторно';
-   button.setAttribute('aria-label','Отправить заказ повторно №'+order.number);
-  }else{
-   order.receipt={...(order.receipt||{}),status:previous==='confirmed'?'confirmed':'sent'};
-   if(status)status.textContent='Отправлен · '+result.brigadier;
-   button.title='Отправить заказ повторно';
-   button.setAttribute('aria-label','Отправить заказ повторно №'+order.number);
-  }
- }catch(error){if(status)status.textContent=error.message}
- finally{if(button.isConnected)button.disabled=false}
 }
 </script></body>''', 1)
 
