@@ -20055,6 +20055,7 @@ def gbu_allocation_confirmation_message(plan, cashier):
             f"Зарплата: {date.fromisoformat(plan['salary_start']):%d.%m.%Y}–"
             f"{date.fromisoformat(plan['salary_end']):%d.%m.%Y}\n"
             f"Выплатить другим сотрудникам: <b>{money} ₽</b>\n\n"
+            '<b>❗️После выполнения❗️</b>\n'
             'Нажмите кнопку только после выполнения всех выплат по поручению, '
             'включая сумму, которую оставляете себе. Подтверждение появится у руководителя в приложении.')
 
