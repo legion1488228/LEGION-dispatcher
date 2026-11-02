@@ -8266,7 +8266,10 @@ def cabinet_command_claim(db: Session = Depends(get_db)):
         .order_by(CabinetCommand.created_at).with_for_update(skip_locked=True).limit(1))
     if not row:
         return {'job': None}
-    if not _can_use_owner_cabinet(db, row.tg_id):
+    payload=json.loads(row.payload)
+    internal_repair = (payload.get('action') == 'confirmed_surname_repair'
+        and dispatch_confirmed_surname_job_current(db, payload))
+    if not internal_repair and not _can_use_owner_cabinet(db, row.tg_id):
         row.status='error'; row.payload='{}'; row.result=json.dumps({'error':'Доступ к кабинету отозван'})
         db.commit()
         return {'job':None}
@@ -8276,7 +8279,7 @@ def cabinet_command_claim(db: Session = Depends(get_db)):
         row.status='error';row.payload='{}';row.result=json.dumps({'error':'Фамилия или владелец заказа уже изменены. Автоисправление отменено.'})
         db.commit()
         return {'job':None}
-    if not _is_cabinet_owner(db, row.tg_id):
+    if not internal_repair and not _is_cabinet_owner(db, row.tg_id):
         grant = db.get(BrigadierCabinetAccess, row.tg_id)
         if not grant or payload.get('access_version') != grant.version:
             row.status='error';row.payload='{}';row.result=json.dumps({'error':'Доступ изменён. Откройте действие заново'})
@@ -8359,6 +8362,14 @@ def cabinet_command_finish(data: CabinetCommandResult, db: Session = Depends(get
                     frame = OrderReportFraming(report_key=key, stage=ordinal)
                     db.add(frame)
                 frame.original_image = 'data:image/jpeg;base64,' + values['original_image']
+        if (intent.get('action') == 'confirmed_surname_repair' and data.status == 'error'
+                and dispatch_confirmed_surname_job_current(db, intent)):
+            # Editing one existing message is idempotent. Retry temporary Telegram
+            # failures without publishing a replacement message or blocking others.
+            row.status='running';row.lease_until=datetime.utcnow()+timedelta(minutes=1)
+            row.result=json.dumps(result,ensure_ascii=False)
+            db.commit()
+            return {'ok':True, 'retry_pending':True}
         row.status=data.status;row.result=json.dumps(result,ensure_ascii=False)
         row.payload=json.dumps(intent,ensure_ascii=False) if intent.get('action') == 'cash_summary' else '{}'
         db.commit()
@@ -21190,10 +21201,11 @@ def dispatch_mark_surname_review(draft):
 
 @app.on_event('startup')
 def _repair_confirmed_evstinneyeva_number():
-    """User-confirmed correction, scoped to one date, category and phone.
+    """Apply the user's correction locally, then edit the existing Telegram post.
 
-    The existing bot command worker edits the original Telegram message and
-    synchronizes the canonical card. No replacement order or photo is created.
+    The phone on the dispatch order may belong to the agent, whereas the
+    number card stores the brigadier's phone. Match the unique confirmed
+    surname/date/category instead of comparing those two different phones.
     """
     import logging
     with Session(engine) as db:
@@ -21201,41 +21213,47 @@ def _repair_confirmed_evstinneyeva_number():
             NumberCardEvent.work_date == date(2026, 11, 3),
             NumberCardEvent.source == 'gbu', _visible_number_card()).with_for_update()))
         matches = [card for card in cards
-            if re.sub(r'\D', '', brigadier_phone8(card.phone)) == '89939000624'
-            and str(card.surname or '').strip().upper() == 'ЕВС']
+            if str(card.surname or '').strip().upper() in {'ЕВС', 'ЕВСТИННЕЕВА'}]
         if len(matches) != 1:
+            logging.warning('Confirmed surname repair requires one matching card; found %s', len(matches))
             return
         card = matches[0]
         transfer = db.get(NumberReassignment, card.id)
         if transfer and transfer.status == 'pending':
             logging.warning('Surname correction postponed: number card %s is being reassigned', card.id)
             return
-        access = bot_cabinet_access_data(db, card.tg_id)
-        if not access.get('allowed'):
-            logging.warning('Surname correction unavailable: cabinet access for card %s', card.id)
-            return
-        key = dispatch_hash({'surname_correction': '2026-11-03-evstinneyeva', 'card_id': card.id})
-        if db.get(CabinetCommand, key):
-            return
-        payload = {'tg_id': card.tg_id, 'action': 'edit', 'access_version': access['version'],
-            'confirmed_surname_correction': {'card_id': card.id, 'expected_surname': 'ЕВС'},
-            'report_key': f'card:{card.chat_id}:{card.message_id}',
-            'values': {'surname': 'ЕВСТИННЕЕВА', 'source': 'gbu'}}
-        db.add(CabinetCommand(id=key, tg_id=card.tg_id, payload=json.dumps(payload, ensure_ascii=False),
-            fingerprint=dispatch_hash(payload), status='queued'))
-        db.add(ImportLog(kind='confirmed_surname_correction',
-            raw_text='ЕВС → ЕВСТИННЕЕВА', result_json=json.dumps({
-                'card_id': card.id, 'work_date': '2026-11-03', 'command_id': key}, ensure_ascii=False)))
+        # Synchronize the linked dispatch order BEFORE changing the matching key.
+        dispatch_sync_corrected_surname(db, card, 'ЕВСТИННЕЕВА')
+        card.surname = 'ЕВСТИННЕЕВА'
+        key = dispatch_hash({'surname_correction': '2026-11-03-evstinneyeva-v2', 'card_id': card.id})
+        job = db.get(CabinetCommand, key)
+        if job is None:
+            # This internal action is deliberately absent from CabinetCommandInput.
+            # It cannot be enqueued by a cabinet user and grants no cabinet rights.
+            payload = {'tg_id': card.tg_id, 'action': 'confirmed_surname_repair',
+                'confirmed_surname_correction': {'card_id': card.id, 'expected_surname': 'ЕВС'},
+                'report_key': f'card:{card.chat_id}:{card.message_id}',
+                'values': {'surname': 'ЕВСТИННЕЕВА', 'source': 'gbu', 'work_date': '2026-11-03'}}
+            db.add(CabinetCommand(id=key, tg_id=card.tg_id, payload=json.dumps(payload, ensure_ascii=False),
+                fingerprint=dispatch_hash(payload), status='queued'))
+            db.add(ImportLog(kind='confirmed_surname_correction',
+                raw_text='ЕВС → ЕВСТИННЕЕВА', result_json=json.dumps({
+                    'card_id': card.id, 'work_date': '2026-11-03', 'command_id': key}, ensure_ascii=False)))
         db.commit()
 
 
 def dispatch_confirmed_surname_job_current(db, payload):
     correction = payload.get('confirmed_surname_correction')
     if not correction:
-        return True
-    card = db.get(NumberCardEvent, correction['card_id'])
+        return payload.get('action') != 'confirmed_surname_repair'
+    card = db.get(NumberCardEvent, correction.get('card_id'))
+    transfer = db.get(NumberReassignment, card.id) if card else None
     return bool(card and card.tg_id == payload.get('tg_id')
         and card.work_date == date(2026, 11, 3) and card.source == 'gbu'
-        and re.sub(r'\D', '', brigadier_phone8(card.phone)) == '89939000624'
-        and str(card.surname or '').strip().upper() == correction['expected_surname']
+        and payload.get('report_key') == f'card:{card.chat_id}:{card.message_id}'
+        and payload.get('values', {}).get('surname') == 'ЕВСТИННЕЕВА'
+        and payload.get('values', {}).get('source') == 'gbu'
+        and correction.get('expected_surname') == 'ЕВС'
+        and str(card.surname or '').strip().upper() in {'ЕВС', 'ЕВСТИННЕЕВА'}
+        and not (transfer and transfer.status == 'pending')
         and db.get(NumberCardDeletion, card.id) is None)
