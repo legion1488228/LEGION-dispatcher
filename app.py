@@ -5528,7 +5528,6 @@ def order_completion_missing_number_orders(db: Session, work_date: date):
 
 @app.get('/api/bot/order-completion', dependencies=[Depends(_bot_key)])
 def bot_order_completion(work_date: date, db: Session = Depends(get_db)):
-    dispatch_repair_confirmed_surname(db)
     result = order_completion_data(db, work_date)
     # The bot publishes queued reports only for the current, non-deleted cards.
     rows = db.scalars(select(NumberCardEvent).where(
@@ -5582,7 +5581,7 @@ def record_number_card_closure(data: NumberCardClosureInput, db: Session = Depen
 @app.post('/api/bot/number-cards/edit', dependencies=[Depends(_bot_key)])
 def edit_number_card(data: NumberCardInput, db: Session = Depends(get_db)):
     row = db.scalar(select(NumberCardEvent).where(
-        NumberCardEvent.chat_id == data.chat_id, NumberCardEvent.message_id == data.message_id))
+        NumberCardEvent.chat_id == data.chat_id, NumberCardEvent.message_id == data.message_id).with_for_update())
     if (row is None or row.tg_id != data.tg_id or row.work_date != data.work_date
             or db.get(NumberCardDeletion, row.id) is not None):
         return {'saved': False, 'error': 'Карточка удалена или недоступна.'}
@@ -5595,13 +5594,13 @@ def edit_number_card(data: NumberCardInput, db: Session = Depends(get_db)):
     if row.source != data.source and db.scalar(select(CabinetOrderCash.event_id).where(CabinetOrderCash.event_id == row.id).limit(1)) is not None:
         return {'saved': False, 'error': 'После заполнения кассы тип заказа менять нельзя.'}
     surname = data.surname.strip().upper()
+    if dispatch_pending_surname_edit(db, row) and (surname != row.surname or data.source != row.source):
+        return {'saved': False, 'error': 'Дождитесь сохранения фамилии диспетчером.'}
     if not surname:
         return {'saved': False, 'error': 'Укажите фамилию умершего.'}
     if row.source == data.source:
         dispatch_sync_corrected_surname(db, row, surname)
     row.surname, row.source = surname, data.source
-    if row.work_date == date(2026, 11, 3) and row.source == 'gbu':
-        dispatch_repair_confirmed_surname(db)
     db.commit()
     return {'saved': True, 'id': row.id}
 
@@ -5638,8 +5637,6 @@ def record_number_card(data: NumberCardInput, db: Session = Depends(get_db)):
             row = db.scalar(select(NumberCardEvent).where(NumberCardEvent.chat_id == data.chat_id, NumberCardEvent.message_id == data.message_id))
             if row is None:
                 raise
-    if row.work_date == date(2026, 11, 3) and row.source == 'gbu':
-        dispatch_repair_confirmed_surname(db)
     return {"saved": True, "id": row.id}
 
 class BrigadierNumberDelete(BaseModel):
@@ -5695,8 +5692,6 @@ def number_card_contact_sort_key(row, statuses):
 
 @app.get("/api/number-cards")
 def list_number_cards(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
-    if work_date == date(2026, 11, 3):
-        dispatch_repair_confirmed_surname(db)
     rows = db.scalars(select(NumberCardEvent).where(NumberCardEvent.work_date == work_date, _visible_number_card()).order_by(NumberCardEvent.sent_at, NumberCardEvent.id)).all()
     employees = {e.tg_id: e for e in db.scalars(select(Employee).where(Employee.tg_id.in_([r.tg_id for r in rows])))} if rows else {}
     statuses = number_card_statuses(db, rows)
@@ -5708,7 +5703,6 @@ def list_number_cards(work_date: date, db: Session = Depends(get_db), user: Tele
 
 @app.get("/api/bot/number-cards", dependencies=[Depends(_bot_key)])
 def bot_number_card_history(tg_id: int, db: Session = Depends(get_db)):
-    dispatch_repair_confirmed_surname(db)
     rows = db.scalars(select(NumberCardEvent).where(NumberCardEvent.tg_id == tg_id, _visible_number_card()).order_by(NumberCardEvent.id)).all()
     return {"items": [{"chat_id":r.chat_id,"message_id":r.message_id,"work_date":r.work_date.isoformat(),
         "tg_id":r.tg_id,"full_name":r.full_name,"phone":brigadier_phone8(r.phone),"source":r.source,"surname":r.surname,
@@ -8268,7 +8262,6 @@ def cabinet_command_status(request_id: str, db: Session = Depends(get_db), user:
 
 @app.post('/api/bot/cabinet/claim', dependencies=[Depends(_bot_key)])
 def cabinet_command_claim(db: Session = Depends(get_db)):
-    dispatch_repair_confirmed_surname(db)
     now = datetime.utcnow()
     row = db.scalar(select(CabinetCommand).where(or_(CabinetCommand.status == 'queued',
         and_(CabinetCommand.status == 'running', CabinetCommand.lease_until < now)))
@@ -8276,15 +8269,15 @@ def cabinet_command_claim(db: Session = Depends(get_db)):
     if not row:
         return {'job': None}
     payload=json.loads(row.payload)
-    internal_repair = (payload.get('action') == 'confirmed_surname_repair'
-        and dispatch_confirmed_surname_job_current(db, payload))
+    internal_repair = (payload.get('action') == 'dispatcher_surname_edit'
+        and dispatch_surname_edit_job_current(db, payload))
     if not internal_repair and not _can_use_owner_cabinet(db, row.tg_id):
         row.status='error'; row.payload='{}'; row.result=json.dumps({'error':'Доступ к кабинету отозван'})
         db.commit()
         return {'job':None}
     row.status='running'; row.lease_until=now+timedelta(minutes=10)
     payload=json.loads(row.payload)
-    if not dispatch_confirmed_surname_job_current(db, payload):
+    if not dispatch_surname_edit_job_current(db, payload):
         row.status='error';row.payload='{}';row.result=json.dumps({'error':'Фамилия или владелец заказа уже изменены. Автоисправление отменено.'})
         db.commit()
         return {'job':None}
@@ -8371,8 +8364,9 @@ def cabinet_command_finish(data: CabinetCommandResult, db: Session = Depends(get
                     frame = OrderReportFraming(report_key=key, stage=ordinal)
                     db.add(frame)
                 frame.original_image = 'data:image/jpeg;base64,' + values['original_image']
-        if (intent.get('action') == 'confirmed_surname_repair' and data.status == 'error'
-                and dispatch_confirmed_surname_job_current(db, intent)):
+        if (intent.get('action') == 'dispatcher_surname_edit' and data.status == 'error'
+                and result.get('delivery_unknown') is True
+                and dispatch_surname_edit_job_current(db, intent)):
             # Editing one existing message is idempotent. Retry temporary Telegram
             # failures without publishing a replacement message or blocking others.
             row.status='running';row.lease_until=datetime.utcnow()+timedelta(minutes=1)
@@ -8380,7 +8374,7 @@ def cabinet_command_finish(data: CabinetCommandResult, db: Session = Depends(get
             db.commit()
             return {'ok':True, 'retry_pending':True}
         row.status=data.status;row.result=json.dumps(result,ensure_ascii=False)
-        row.payload=json.dumps(intent,ensure_ascii=False) if intent.get('action') == 'cash_summary' else '{}'
+        row.payload=json.dumps(intent,ensure_ascii=False) if intent.get('action') in {'cash_summary', 'dispatcher_surname_edit'} else '{}'
         db.commit()
     return {'ok':True}
 
@@ -9655,8 +9649,6 @@ def owner_brigade_control(work_date: date, db: Session = Depends(get_db),
         user: TelegramUser = Depends(require_app_user)):
     if not _dispatcher_access(db, user.id) or cabinet_kind(db, user.id) not in {'owner', 'assistant'}:
         raise HTTPException(403, 'Контроль доступен владельцу и помощникам с диспетчерской')
-    if work_date == date(2026, 11, 3):
-        dispatch_repair_confirmed_surname(db)
     cards = db.scalars(select(NumberCardEvent).where(NumberCardEvent.work_date == work_date,
         NumberCardEvent.source.in_(('private', 'gbu')), NumberCardEvent.tg_id.notin_(HIDDEN_TG_IDS),
         _visible_number_card())).all()
@@ -21210,70 +21202,182 @@ def dispatch_mark_surname_review(draft):
     return draft
 
 
-def dispatch_repair_confirmed_surname(db):
-    """Reconcile late-arriving cards as well as those present at startup.
+# A surname is edited by an authenticated dispatcher, independently of date/source.
+class ControlSurnameInput(BaseModel):
+    model_config = {'extra': 'forbid'}
+    request_id: str = Field(min_length=32, max_length=64, pattern=r'^[a-zA-Z0-9-]+$')
+    expected_surname: StrictStr = Field(max_length=100)
+    surname: StrictStr = Field(min_length=1, max_length=100)
 
-    Ignore already corrected cards when finding the unique erroneous fragment.
-    A completed edit job is reused unless stale bot data actually reverted it.
-    """
-    import logging
-    cards = list(db.scalars(select(NumberCardEvent).where(
-        NumberCardEvent.work_date == date(2026, 11, 3),
-        NumberCardEvent.source == 'gbu', _visible_number_card()).with_for_update()))
-    fragments = [c for c in cards if str(c.surname or '').strip().upper() == 'ЕВС']
-    corrected = [c for c in cards if str(c.surname or '').strip().upper() == 'ЕВСТИННЕЕВА']
-    matches = fragments if fragments else corrected
-    if len(matches) != 1:
-        if fragments:
-            logging.warning('Confirmed surname repair is ambiguous: %s fragments', len(fragments))
+
+def control_surname_text(value):
+    surname = ' '.join(str(value or '').split()).upper()
+    if not surname or len(surname) > 100 or not re.fullmatch(r"[А-ЯЁA-Z .’'\-]+", surname) or not re.search(r'[А-ЯЁA-Z]', surname):
+        raise HTTPException(422, 'Укажите фамилию буквами, без цифр и специальных символов')
+    return surname
+
+
+def dispatch_pending_surname_edit(db, card):
+    key = f'card:{card.chat_id}:{card.message_id}'
+    return next((job for job in db.scalars(select(CabinetCommand).where(
+        CabinetCommand.tg_id == card.tg_id, CabinetCommand.status.in_(('queued', 'running'))))
+        if (payload := json.loads(job.payload)).get('action') == 'dispatcher_surname_edit'
+        and payload.get('report_key') == key), None)
+
+
+def dispatch_surname_edit_job_current(db, payload):
+    action = payload.get('action')
+    if action != 'dispatcher_surname_edit':
+        return action != 'confirmed_surname_repair'  # Retire queued legacy data patches.
+    edit = payload.get('surname_edit') or {}
+    actor = edit.get('actor_tg_id')
+    if type(actor) is not int or not dispatch_can_access(db, actor):
         return False
-    card = matches[0]
-    transfer = db.get(NumberReassignment, card.id)
-    if transfer and transfer.status == 'pending':
-        return False
-    reverted = card in fragments
-    dispatch_sync_corrected_surname(db, card, 'ЕВСТИННЕЕВА')
-    card.surname = 'ЕВСТИННЕЕВА'
-    key = dispatch_hash({'surname_correction': '2026-11-03-evstinneyeva-v4', 'card_id': card.id})
-    job = db.get(CabinetCommand, key)
-    payload = {'tg_id': card.tg_id, 'action': 'confirmed_surname_repair',
-        'confirmed_surname_correction': {'card_id': card.id, 'expected_surname': 'ЕВС'},
-        'report_key': f'card:{card.chat_id}:{card.message_id}',
-        'values': {'surname': 'ЕВСТИННЕЕВА', 'source': 'gbu', 'work_date': '2026-11-03'}}
-    # A former failure must not permanently prevent an edit-only retry.
-    if job is None or job.status == 'error' or (reverted and job.status == 'done'):
-        if job is None:
-            job = CabinetCommand(id=key, tg_id=card.tg_id)
-            db.add(job)
-        job.tg_id = card.tg_id
-        job.payload = json.dumps(payload, ensure_ascii=False)
-        job.fingerprint = dispatch_hash(payload)
-        job.status = 'queued'
-        job.result = '{}'
-        job.lease_until = None
-        logging.info('Queued confirmed surname repair for number card %s', card.id)
-    db.commit()
-    return True
-
-
-@app.on_event('startup')
-def _repair_confirmed_evstinneyeva_number():
-    with Session(engine) as db:
-        dispatch_repair_confirmed_surname(db)
-
-
-def dispatch_confirmed_surname_job_current(db, payload):
-    correction = payload.get('confirmed_surname_correction')
-    if not correction:
-        return payload.get('action') != 'confirmed_surname_repair'
-    card = db.get(NumberCardEvent, correction.get('card_id'))
+    card = db.get(NumberCardEvent, edit.get('card_id'))
     transfer = db.get(NumberReassignment, card.id) if card else None
+    values = payload.get('values') or {}
     return bool(card and card.tg_id == payload.get('tg_id')
-        and card.work_date == date(2026, 11, 3) and card.source == 'gbu'
         and payload.get('report_key') == f'card:{card.chat_id}:{card.message_id}'
-        and payload.get('values', {}).get('surname') == 'ЕВСТИННЕЕВА'
-        and payload.get('values', {}).get('source') == 'gbu'
-        and correction.get('expected_surname') == 'ЕВС'
-        and str(card.surname or '').strip().upper() in {'ЕВС', 'ЕВСТИННЕЕВА'}
+        and values.get('surname') == card.surname
+        and values.get('source') == card.source
+        and values.get('work_date') == card.work_date.isoformat()
+        and isinstance(edit.get('previous_surname'), str)
         and not (transfer and transfer.status == 'pending')
         and db.get(NumberCardDeletion, card.id) is None)
+
+
+@app.post('/api/owner/number-cards/{event_id}/surname')
+def control_surname_save(event_id: int, data: ControlSurnameInput,
+        db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    dispatch_guard(db, user)
+    surname = control_surname_text(data.surname)
+    intent = {'card_id': event_id, 'actor_tg_id': user.id,
+        'expected_surname': data.expected_surname, 'surname': surname}
+    fingerprint = dispatch_hash(intent)
+    existing = db.get(CabinetCommand, data.request_id)
+    if existing:
+        previous = json.loads(existing.payload)
+        if (existing.fingerprint != fingerprint or previous.get('action') != 'dispatcher_surname_edit'
+                or previous.get('surname_edit', {}).get('actor_tg_id') != user.id):
+            raise HTTPException(409, 'Этот запрос уже использован. Откройте форму заново')
+        return {'id': existing.id, 'surname': surname, 'status': existing.status, **json.loads(existing.result)}
+    card = db.scalar(select(NumberCardEvent).where(NumberCardEvent.id == event_id,
+        _visible_number_card()).with_for_update())
+    if not card:
+        raise HTTPException(404, 'Карточка удалена или недоступна')
+    transfer = db.get(NumberReassignment, card.id)
+    if transfer and transfer.status == 'pending':
+        raise HTTPException(409, 'Дождитесь завершения замены бригадира')
+    if str(card.surname or '') != data.expected_surname:
+        raise HTTPException(409, 'Фамилия уже изменена. Обновите карточку')
+    key = f'card:{card.chat_id}:{card.message_id}'
+    pending = list(db.scalars(select(CabinetCommand).where(CabinetCommand.tg_id == card.tg_id,
+        CabinetCommand.status.in_(('queued', 'running')))))
+    if any((p := json.loads(job.payload)).get('report_key', p.get('replace_report_key')) == key
+            for job in pending):
+        raise HTTPException(409, 'По заказу ещё выполняется действие. Дождитесь его завершения')
+    dispatch_sync_corrected_surname(db, card, surname)
+    previous_surname = card.surname
+    card.surname = surname
+    payload = {'action': 'dispatcher_surname_edit', 'tg_id': card.tg_id, 'report_key': key,
+        'surname_edit': {'card_id': card.id, 'actor_tg_id': user.id, 'previous_surname': previous_surname},
+        'values': {'surname': surname, 'source': card.source, 'work_date': card.work_date.isoformat()}}
+    db.add(CabinetCommand(id=data.request_id, tg_id=card.tg_id,
+        payload=json.dumps(payload, ensure_ascii=False), fingerprint=fingerprint))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = db.get(CabinetCommand, data.request_id)
+        if not existing or existing.fingerprint != fingerprint:
+            raise HTTPException(409, 'Запрос уже изменён. Обновите карточку')
+    return {'id': data.request_id, 'surname': surname, 'status': 'queued'}
+
+
+@app.get('/api/owner/number-cards/surname-actions/{request_id}')
+def control_surname_status(request_id: str, db: Session = Depends(get_db),
+        user: TelegramUser = Depends(require_app_user)):
+    dispatch_guard(db, user)
+    job = db.get(CabinetCommand, request_id)
+    payload = json.loads(job.payload) if job else {}
+    if (not job or payload.get('action') != 'dispatcher_surname_edit'
+            or payload.get('surname_edit', {}).get('actor_tg_id') != user.id):
+        raise HTTPException(404, 'Изменение не найдено')
+    return JSONResponse({'id': job.id, 'status': job.status, **json.loads(job.result)},
+        headers={'Cache-Control': 'no-store'})
+
+
+def _control_manual_surname_html(html):
+    start = html.index('function openControlReportViewer(')
+    end = html.index('\n</script>', start)
+    section = html[start:end]
+    anchor = " const close=dialog.querySelector('header button'),area="
+    if section.count(anchor) != 1:
+        raise ValueError('Surname editor viewer binding missing')
+    section = section.replace(anchor, ' bindControlSurnameEditor(dialog,card);\n' + anchor, 1)
+    html = html[:start] + section + html[end:]
+    return html.replace('</body>', r'''<style id="control-manual-surname-style">
+.bc-photo-viewer .bc-viewer-title-row>.bc-viewer-surname{display:flex;align-items:center;gap:6px;min-width:0;flex:1}
+.bc-photo-viewer .bc-viewer-surname h2{min-width:0;margin:0}
+.bc-photo-viewer button.bc-surname-edit{position:relative;display:inline-grid;place-items:center;flex:0 0 28px;box-sizing:border-box;width:28px;height:28px;min-width:28px;min-height:28px;margin:0;padding:5px;border:1px solid var(--gold2);border-radius:8px;background:var(--panel2);color:var(--gold);line-height:1;touch-action:manipulation}
+.bc-photo-viewer button.bc-surname-edit svg{width:16px;height:16px}
+.bc-photo-viewer button.bc-surname-edit:focus-visible{outline:2px solid var(--gold);outline-offset:3px}
+.bc-photo-viewer button.bc-surname-edit:disabled{opacity:.5}
+.bc-photo-viewer .bc-surname-form{display:grid;gap:8px;margin:0 0 12px;padding:10px;border:1px solid var(--gold2);border-radius:10px;background:var(--panel2)}
+.bc-photo-viewer .bc-surname-form[hidden]{display:none}
+.bc-photo-viewer .bc-surname-form label{display:grid;gap:5px;font-size:12px}
+.bc-photo-viewer .bc-surname-form input{box-sizing:border-box;min-width:0;width:100%;min-height:40px;font-size:16px;padding:8px}
+.bc-photo-viewer .bc-surname-form>div{display:flex;gap:8px}
+.bc-photo-viewer .bc-surname-form button{min-height:36px;padding:6px 10px;font-size:13px}
+.bc-photo-viewer .bc-surname-status{margin:0 0 10px;font-size:12px;line-height:1.35;overflow-wrap:anywhere}
+.bc-photo-viewer .bc-surname-status:empty{display:none}
+</style><script>
+function bindControlSurnameEditor(dialog,card){
+ if(!canUseBrigadeControl())return;
+ const heading=dialog.querySelector('.bc-viewer-title-row h2'),row=heading?.parentElement;
+ if(!heading||!row)return;
+ const group=document.createElement('div');group.className='bc-viewer-surname';heading.before(group);group.append(heading);
+ const edit=document.createElement('button');edit.type='button';edit.className='bc-surname-edit';
+ edit.setAttribute('aria-label','Изменить фамилию умершего');edit.title='Изменить фамилию';edit.setAttribute('aria-expanded','false');
+ edit.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 3 5 5-12 12-6 1 1-6Z"/><path d="m14 5 5 5"/></svg>';group.append(edit);
+ const form=document.createElement('form');form.className='bc-surname-form';form.hidden=true;form.id='control-surname-'+card.id;
+ form.innerHTML='<label>Фамилия умершего<input name="surname" type="text" maxlength="100" autocomplete="off" spellcheck="false" required></label><div><button type="submit">Сохранить</button><button type="button" data-cancel>Отмена</button></div>';
+ edit.setAttribute('aria-controls',form.id);row.after(form);
+ const status=document.createElement('p');status.className='bc-surname-status';status.setAttribute('role','status');status.setAttribute('aria-live','polite');form.after(status);
+ const input=form.elements.surname,cancel=form.querySelector('[data-cancel]');let busy=false,attempt=null;
+ input.addEventListener('input',()=>{attempt=null});
+ const show=visible=>{form.hidden=!visible;edit.setAttribute('aria-expanded',String(visible))};
+ const enable=()=>{busy=false;edit.disabled=false;form.querySelectorAll('button,input').forEach(x=>x.disabled=false)};
+ edit.onclick=()=>{if(busy)return;input.value=card.surname||'';attempt=null;status.textContent='';show(form.hidden);if(!form.hidden){input.focus({preventScroll:true});input.select();form.scrollIntoView({block:'nearest'})}};
+ cancel.onclick=()=>{if(!busy){show(false);attempt=null;edit.focus({preventScroll:true})}};
+ form.addEventListener('keydown',event=>{event.stopPropagation();if(event.key==='Escape'){event.preventDefault();cancel.click()}});
+ const apply=surname=>{
+  card.surname=surname;heading.textContent='ум: '+surname;dialog.setAttribute('aria-label','Заказ · '+surname);
+  if(typeof ownerBrigadeControlData!=='undefined'){
+   const entry=ownerBrigadeControlData?.items?.find(item=>Number(item.id)===Number(card.id));if(entry)entry.surname=surname;
+  }
+  if(typeof renderOwnerBrigadeControl==='function')renderOwnerBrigadeControl();
+ };
+ form.onsubmit=async event=>{
+  event.preventDefault();if(busy)return;
+  const value=input.value.trim();if(!value){input.focus();return}
+  if(!attempt)attempt={request_id:crypto.randomUUID(),expected_surname:card.surname||'',surname:value};
+  busy=true;edit.disabled=true;form.querySelectorAll('button,input').forEach(x=>x.disabled=true);status.textContent='Сохраняем фамилию…';
+  try{
+   let result=await api('/api/owner/number-cards/'+card.id+'/surname',{method:'POST',body:JSON.stringify(attempt)});
+   apply(result.surname);show(false);attempt=null;
+   status.textContent='Фамилия сохранена. Обновляем сообщение в группе…';
+   for(let i=0;i<20&&dialog.open&&!['done','error'].includes(result.status);i++){
+    await new Promise(resolve=>setTimeout(resolve,1000));if(!dialog.open)return;
+    result=await api('/api/owner/number-cards/surname-actions/'+result.id,{cache:'no-store'});
+   }
+   if(!dialog.open)return;
+   status.textContent=result.status==='done'?'Фамилия сохранена в карточке и сообщении в группе':result.status==='error'?'Фамилия сохранена. Сообщение в группе не обновлено: '+(result.error||'попробуйте сохранить ещё раз'):'Фамилия сохранена. Обновление сообщения в группе ожидает выполнения';
+  }catch(error){if(dialog.open)status.textContent=(attempt?'': 'Фамилия сохранена. ')+error.message}
+  finally{enable()}
+ };
+}
+</script></body>''', 1)
+
+
+INLINE_INDEX_HTML = _control_manual_surname_html(INLINE_INDEX_HTML)
