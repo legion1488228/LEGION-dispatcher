@@ -21381,3 +21381,51 @@ function bindControlSurnameEditor(dialog,card){
 
 
 INLINE_INDEX_HTML = _control_manual_surname_html(INLINE_INDEX_HTML)
+
+def _payroll_pending_navigation_html(html):
+    start=html.index('async function openPayrollOrderViewer(')
+    end=html.index('\n</script>',start)
+    html=html[:start]+r'''async function openPayrollOrderViewer(order,trigger,body,month,period,context=null){
+ const live=()=>body.isConnected&&qs('#gbuPayrollBody')===body&&!qs('#modal').classList.contains('hidden');
+ if(!live()||context?.busy)return;
+ if(!context){
+  context={orders:[],cards:new Map(),busy:false,trigger};
+  // The binding supplies the exact unconfirmed list for the selected period.
+  context.orders=body._payrollMissingOrders||[order];
+ }
+ context.busy=true;trigger.disabled=true;
+ try{
+  const days=[...new Set(context.orders.map(item=>item.date))];
+  for(const day of days){
+   if(context.cards.has(day))continue;
+   const data=await api('/api/owner/brigade-control?work_date='+encodeURIComponent(day),{cache:'no-store'});
+   if(!live())return;context.cards.set(day,data.items||[]);
+  }
+  const items=context.orders.map(item=>(context.cards.get(item.date)||[]).find(card=>Number(card.id)===Number(item.card_id))).filter(Boolean);
+  const card=items.find(item=>Number(item.id)===Number(order.card_id));
+  if(!card)throw new Error('Заказ не найден. Обновите список зарплаты.');
+  const navigate=target=>{
+   const next=context.orders.find(item=>Number(item.card_id)===Number(target.id));
+   if(next)return openPayrollOrderViewer(next,context.trigger,body,month,period,context);
+  };
+  const navigation={items,trigger:context.trigger,navigate};
+  openControlReportViewer(card,1,context.trigger,navigation);
+  const dialog=document.querySelector('.bc-photo-viewer[open]');if(!dialog)return;
+  dialog._payrollPendingNavigation={items,card,navigate,context};dialog.classList.add('payroll-pending-viewer');
+  let button=dialog.querySelector('[data-gbu-order-roster]');
+  if(!button){button=document.createElement('button');button.type='button';button.className='bc-viewer-category';button.dataset.gbuOrderRoster='';button.textContent='Состав ▾';dialog.querySelector('.bc-viewer-title-row').append(button);dispatchAttachControl(dialog,card)}
+  button.click();
+  dialog.addEventListener('close',()=>{if(dialog.dataset.orderSwitch)return;dialog.querySelectorAll('.gbu-crew-dialog[open]').forEach(editor=>editor.close());if(live())openGbuPayroll(month,period)},{once:true});
+ }catch(error){if(live())toast(error.message,5000)}finally{context.busy=false;if(trigger.isConnected)trigger.disabled=false}
+}
+''' + html[end:]
+    anchor="qsa('[data-payroll-roster]',body).forEach(b=>b.onclick=()=>openPayrollOrderViewer(data.missing[Number(b.dataset.payrollRoster)],b,body,month,period));"
+    if html.count(anchor)!=1:raise ValueError('Payroll list binding missing')
+    html=html.replace(anchor,'body._payrollMissingOrders=data.missing;'+anchor,1)
+    anchor="  openControlReportViewer(target,1,orderNavigation.trigger,orderNavigation);"
+    if html.count(anchor)!=1:raise ValueError('Order navigation dispatch missing')
+    html=html.replace(anchor,"  if(orderNavigation.navigate){orderNavigation.navigate(target);return}\n"+anchor,1)
+    return html
+
+
+INLINE_INDEX_HTML = _payroll_pending_navigation_html(INLINE_INDEX_HTML)
