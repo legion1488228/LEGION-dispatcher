@@ -5528,6 +5528,7 @@ def order_completion_missing_number_orders(db: Session, work_date: date):
 
 @app.get('/api/bot/order-completion', dependencies=[Depends(_bot_key)])
 def bot_order_completion(work_date: date, db: Session = Depends(get_db)):
+    dispatch_repair_confirmed_surname(db)
     result = order_completion_data(db, work_date)
     # The bot publishes queued reports only for the current, non-deleted cards.
     rows = db.scalars(select(NumberCardEvent).where(
@@ -5599,6 +5600,8 @@ def edit_number_card(data: NumberCardInput, db: Session = Depends(get_db)):
     if row.source == data.source:
         dispatch_sync_corrected_surname(db, row, surname)
     row.surname, row.source = surname, data.source
+    if row.work_date == date(2026, 11, 3) and row.source == 'gbu':
+        dispatch_repair_confirmed_surname(db)
     db.commit()
     return {'saved': True, 'id': row.id}
 
@@ -5635,6 +5638,8 @@ def record_number_card(data: NumberCardInput, db: Session = Depends(get_db)):
             row = db.scalar(select(NumberCardEvent).where(NumberCardEvent.chat_id == data.chat_id, NumberCardEvent.message_id == data.message_id))
             if row is None:
                 raise
+    if row.work_date == date(2026, 11, 3) and row.source == 'gbu':
+        dispatch_repair_confirmed_surname(db)
     return {"saved": True, "id": row.id}
 
 class BrigadierNumberDelete(BaseModel):
@@ -8260,6 +8265,7 @@ def cabinet_command_status(request_id: str, db: Session = Depends(get_db), user:
 
 @app.post('/api/bot/cabinet/claim', dependencies=[Depends(_bot_key)])
 def cabinet_command_claim(db: Session = Depends(get_db)):
+    dispatch_repair_confirmed_surname(db)
     now = datetime.utcnow()
     row = db.scalar(select(CabinetCommand).where(or_(CabinetCommand.status == 'queued',
         and_(CabinetCommand.status == 'running', CabinetCommand.lease_until < now)))
@@ -9646,6 +9652,8 @@ def owner_brigade_control(work_date: date, db: Session = Depends(get_db),
         user: TelegramUser = Depends(require_app_user)):
     if not _dispatcher_access(db, user.id) or cabinet_kind(db, user.id) not in {'owner', 'assistant'}:
         raise HTTPException(403, 'Контроль доступен владельцу и помощникам с диспетчерской')
+    if work_date == date(2026, 11, 3):
+        dispatch_repair_confirmed_surname(db)
     cards = db.scalars(select(NumberCardEvent).where(NumberCardEvent.work_date == work_date,
         NumberCardEvent.source.in_(('private', 'gbu')), NumberCardEvent.tg_id.notin_(HIDDEN_TG_IDS),
         _visible_number_card())).all()
@@ -21042,7 +21050,7 @@ def _owner_payroll_bottom_navigation_html(html):
         html = html.replace(old, new, 1)
 
     old = "if(kind==='owner')return [{...readiness,title:'Готовность',icon:()=>cabinetIcon('team')},staff,{key:'tables',title:'Мои таблицы',icon:()=>'<span>💰</span>'},{key:'own',title:'Мой кабинет',icon:()=>cabinetIcon('user')},{key:'brigadeControl',title:'Контроль',icon:()=>cabinetIcon('control')}];"
-    new = "if(kind==='owner')return [{...readiness,title:'Готовность',icon:()=>cabinetIcon('team')},staff,{key:'tables',title:'Мои таблицы',icon:()=>'<span>💰</span>'},{key:'brigadeControl',title:'Контроль',icon:()=>cabinetIcon('control')},...(state.bootstrap?.is_owner===true?[{key:'payroll',title:'Зарплата',icon:()=>'<b class=\"role-ruble\">₽</b>'}]:[]),{key:'own',title:'Мой кабинет',icon:()=>cabinetIcon('user')}];"
+    new = 'if(kind===\'owner\')return [{...readiness,title:\'Готовность\',icon:()=>cabinetIcon(\'team\')},staff,...(state.bootstrap?.is_owner===true?[{key:\'payroll\',title:\'Зарплата\',icon:()=>\'<b class="role-ruble">₽</b>\'}]:[]),{key:\'tables\',title:\'Таблицы\',icon:()=>\'<span>💰</span>\'},{key:\'own\',title:\'Мой кабинет\',icon:()=>cabinetIcon(\'user\')},{key:\'brigadeControl\',title:\'Контроль\',icon:()=>cabinetIcon(\'control\')}];'
     replace(old, new)
     replace("  if(target==='tables'){closeModal();await openPersonalTables();return}",
             "  if(target==='payroll'){if(state.bootstrap?.is_owner!==true)return;closeModal();await openGbuPayroll();return}\n  if(target==='tables'){closeModal();await openPersonalTables();return}")
@@ -21199,47 +21207,56 @@ def dispatch_mark_surname_review(draft):
     return draft
 
 
-@app.on_event('startup')
-def _repair_confirmed_evstinneyeva_number():
-    """Apply the user's correction locally, then edit the existing Telegram post.
+def dispatch_repair_confirmed_surname(db):
+    """Reconcile late-arriving cards as well as those present at startup.
 
-    The phone on the dispatch order may belong to the agent, whereas the
-    number card stores the brigadier's phone. Match the unique confirmed
-    surname/date/category instead of comparing those two different phones.
+    Ignore already corrected cards when finding the unique erroneous fragment.
+    A completed edit job is reused unless stale bot data actually reverted it.
     """
     import logging
-    with Session(engine) as db:
-        cards = list(db.scalars(select(NumberCardEvent).where(
-            NumberCardEvent.work_date == date(2026, 11, 3),
-            NumberCardEvent.source == 'gbu', _visible_number_card()).with_for_update()))
-        matches = [card for card in cards
-            if str(card.surname or '').strip().upper() in {'ЕВС', 'ЕВСТИННЕЕВА'}]
-        if len(matches) != 1:
-            logging.warning('Confirmed surname repair requires one matching card; found %s', len(matches))
-            return
-        card = matches[0]
-        transfer = db.get(NumberReassignment, card.id)
-        if transfer and transfer.status == 'pending':
-            logging.warning('Surname correction postponed: number card %s is being reassigned', card.id)
-            return
-        # Synchronize the linked dispatch order BEFORE changing the matching key.
-        dispatch_sync_corrected_surname(db, card, 'ЕВСТИННЕЕВА')
-        card.surname = 'ЕВСТИННЕЕВА'
-        key = dispatch_hash({'surname_correction': '2026-11-03-evstinneyeva-v2', 'card_id': card.id})
-        job = db.get(CabinetCommand, key)
+    cards = list(db.scalars(select(NumberCardEvent).where(
+        NumberCardEvent.work_date == date(2026, 11, 3),
+        NumberCardEvent.source == 'gbu', _visible_number_card()).with_for_update()))
+    fragments = [c for c in cards if str(c.surname or '').strip().upper() == 'ЕВС']
+    corrected = [c for c in cards if str(c.surname or '').strip().upper() == 'ЕВСТИННЕЕВА']
+    matches = fragments if fragments else corrected
+    if len(matches) != 1:
+        if fragments:
+            logging.warning('Confirmed surname repair is ambiguous: %s fragments', len(fragments))
+        return False
+    card = matches[0]
+    transfer = db.get(NumberReassignment, card.id)
+    if transfer and transfer.status == 'pending':
+        return False
+    reverted = card in fragments
+    dispatch_sync_corrected_surname(db, card, 'ЕВСТИННЕЕВА')
+    card.surname = 'ЕВСТИННЕЕВА'
+    key = dispatch_hash({'surname_correction': '2026-11-03-evstinneyeva-v3', 'card_id': card.id})
+    job = db.get(CabinetCommand, key)
+    payload = {'tg_id': card.tg_id, 'action': 'confirmed_surname_repair',
+        'confirmed_surname_correction': {'card_id': card.id, 'expected_surname': 'ЕВС'},
+        'report_key': f'card:{card.chat_id}:{card.message_id}',
+        'values': {'surname': 'ЕВСТИННЕЕВА', 'source': 'gbu', 'work_date': '2026-11-03'}}
+    # A former failure must not permanently prevent an edit-only retry.
+    if job is None or job.status == 'error' or (reverted and job.status == 'done'):
         if job is None:
-            # This internal action is deliberately absent from CabinetCommandInput.
-            # It cannot be enqueued by a cabinet user and grants no cabinet rights.
-            payload = {'tg_id': card.tg_id, 'action': 'confirmed_surname_repair',
-                'confirmed_surname_correction': {'card_id': card.id, 'expected_surname': 'ЕВС'},
-                'report_key': f'card:{card.chat_id}:{card.message_id}',
-                'values': {'surname': 'ЕВСТИННЕЕВА', 'source': 'gbu', 'work_date': '2026-11-03'}}
-            db.add(CabinetCommand(id=key, tg_id=card.tg_id, payload=json.dumps(payload, ensure_ascii=False),
-                fingerprint=dispatch_hash(payload), status='queued'))
-            db.add(ImportLog(kind='confirmed_surname_correction',
-                raw_text='ЕВС → ЕВСТИННЕЕВА', result_json=json.dumps({
-                    'card_id': card.id, 'work_date': '2026-11-03', 'command_id': key}, ensure_ascii=False)))
-        db.commit()
+            job = CabinetCommand(id=key, tg_id=card.tg_id)
+            db.add(job)
+        job.tg_id = card.tg_id
+        job.payload = json.dumps(payload, ensure_ascii=False)
+        job.fingerprint = dispatch_hash(payload)
+        job.status = 'queued'
+        job.result = '{}'
+        job.lease_until = None
+        logging.info('Queued confirmed surname repair for number card %s', card.id)
+    db.commit()
+    return True
+
+
+@app.on_event('startup')
+def _repair_confirmed_evstinneyeva_number():
+    with Session(engine) as db:
+        dispatch_repair_confirmed_surname(db)
 
 
 def dispatch_confirmed_surname_job_current(db, payload):
