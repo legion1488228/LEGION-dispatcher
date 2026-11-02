@@ -1349,7 +1349,10 @@ def gbu_staff_payroll(month: str, db: Session = Depends(get_db), user: TelegramU
     for note in db.scalars(select(GbuPayrollComment).where(GbuPayrollComment.month == month)):
         if note.employee_id in people:
             people[note.employee_id].setdefault('payroll_comments', {})[note.period] = {'text': note.text, 'version': note.version}
-    return JSONResponse({'month':month,'employees':sorted(people.values(),key=lambda x:x['name'].casefold()),
+    allocation_periods = [period for period, half in (('first', 1), ('second', 2))
+        if db.get(GbuCashAllocation, cash_reconciliation_period(month, half)[0]) is not None]
+    return JSONResponse({'month':month,'cash_allocation_periods':allocation_periods,
+        'employees':sorted(people.values(),key=lambda x:x['name'].casefold()),
         'orders':orders,'missing':missing,'total':sum(x['amount'] for x in people.values())},headers={'Cache-Control':'private, no-store'})
 
 
@@ -16539,7 +16542,7 @@ def _dispatch_visible_crew_html(html):
 function dispatchMini(o){
  const title=o.source==='gbu'?'ГБУ':String(o.organization||o.agent_name||'Частный');
  const head=`<header><b>№${o.number} · ${esc(title)}</b></header>`;
- if(o.is_draft)return `<article class="dispatch-mini dispatch-draft" data-plan-card="${o.id}">${dispatchDeleteButton(o)}<button type="button" class="dispatch-card-main" data-plan-id="${o.id}">${head}<p class="dispatch-order-name"><b>${esc(o.deceased_name||'Черновик')}</b><small>Информацию можно добавить позже</small></p><div class="dispatch-card-meta"><span>${esc(o.category_label||'Категория не выбрана')}${o.team_size?' · '+Number(o.team_size)+' чел.':''}</span></div><p>${esc(o.issue_time||'Время не указано')}</p></button><footer><button type="button" data-plan-id="${o.id}">Дополнить заказ</button></footer>${dispatchSingleSendHtml(o)}</article>`;
+ if(o.is_draft)return `<article class="dispatch-mini dispatch-draft" data-plan-card="${o.id}">${dispatchDeleteButton(o)}${dispatchSingleSendHtml(o)}<button type="button" class="dispatch-card-main" data-plan-id="${o.id}">${head}<p class="dispatch-order-name"><b>${esc(o.deceased_name||'Черновик')}</b><small>Информацию можно добавить позже</small></p><div class="dispatch-card-meta"><span>${esc(o.category_label||'Категория не выбрана')}${o.team_size?' · '+Number(o.team_size)+' чел.':''}</span></div><p>${esc(o.issue_time||'Время не указано')}</p></button><footer><button type="button" data-plan-id="${o.id}">Дополнить заказ</button></footer>${dispatchSingleSendStatusHtml(o)}</article>`;
  const surname=String(o.deceased_name||'').trim().split(/\s+/)[0]||'—';
  const people=[o.brigadier,...(o.members||[])].filter(Boolean);
  const assigned=Number.isInteger(o.assigned_count)?o.assigned_count:people.length,complete=assigned===o.team_size&&Boolean(o.brigadier);
@@ -16551,7 +16554,7 @@ function dispatchMini(o){
   if(key==='church'&&typeof o.church_required==='boolean')value=o.church_required?(value||'Да'):'Нет';
   return /^(морг|храм|церковь|кладбище|крематорий|кремация)(?:\s|:|$)/i.test(value)?value:label+' '+(value||'—');
  });
- return `<article class="dispatch-mini dispatch-detailed ${complete?'dispatch-complete':''} ${o.paired_order?'dispatch-paired':''}" data-plan-card="${o.id}"${dispatchPairStyle(o)}>${dispatchDeleteButton(o)}<button type="button" class="dispatch-pair-corner ${o.paired_order?'is-paired':''}" data-plan-pair="${o.id}" aria-label="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Сдвоить заказ №'+o.number}" title="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Выбрать заказ для сдвоения'}" ${o.approved||o.category==='carryout'?'disabled':''}>Х2</button><button type="button" class="dispatch-card-main" data-plan-id="${o.id}" aria-label="Изменить заказ №${o.number} · ${esc(o.deceased_name)}">${head}<p class="dispatch-card-agent">Агент: ${esc(o.agent_name||'—')}</p><p class="dispatch-card-phone">${esc(phone||'Телефон не указан')}</p><div class="dispatch-card-meta"><span class="dispatch-card-category">${esc(o.category_label||'—')} · ${Number(o.team_size)} чел.</span></div><p class="dispatch-order-name"><b>Ум: ${esc(surname)}</b></p><div class="dispatch-card-times"><span>Выдача <b>${esc(o.issue_time||'—')}</b></span><span>Быть <b>${esc(o.arrival_time||'—')}</b></span></div><div class="dispatch-card-route">${route.map(stop=>`<p>${esc(stop)}</p>`).join('')}</div></button><section class="dispatch-inline-crew" aria-label="Состав заказа №${o.number}"><div class="dispatch-inline-status ${complete?'dispatch-done':''}"><span>Состав</span><b>${assigned}/${o.team_size}${complete?' ✓':''}</b></div><div class="dispatch-inline-people">${people.map(p=>`<p>${p.id===o.brigadier?.id?'<strong>':''}${esc(dispatchPerson(p))}${p.id===o.brigadier?.id?'</strong>':''}</p>`).join('')||'<p class="muted">Пока не назначен</p>'}</div><button type="button" class="dispatch-edit-inline" data-plan-crew-id="${o.id}" ${o.approved?'disabled':''}>${assigned?'Изменить состав':'Назначить состав'}</button>${dispatchSingleSendHtml(o)}</section></article>`;
+ return `<article class="dispatch-mini dispatch-detailed ${complete?'dispatch-complete':''} ${o.paired_order?'dispatch-paired':''}" data-plan-card="${o.id}"${dispatchPairStyle(o)}>${dispatchDeleteButton(o)}${dispatchSingleSendHtml(o)}<button type="button" class="dispatch-pair-corner ${o.paired_order?'is-paired':''}" data-plan-pair="${o.id}" aria-label="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Сдвоить заказ №'+o.number}" title="${o.paired_order?'Сдвоен с '+esc(dispatchPairLabel(o.paired_order)):'Выбрать заказ для сдвоения'}" ${o.approved||o.category==='carryout'?'disabled':''}>Х2</button><button type="button" class="dispatch-card-main" data-plan-id="${o.id}" aria-label="Изменить заказ №${o.number} · ${esc(o.deceased_name)}">${head}<p class="dispatch-card-agent">Агент: ${esc(o.agent_name||'—')}</p><p class="dispatch-card-phone">${esc(phone||'Телефон не указан')}</p><div class="dispatch-card-meta"><span class="dispatch-card-category">${esc(o.category_label||'—')} · ${Number(o.team_size)} чел.</span></div><p class="dispatch-order-name"><b>Ум: ${esc(surname)}</b></p><div class="dispatch-card-times"><span>Выдача <b>${esc(o.issue_time||'—')}</b></span><span>Быть <b>${esc(o.arrival_time||'—')}</b></span></div><div class="dispatch-card-route">${route.map(stop=>`<p>${esc(stop)}</p>`).join('')}</div></button><section class="dispatch-inline-crew" aria-label="Состав заказа №${o.number}"><div class="dispatch-inline-status ${complete?'dispatch-done':''}"><span>Состав</span><b>${assigned}/${o.team_size}${complete?' ✓':''}</b></div><div class="dispatch-inline-people">${people.map(p=>`<p>${p.id===o.brigadier?.id?'<strong>':''}${esc(dispatchPerson(p))}${p.id===o.brigadier?.id?'</strong>':''}</p>`).join('')||'<p class="muted">Пока не назначен</p>'}</div><button type="button" class="dispatch-edit-inline" data-plan-crew-id="${o.id}" ${o.approved?'disabled':''}>${assigned?'Изменить состав':'Назначить состав'}</button>${dispatchSingleSendStatusHtml(o)}</section></article>`;
 }
 ''' + html[last:]
     old = " qsa('[data-plan-crew-id]',root).forEach(b=>{const order=data.items.find(x=>x.id===Number(b.dataset.planCrewId));if(order.composition_complete)b.disabled=false;b.setAttribute('aria-expanded','false');b.onclick=()=>openDispatchCrew(order)});"
@@ -20809,14 +20812,27 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style id="dispatch
 #dispatchActionsView .dispatch-sticky-panel>.dispatch-send{display:block;box-sizing:border-box;width:100%;margin:4px 0;min-height:34px;padding:6px 10px;font-size:12px;border-radius:8px}
 #dispatchActionsView .dispatch-sticky-panel>.dispatch-status{font-size:11px;line-height:1.25;margin:3px 0;white-space:pre-line;max-height:64px;overflow:auto}
 #dispatchActionsView .dispatch-sticky-panel>.dispatch-status:empty{display:none}
-#dispatchActionsView .dispatch-send-one{width:100%;min-height:34px;padding:6px 4px;font-size:11px;line-height:1.25;border:1px solid var(--gold);border-radius:8px;background:var(--panel2);color:var(--gold);white-space:normal;touch-action:manipulation}
+#dispatchActionsView .dispatch-mini .dispatch-send-one{position:absolute;right:5px;top:81px;display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:34px!important;max-width:34px;min-width:34px;height:34px;min-height:34px;margin:0;padding:0;border:1px solid var(--gold);border-radius:8px;background:var(--panel);color:var(--gold);line-height:1;z-index:2;touch-action:manipulation}
+#dispatchActionsView .dispatch-mini:has(>.dispatch-pair-corner.is-paired)>.dispatch-send-one{top:97px}
+#dispatchActionsView .dispatch-mini.dispatch-draft>.dispatch-send-one{top:43px}
+#dispatchActionsView .dispatch-send-one svg{pointer-events:none;flex:none}
+#dispatchActionsView .dispatch-send-one:disabled{opacity:.4}
+#dispatchActionsView .dispatch-detailed .dispatch-card-phone,#dispatchActionsView .dispatch-detailed .dispatch-card-meta,#dispatchActionsView .dispatch-detailed .dispatch-order-name{padding-right:38px;box-sizing:border-box}
+#dispatchActionsView .dispatch-detailed .dispatch-order-name{min-height:36px}
+#dispatchActionsView .dispatch-detailed:has(>.dispatch-pair-corner.is-paired) .dispatch-order-name{min-height:52px}
+#dispatchActionsView .dispatch-send-result:empty{display:none}
 #dispatchActionsView .dispatch-send-result{margin:0;font-size:10px;line-height:1.3;white-space:normal;overflow-wrap:anywhere}
 </style><script>
 function dispatchSingleSendHtml(o){
  const status=o.receipt?.status||'not_sent',retry=['sent','confirmed','unknown'].includes(status);
  const ready=!o.is_draft&&o.composition_complete&&Boolean(o.brigadier?.tg_id);
+ const label=retry?'Отправить заказ повторно':'Отправить заказ';
+ return `<button type="button" class="dispatch-send-one" data-plan-send-one="${o.id}" ${ready?'':'disabled'} title="${ready?label:'Нужен полный состав и Telegram ID бригадира'}" aria-label="${label} №${o.number}"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg></button>`;
+}
+function dispatchSingleSendStatusHtml(o){
+ const status=o.receipt?.status||'not_sent';
  const label=status==='confirmed'?'Подтверждён ✓':status==='sent'?'Отправлен ✓':status==='unknown'?'Доставка не подтверждена':'';
- return `<button type="button" class="dispatch-send-one" data-plan-send-one="${o.id}" ${ready?'':'disabled'} title="${ready?'Отправить заказ назначенному бригадиру':'Нужен полный состав и Telegram ID бригадира'}">${retry?'Отправить повторно':'Отправить заказ'}</button><p class="dispatch-send-result" data-plan-send-result="${o.id}" role="status">${label}</p>`;
+ return `<p class="dispatch-send-result" data-plan-send-result="${o.id}" role="status">${label}</p>`;
 }
 const dispatchSingleRequests=new Map();
 async function dispatchSendOne(order,button){
@@ -20834,11 +20850,13 @@ async function dispatchSendOne(order,button){
   if(result.failed?.length){
    order.receipt={...(order.receipt||{}),status:'unknown'};
    if(status)status.textContent=result.failed.join('\n');
-   button.textContent='Отправить повторно';
+   button.title='Отправить заказ повторно';
+   button.setAttribute('aria-label','Отправить заказ повторно №'+order.number);
   }else{
    order.receipt={...(order.receipt||{}),status:previous==='confirmed'?'confirmed':'sent'};
    if(status)status.textContent='Отправлен · '+result.brigadier;
-   button.textContent='Отправить повторно';
+   button.title='Отправить заказ повторно';
+   button.setAttribute('aria-label','Отправить заказ повторно №'+order.number);
   }
  }catch(error){if(status)status.textContent=error.message}
  finally{if(button.isConnected)button.disabled=false}
@@ -20949,3 +20967,87 @@ _crew_section = _crew_section.replace(".sort((a,b)=>name(a).localeCompare(name(b
 _crew_section = _crew_section.replace('<span>${esc(name(p))}<small>', '<span class="dispatch-choice-person">${dispatchChoicePersonHtml(p)}<small>', 1)
 _crew_section = _crew_section.replace('Сначала сотрудники с разницей в росте до 3 см, затем остальные.', 'Сначала свободные, затем занятые. Внутри — по близости роста.')
 INLINE_INDEX_HTML = INLINE_INDEX_HTML[:_crew_start] + _crew_section + INLINE_INDEX_HTML[_crew_end:]
+
+
+# Show the actual distribution under salary totals, in both cards and reports.
+def _gbu_payroll_payers_html(html):
+    old = '  const data=gbuPayrollForPeriod(response,month,period);'
+    new = old + '\n  await loadGbuPayrollPayers(data,month,period);if(!active())return;'
+    assert html.count(old) == 1, 'Payroll payer loading anchor missing'
+    html = html.replace(old, new, 1)
+    old = '<span class="gbu-payroll-card-salary">ЗП: ${esc(cabinetMoney(employee.amount))} ₽</span></button>'
+    assert html.count(old) == 1, 'Payroll card payer anchor missing'
+    html = html.replace(old, old.replace('</button>', '${gbuPayrollPayersHtml(employee)}</button>'), 1)
+    old = '<h4>Выходы: ${employee.exits} · ЗП: ${esc(cabinetMoney(employee.amount))} ₽</h4>'
+    assert html.count(old) == 1, 'Payroll report payer anchor missing'
+    html = html.replace(old, old + '${gbuPayrollPayersHtml(employee)}', 1)
+    old = '  addGbuCashAllocationButton(body,month,period);'
+    assert html.count(old) == 1
+    html = html.replace(old, old + "\n  watchGbuPayrollPayers(body,data,month,period);\n  if(data.payout_error){const warning=document.createElement('p');warning.className='muted';warning.setAttribute('role','status');warning.textContent='Не удалось загрузить распределение выплат. Откройте зарплату заново.';body.prepend(warning)}", 1)
+    old = '  if(active()){plan=data;comments=notes.card_comments||[];draw();'
+    assert html.count(old) == 1, 'Allocation preview visit anchor missing'
+    html = html.replace(old, '  if(active()){gbuPayrollAllocationVisited.add(month+":"+period);plan=data;comments=notes.card_comments||[];draw();', 1)
+    return html.replace('</body>', r'''<style id="gbu-payroll-payers-style">
+.gbu-payroll-payers{display:block;margin-top:3px;padding-top:4px;border-top:1px solid var(--line);font-weight:400;color:var(--muted);text-align:left;overflow-wrap:anywhere;white-space:normal}
+.gbu-payroll-payers>span{display:block;font-size:9px;line-height:1.3;margin-top:2px}
+.gbu-payroll-payers>span.paid{color:var(--green,#318659);font-weight:600}
+.gbu-payroll-report-dialog .gbu-payroll-payers{margin:5px 0 10px;padding-top:6px}
+.gbu-payroll-report-dialog .gbu-payroll-payers>span{font-size:12px;line-height:1.4}
+</style><script>
+const gbuPayrollAllocationVisited=new Set();
+function gbuPayrollPayerShares(plan){
+ const shares=new Map(),confirmed=new Set((plan.payout_confirmations||[]).map(row=>Number(row.tg_id)));
+ function add(id,name,amount,own=false,paid=false){
+  amount=Number(amount);if(id==null||!Number.isFinite(amount)||amount<=0)return;
+  const key=Number(id);if(!shares.has(key))shares.set(key,[]);
+  shares.get(key).push({name:String(name),amount,own,paid});
+ }
+ for(const cashier of plan.cashiers||[]){
+  let name=String(cashier.name||'Бригадир').trim().replace(/\s+см\s*$/i,'');
+  if(cashier.height_cm&&!name.endsWith(' '+cashier.height_cm))name+=' '+cashier.height_cm;
+  const paid=confirmed.has(Number(cashier.tg_id));
+  add(cashier.employee_id,name,cashier.own_salary,true,paid);
+  for(const payment of cashier.payments||[])add(payment.employee_id,name,payment.amount,false,paid);
+ }
+ for(const payment of plan.owner_payments||[])add(payment.employee_id,'Руководитель ЛЕГИОН',payment.amount,false,payment.paid===true);
+ return shares;
+}
+async function loadGbuPayrollPayers(data,month,period){
+ if(!gbuPayrollAllocationVisited.has(month+':'+period)&&!(data.cash_allocation_periods||[]).includes(period))return;
+ try{
+  const plan=await api('/api/gbu-cash-allocation?month='+encodeURIComponent(month)+'&half='+(period==='first'?1:2),{cache:'no-store'});
+  const shares=gbuPayrollPayerShares(plan);
+  data.employees.forEach(employee=>employee.payout_sources=shares.get(Number(employee.id))||[]);
+  data.payout_error=false;
+ }catch(error){data.payout_error=true}
+}
+function watchGbuPayrollPayers(root,data,month,period){
+ if(!gbuPayrollAllocationVisited.has(month+':'+period)&&!(data.cash_allocation_periods||[]).includes(period))return;
+ const active=()=>root.isConnected&&qs('#gbuPayrollBody')===root&&!qs('#modal').classList.contains('hidden');
+ async function refresh(){
+  if(!active())return;
+  if(!document.hidden){
+   await loadGbuPayrollPayers(data,month,period);if(!active())return;
+   if(!data.payout_error){
+    const employees=new Map(data.employees.map(employee=>[Number(employee.id),employee]));
+    document.querySelectorAll('[data-payroll-payers]').forEach(box=>{
+     if(!root.contains(box)&&!box.closest('.gbu-payroll-report-dialog'))return;
+     const employee=employees.get(Number(box.dataset.payrollPayers));
+     if(employee)box.outerHTML=gbuPayrollPayersHtml(employee);
+    });
+   }
+  }
+  if(active())setTimeout(refresh,7000);
+ }
+ setTimeout(refresh,7000);
+}
+function gbuPayrollPayersHtml(employee){
+ const sources=employee.payout_sources||[];if(!sources.length)return '';
+ return '<span class="gbu-payroll-payers" data-payroll-payers="'+Number(employee.id)+'" aria-label="Кто выплачивает зарплату">'+sources.map(source=>
+  '<span'+(source.paid?' class="paid"':'')+'>'+esc(source.own?'Оставляет себе: '+source.name:source.name)+' · '+esc(cabinetMoney(source.amount))+' ₽'+(source.paid?' ✓':'')+'</span>'
+ ).join('')+'</span>';
+}
+</script></body>''', 1)
+
+
+INLINE_INDEX_HTML = _gbu_payroll_payers_html(INLINE_INDEX_HTML)
