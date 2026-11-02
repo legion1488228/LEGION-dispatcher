@@ -5695,6 +5695,8 @@ def number_card_contact_sort_key(row, statuses):
 
 @app.get("/api/number-cards")
 def list_number_cards(work_date: date, db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    if work_date == date(2026, 11, 3):
+        dispatch_repair_confirmed_surname(db)
     rows = db.scalars(select(NumberCardEvent).where(NumberCardEvent.work_date == work_date, _visible_number_card()).order_by(NumberCardEvent.sent_at, NumberCardEvent.id)).all()
     employees = {e.tg_id: e for e in db.scalars(select(Employee).where(Employee.tg_id.in_([r.tg_id for r in rows])))} if rows else {}
     statuses = number_card_statuses(db, rows)
@@ -5706,6 +5708,7 @@ def list_number_cards(work_date: date, db: Session = Depends(get_db), user: Tele
 
 @app.get("/api/bot/number-cards", dependencies=[Depends(_bot_key)])
 def bot_number_card_history(tg_id: int, db: Session = Depends(get_db)):
+    dispatch_repair_confirmed_surname(db)
     rows = db.scalars(select(NumberCardEvent).where(NumberCardEvent.tg_id == tg_id, _visible_number_card()).order_by(NumberCardEvent.id)).all()
     return {"items": [{"chat_id":r.chat_id,"message_id":r.message_id,"work_date":r.work_date.isoformat(),
         "tg_id":r.tg_id,"full_name":r.full_name,"phone":brigadier_phone8(r.phone),"source":r.source,"surname":r.surname,
@@ -21050,7 +21053,7 @@ def _owner_payroll_bottom_navigation_html(html):
         html = html.replace(old, new, 1)
 
     old = "if(kind==='owner')return [{...readiness,title:'Готовность',icon:()=>cabinetIcon('team')},staff,{key:'tables',title:'Мои таблицы',icon:()=>'<span>💰</span>'},{key:'own',title:'Мой кабинет',icon:()=>cabinetIcon('user')},{key:'brigadeControl',title:'Контроль',icon:()=>cabinetIcon('control')}];"
-    new = 'if(kind===\'owner\')return [{...readiness,title:\'Готовность\',icon:()=>cabinetIcon(\'team\')},staff,...(state.bootstrap?.is_owner===true?[{key:\'payroll\',title:\'Зарплата\',icon:()=>\'<b class="role-ruble">₽</b>\'}]:[]),{key:\'tables\',title:\'Таблицы\',icon:()=>\'<span>💰</span>\'},{key:\'own\',title:\'Мой кабинет\',icon:()=>cabinetIcon(\'user\')},{key:\'brigadeControl\',title:\'Контроль\',icon:()=>cabinetIcon(\'control\')}];'
+    new = 'if(kind===\'owner\')return [{key:\'own\',title:\'Мой кабинет\',icon:()=>cabinetIcon(\'user\')},{...readiness,title:\'Готовность\',icon:()=>cabinetIcon(\'team\')},staff,...(state.bootstrap?.is_owner===true?[{key:\'payroll\',title:\'Зарплата\',icon:()=>\'<b class="role-ruble">₽</b>\'}]:[]),{key:\'tables\',title:\'Таблицы\',icon:()=>\'<span>💰</span>\'},{key:\'brigadeControl\',title:\'Контроль\',icon:()=>cabinetIcon(\'control\')}];'
     replace(old, new)
     replace("  if(target==='tables'){closeModal();await openPersonalTables();return}",
             "  if(target==='payroll'){if(state.bootstrap?.is_owner!==true)return;closeModal();await openGbuPayroll();return}\n  if(target==='tables'){closeModal();await openPersonalTables();return}")
@@ -21231,7 +21234,7 @@ def dispatch_repair_confirmed_surname(db):
     reverted = card in fragments
     dispatch_sync_corrected_surname(db, card, 'ЕВСТИННЕЕВА')
     card.surname = 'ЕВСТИННЕЕВА'
-    key = dispatch_hash({'surname_correction': '2026-11-03-evstinneyeva-v3', 'card_id': card.id})
+    key = dispatch_hash({'surname_correction': '2026-11-03-evstinneyeva-v4', 'card_id': card.id})
     job = db.get(CabinetCommand, key)
     payload = {'tg_id': card.tg_id, 'action': 'confirmed_surname_repair',
         'confirmed_surname_correction': {'card_id': card.id, 'expected_surname': 'ЕВС'},
