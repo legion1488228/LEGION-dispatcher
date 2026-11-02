@@ -12547,10 +12547,10 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''
 <style id="gbu-payroll-four-cards-style">
 #modal .gbu-payroll-people-grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;padding:4px}
-#modal .gbu-payroll-people-grid>button.gbu-payroll-person{appearance:none;-webkit-appearance:none;display:flex;flex-direction:column;align-items:stretch;gap:3px;margin:0;padding:6px 4px;text-align:left;font:inherit;color:var(--text);cursor:pointer;min-height:66px;min-width:0}
+#modal .gbu-payroll-people-grid>button.gbu-payroll-person{appearance:none;-webkit-appearance:none;display:grid;grid-template-rows:subgrid;grid-row:span 4;align-items:start;gap:3px;margin:0;padding:6px 4px;text-align:left;font:inherit;color:var(--text);cursor:pointer;min-height:66px;min-width:0}
 #modal .gbu-payroll-person .gbu-payroll-person-name{font-size:11px;line-height:1.2;overflow-wrap:anywhere}
 #modal .gbu-payroll-person-location{font-size:9px;line-height:1.25;color:var(--muted);overflow-wrap:anywhere}
-#modal .gbu-payroll-card-salary{margin-top:auto;color:var(--gold2);font-size:10px;line-height:1.2;font-weight:700;overflow-wrap:anywhere}
+#modal .gbu-payroll-card-salary{margin-top:0;color:var(--gold2);font-size:10px;line-height:1.2;font-weight:700;overflow-wrap:anywhere}
 #modal .gbu-payroll-people-grid>button.gbu-payroll-person:focus-visible{outline:2px solid var(--gold2);outline-offset:-2px}
 #modal .gbu-payroll-people-grid>button.gbu-payroll-person:active{background:var(--panel2)}
 .gbu-payroll-person-report h3{margin:10px 0 4px}.gbu-payroll-person-report h4{margin:12px 0 5px;color:var(--gold2)}
@@ -21013,3 +21013,33 @@ function gbuPayrollPayersHtml(employee){
 
 
 INLINE_INDEX_HTML = _gbu_payroll_payers_html(INLINE_INDEX_HTML)
+
+
+# Owner payroll lives in the bottom navigation, next to the final cabinet tab.
+def _owner_payroll_bottom_navigation_html(html):
+    def replace(old, new):
+        nonlocal html
+        if html.count(old) != 1:
+            raise ValueError('Owner payroll navigation anchor missing: ' + old[:100])
+        html = html.replace(old, new, 1)
+
+    old = "if(kind==='owner')return [{...readiness,title:'Готовность',icon:()=>cabinetIcon('team')},staff,{key:'tables',title:'Мои таблицы',icon:()=>'<span>💰</span>'},{key:'own',title:'Мой кабинет',icon:()=>cabinetIcon('user')},{key:'brigadeControl',title:'Контроль',icon:()=>cabinetIcon('control')}];"
+    new = "if(kind==='owner')return [{...readiness,title:'Готовность',icon:()=>cabinetIcon('team')},staff,{key:'tables',title:'Мои таблицы',icon:()=>'<span>💰</span>'},{key:'brigadeControl',title:'Контроль',icon:()=>cabinetIcon('control')},...(state.bootstrap?.is_owner===true?[{key:'payroll',title:'Зарплата',icon:()=>'<b class=\"role-ruble\">₽</b>'}]:[]),{key:'own',title:'Мой кабинет',icon:()=>cabinetIcon('user')}];"
+    replace(old, new)
+    replace("  if(target==='tables'){closeModal();await openPersonalTables();return}",
+            "  if(target==='payroll'){if(state.bootstrap?.is_owner!==true)return;closeModal();await openGbuPayroll();return}\n  if(target==='tables'){closeModal();await openPersonalTables();return}")
+    replace('<button type="button" data-plan-payroll>₽ Зарплата ГБУ</button>', '')
+    replace(" qs('[data-plan-payroll]',root).onclick=()=>openGbuPayroll();qs('[data-plan-agents]',root).onclick=()=>openGbuAgents();",
+            " qs('[data-plan-agents]',root).onclick=()=>openGbuAgents();")
+    replace('<button type="button" class="secondary small" id="gbuPayrollBtn">₽ Зарплата ГБУ</button>', '')
+    replace("  const payroll=qs('#gbuPayrollBtn');payroll.hidden=state.bootstrap?.is_owner!==true;payroll.onclick=()=>openGbuPayroll();", '')
+    return html.replace('</head>', '''<style id="owner-six-navigation-tabs">
+body[data-cabinet-kind="owner"] .role-navigation small{font-size:clamp(8px,2.25vw,10px);line-height:1.15;white-space:normal;overflow-wrap:normal;text-wrap:balance}
+body[data-cabinet-kind="owner"] .role-navigation button{display:flex;flex-direction:column;align-items:center;gap:1px}
+body[data-cabinet-kind="owner"] .role-navigation .role-nav-icon{flex-shrink:0}
+</style></head>''', 1)
+
+
+INLINE_INDEX_HTML = _owner_payroll_bottom_navigation_html(INLINE_INDEX_HTML)
+UI_USAGE_CONTROLS['nav.payroll'] = ('Зарплата ГБУ', 'Нижнее меню', '[data-role-nav="payroll"]')
+UI_USAGE_CONTROLS.pop('staff.payroll', None)
