@@ -14422,10 +14422,11 @@ def private_agent_phone_lookup(db, name, exclude_order_id=None):
 
 
 @app.get('/api/dispatch-board/private-agent-phone')
-def private_agent_phone_endpoint(name: str, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+def private_agent_phone_endpoint(name: str, phone: str = '', db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     dispatch_guard(db,user)
     if len(name)>200:raise HTTPException(422,'Слишком длинное имя агента')
-    return JSONResponse({'phone':private_agent_phone_lookup(db,name)},headers={'Cache-Control':'private, no-store'})
+    found_phone=private_agent_phone_lookup(db,name)
+    return JSONResponse({'phone':found_phone, 'agent_name':private_agent_history_name(db,name,phone or found_phone)},headers={'Cache-Control':'private, no-store'})
 
 
 @app.get('/api/dispatch-board/agent-match')
@@ -21429,3 +21430,55 @@ def _payroll_pending_navigation_html(html):
 
 
 INLINE_INDEX_HTML = _payroll_pending_navigation_html(INLINE_INDEX_HTML)
+
+
+def private_agent_history_name(db, alias, phone=''):
+    key=private_agent_phone_key(alias)
+    number=private_agent_phone_number(phone)
+    if not key or key in {'агент','гбу','частный','частные','без агента'}:
+        return ''
+    matches={}
+    for organization,name,saved_phone in db.execute(select(Order.organization,Order.agent_name,Order.agent_phone).where(
+            Order.source=='private',Order.status!='cancelled',Order.agent_name!='')):
+        if private_agent_phone_key(str(organization or '').strip() or name)!=key:
+            continue
+        if number and private_agent_phone_number(saved_phone)!=number:
+            continue
+        value=' '.join(str(name or '').split())
+        if value:matches.setdefault(private_agent_phone_key(value),value)
+    return next(iter(matches.values())) if len(matches)==1 else ''
+
+
+def _private_agent_name_autofill_html(html):
+    start=html.index(" if(source==='private'&&!order?.approved){",html.index('async function openDispatchEditor('))
+    end=html.index('\n const sizes=',start)
+    html=html[:start]+r''' if(source==='private'&&!order?.approved){
+  let generation=0,filledPhone='',filledName='';
+  const nameInput=form.elements.agent_name,organizationInput=form.elements.organization;
+  const lookupPrivateAgent=async()=>{
+   const ticket=++generation,alias=organizationInput.value.trim()||nameInput.value.trim();
+   const oldPhone=phoneInput.value,oldName=nameInput.value;
+   if(!alias||oldPhone.trim()&&oldName.trim())return;
+   try{
+    const result=await api('/api/dispatch-board/private-agent-phone?name='+encodeURIComponent(alias)+'&phone='+encodeURIComponent(oldPhone));
+    if(!live()||ticket!==generation||oldPhone!==phoneInput.value||oldName!==nameInput.value||alias!==(organizationInput.value.trim()||nameInput.value.trim()))return;
+    if(!phoneInput.value.trim()&&result.phone){phoneInput.value=domesticAgentPhone(result.phone);filledPhone=phoneInput.value;markAutoPhone(true)}
+    if(!nameInput.value.trim()&&result.agent_name){nameInput.value=result.agent_name;filledName=result.agent_name}
+   }catch(error){/* History must not prevent manual editing. */}
+  };
+  organizationInput.addEventListener('input',()=>{
+   generation++;
+   if(filledPhone&&phoneInput.value===filledPhone){phoneInput.value='';markAutoPhone(false)}
+   if(filledName&&nameInput.value===filledName)nameInput.value='';
+   filledPhone='';filledName='';
+  });
+  nameInput.addEventListener('input',()=>{generation++;filledName=''});
+  phoneInput.addEventListener('input',()=>{generation++;filledPhone=''});
+  for(const input of [organizationInput,nameInput,phoneInput])input.addEventListener('change',lookupPrivateAgent);
+  lookupPrivateAgent();
+ }
+''' + html[end:]
+    return html
+
+
+INLINE_INDEX_HTML = _private_agent_name_autofill_html(INLINE_INDEX_HTML)
