@@ -21738,3 +21738,72 @@ function dispatchCopyCrewSelection(source,people,current,teamSize){
 
 
 INLINE_INDEX_HTML = _dispatch_copy_crew_html(INLINE_INDEX_HTML)
+
+
+def _control_attention_header_html(html):
+    start = html.index('function renderOwnerBrigadeControl(){')
+    end = html.index('async function loadOwnerBrigadeControl(){', start)
+    part = html[start:end]
+    a = part.index('<button type="button" class="bc-heading-contact"')
+    b = part.index('</label>', a) + len('</label>')
+    contact = part[a:part.index('</button>', a) + len('</button>')]
+    part = part[:a] + r'''<label class="bc-date bc-date-short"><span aria-hidden="true">${esc(controlHeaderDate(data.work_date))}</span><input type="date" id="brigadeControlDate" value="${esc(data.work_date)}" aria-label="Дата контроля заказов"></label><button type="button" class="bc-attention-toggle" data-control-attention aria-label="Подсветить строки, требующие внимания" title="Требует внимания" aria-pressed="${ownerBrigadeControlAttention}">⚠️</button>''' + contact + part[b:]
+    anchor = '  bindControlReportPhotos(root);'
+    if part.count(anchor) != 1:
+        raise ValueError('Control attention binding missing')
+    part = part.replace(anchor, r'''  const attention=qs('[data-control-attention]',root);
+  attention.onclick=()=>{
+    ownerBrigadeControlAttention=!ownerBrigadeControlAttention;
+    attention.setAttribute('aria-pressed',String(ownerBrigadeControlAttention));
+    applyControlAttention(root,data);
+  };
+  applyControlAttention(root,data);
+''' + anchor, 1)
+    html = html[:start] + part + html[end:]
+    anchor = "ownerBrigadeControlIdentity=identity;ownerBrigadeControlData=null;"
+    if html.count(anchor) != 1:
+        raise ValueError('Control identity reset missing')
+    html = html.replace(anchor, anchor + 'ownerBrigadeControlAttention=false;', 1)
+    return html.replace('</body>', r'''<style id="control-attention-header">
+#ownerBrigadeControlContent .bc-heading:has(.bc-attention-toggle){grid-template-columns:minmax(0,1fr) 64px 34px 58px;gap:4px;align-items:center}
+#ownerBrigadeControlContent .bc-heading .bc-date-short{position:relative;display:grid;place-items:center;height:34px;padding:3px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);font-size:11px;line-height:1.15;color:var(--text);white-space:nowrap;overflow:hidden}
+#ownerBrigadeControlContent .bc-heading .bc-date-short input{position:absolute;inset:0;display:block;width:100%;height:100%;max-width:none;min-height:0;margin:0;padding:0;border:0;opacity:0;cursor:pointer}
+#ownerBrigadeControlContent .bc-date-short:focus-within{outline:2px solid var(--gold);outline-offset:1px}
+#ownerBrigadeControlContent .bc-heading .bc-attention-toggle{display:grid;place-items:center;box-sizing:border-box;width:34px;height:34px;min-width:0;min-height:0;padding:0;border:1px solid var(--gold2);border-radius:8px;background:var(--panel2);color:var(--gold);font-size:18px;line-height:1;cursor:pointer;touch-action:manipulation}
+#ownerBrigadeControlContent .bc-heading .bc-attention-toggle[aria-pressed=true]{background:var(--gold);box-shadow:inset 0 0 0 1px var(--gold2)}
+#ownerBrigadeControlContent .bc-heading .bc-attention-toggle:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+#ownerBrigadeControlContent .bc-heading .bc-heading-contact{height:34px;min-height:34px;padding:2px 3px}
+#ownerBrigadeControlContent .bc-stage.bc-needs-attention{background:color-mix(in srgb,var(--gold) 28%,var(--panel));box-shadow:inset 0 0 0 1px var(--gold2);color:var(--text)}
+@media(max-width:350px){#ownerBrigadeControlContent .bc-heading:has(.bc-attention-toggle){grid-template-columns:minmax(0,1fr) 55px 32px 50px;gap:3px}#ownerBrigadeControlContent .bc-heading .bc-attention-toggle{width:32px}#ownerBrigadeControlContent .bc-heading .bc-date-short{font-size:10px}#ownerBrigadeControlContent .bc-heading .bc-heading-contact b{font-size:12px}}
+</style><script>
+let ownerBrigadeControlAttention=false;
+function controlHeaderDate(day){
+ const date=new Date(day+'T12:00:00+03:00');
+ return Number.isNaN(date.getTime())?day:new Intl.DateTimeFormat('ru-RU',{timeZone:'Europe/Moscow',day:'numeric',month:'short'}).format(date);
+}
+function controlAttentionStages(card,day,now=new Date()){
+ const parts=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Moscow',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(now).map(p=>[p.type,p.value]));
+ const today=parts.year+'-'+parts.month+'-'+parts.day,minute=Number(parts.hour)*60+Number(parts.minute);
+ if(day>today)return [];
+ const past=day<today;
+ const due=value=>{const match=/^(\d{1,2}):(\d{2})$/.exec(String(value||''));return past||!!match&&Number(match[1])<24&&Number(match[2])<60&&Number(match[1])*60+Number(match[2])<=minute};
+ const result=[];
+ if(!card.on_contact&&due(card.contact_time))result.push('contact');
+ if(!card.photos_complete&&due(card.photo_time))result.push('photo');
+ if(past&&!card.completed)result.push('done');
+ return result;
+}
+function applyControlAttention(root,data){
+ root.querySelectorAll('.bc-needs-attention').forEach(row=>row.classList.remove('bc-needs-attention'));
+ if(!ownerBrigadeControlAttention)return;
+ const now=new Date();
+ for(const card of data.items){
+  const order=root.querySelector('[data-control-card="'+Number(card.id)+'"]');
+  if(!order)continue;
+  for(const stage of controlAttentionStages(card,data.work_date,now))order.querySelector('.bc-stage-'+stage)?.classList.add('bc-needs-attention');
+ }
+}
+</script></body>''', 1)
+
+
+INLINE_INDEX_HTML = _control_attention_header_html(INLINE_INDEX_HTML)
