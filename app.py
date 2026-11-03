@@ -21773,7 +21773,7 @@ def _control_attention_header_html(html):
 #ownerBrigadeControlContent .bc-heading .bc-attention-toggle[aria-pressed=true]{background:var(--gold);box-shadow:inset 0 0 0 1px var(--gold2)}
 #ownerBrigadeControlContent .bc-heading .bc-attention-toggle:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
 #ownerBrigadeControlContent .bc-heading .bc-heading-contact{height:34px;min-height:34px;padding:2px 3px}
-#ownerBrigadeControlContent .bc-stage.bc-needs-attention{background:color-mix(in srgb,var(--gold) 28%,var(--panel));box-shadow:inset 0 0 0 1px var(--gold2);color:var(--text)}
+#ownerBrigadeControlContent .bc-stage.bc-needs-attention{background:rgba(210,65,65,.13);box-shadow:inset 0 0 0 1px rgba(185,50,50,.55);color:var(--text)}
 @media(max-width:350px){#ownerBrigadeControlContent .bc-heading:has(.bc-attention-toggle){grid-template-columns:minmax(0,1fr) 55px 32px 50px;gap:3px}#ownerBrigadeControlContent .bc-heading .bc-attention-toggle{width:32px}#ownerBrigadeControlContent .bc-heading .bc-date-short{font-size:10px}#ownerBrigadeControlContent .bc-heading .bc-heading-contact b{font-size:12px}}
 </style><script>
 let ownerBrigadeControlAttention=false;
@@ -21807,3 +21807,67 @@ function applyControlAttention(root,data){
 
 
 INLINE_INDEX_HTML = _control_attention_header_html(INLINE_INDEX_HTML)
+
+
+def _dispatch_attention_button_html(html):
+    start=html.index('async function loadDispatchBoard(){')
+    end=html.index('function dispatchImportNumbers(',start)
+    part=html[start:end]
+    anchor=" qs('[data-plan-import]',root).onclick=()=>openDispatchGbuImport();"
+    if part.count(anchor)!=1:raise ValueError('Orders attention toolbar binding missing')
+    part=part.replace(anchor,anchor+'\n bindDispatchAttention(root,data);',1)
+    html=html[:start]+part+html[end:]
+    return html.replace('</body>',r'''<style id="dispatch-attention-style">
+#dispatchActionsView .dispatch-tools.dispatch-toolbar:has([data-plan-attention]){grid-template-columns:minmax(0,1fr) minmax(0,1fr) 34px;align-items:stretch}
+#dispatchActionsView .dispatch-toolbar [data-plan-attention]{display:grid;place-items:center;box-sizing:border-box;width:34px;height:34px;min-height:34px;min-width:0;padding:0;border:1px solid var(--gold2);border-radius:8px;background:var(--panel2);color:var(--gold);font-size:18px;line-height:1;touch-action:manipulation}
+#dispatchActionsView .dispatch-toolbar [data-plan-attention][aria-pressed=true]{background:var(--gold);box-shadow:inset 0 0 0 1px var(--gold2)}
+#dispatchActionsView .dispatch-toolbar [data-plan-attention]:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+#dispatchActionsView .dispatch-attention-row{background:rgba(210,65,65,.13);box-shadow:inset 0 0 0 1px rgba(185,50,50,.55);border-radius:5px}
+</style><script>
+let dispatchAttentionState={identity:null,enabled:false};
+function dispatchAttentionSelectors(order,number){
+ const selectors=[];
+ if(order.is_draft)selectors.push('.dispatch-card-main');
+ if(!String(order.deceased_name||'').trim())selectors.push('.dispatch-order-name');
+ if(!order.category||!(Number(order.team_size)>0))selectors.push('.dispatch-card-meta');
+ if(!order.issue_time)selectors.push('.dispatch-card-times');
+ if(!order.composition_complete)selectors.push('.dispatch-inline-status','[data-plan-crew-id]');
+ const status=order.receipt?.status||'not_sent';
+ if(status!=='confirmed'&&(order.composition_complete||['sent','unknown','changed'].includes(status)))selectors.push('.dispatch-send-result:not(:empty)','header');
+ if(!number?.posted||number.posted&&!number.closed)selectors.push('header');
+ return [...new Set(selectors)];
+}
+function applyDispatchAttention(root,data){
+ root.querySelectorAll('.dispatch-attention-row').forEach(row=>row.classList.remove('dispatch-attention-row'));
+ if(!dispatchAttentionState.enabled)return;
+ const numbers=new Map((data.numbers||[]).map(number=>[Number(number.order_id),number]));
+ const mark=node=>node?.classList.add('dispatch-attention-row');
+ for(const order of data.items){
+  const card=root.querySelector('[data-plan-card="'+Number(order.id)+'"]');
+  if(!card)continue;
+  for(const selector of dispatchAttentionSelectors(order,numbers.get(Number(order.id))))card.querySelectorAll(selector).forEach(mark);
+ }
+ const metrics=root.querySelectorAll('.dispatch-evening>.summary-grid>.metric');
+ ['private','gbu'].forEach((source,index)=>{
+  const orders=data.items.filter(order=>order.source===source),rows=orders.map(order=>numbers.get(Number(order.id)));
+  const spans=metrics[index]?.querySelectorAll(':scope>span');
+  if(rows.some(row=>!row?.posted))mark(spans?.[0]);
+  if(rows.some(row=>row?.posted&&!row.closed))mark(spans?.[1]);
+  if(orders.some(order=>order.receipt?.status!=='confirmed'))mark(root.querySelector('[data-plan-receipts="'+source+'"]'));
+ });
+ if(data.items.some(order=>!numbers.get(Number(order.id))?.posted))mark(root.querySelector('[data-plan-numbers]'));
+}
+function bindDispatchAttention(root,data){
+ const identity=String(state.bootstrap?.user?.id||'')+':'+data.work_date;
+ if(dispatchAttentionState.identity!==identity)dispatchAttentionState={identity,enabled:false};
+ const toolbar=root.querySelector('.dispatch-toolbar');if(!toolbar)return;
+ let button=toolbar.querySelector('[data-plan-attention]');
+ if(!button){button=document.createElement('button');button.type='button';button.setAttribute('data-plan-attention','');button.textContent='⚠️';button.setAttribute('aria-label','Подсветить заказы, требующие внимания');button.title='Требует внимания';toolbar.append(button)}
+ button.setAttribute('aria-pressed',String(dispatchAttentionState.enabled));
+ button.onclick=()=>{dispatchAttentionState.enabled=!dispatchAttentionState.enabled;button.setAttribute('aria-pressed',String(dispatchAttentionState.enabled));applyDispatchAttention(root,data)};
+ applyDispatchAttention(root,data);
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML = _dispatch_attention_button_html(INLINE_INDEX_HTML)
