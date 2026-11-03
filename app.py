@@ -4576,7 +4576,8 @@ def personal_cash_day_data(db, owner_id, work_date):
         employee = employees.get(card.tg_id)
         if not employee or employee.group_code != 'brigadier' or employee.is_cashier:
             continue
-        items.append({'key': str(card.id), 'name': _employee_dict(employee)['display_name'], 'surname': card.surname})
+        items.append({'key': str(card.id), 'name': _employee_dict(employee)['display_name'], 'surname': card.surname,
+            'order_details':personal_cash_order_details(db,card)})
     active = {x['key'] for x in items}
     labels = values.get('labels', {})
     for key in values.get('amounts', {}):
@@ -21482,3 +21483,88 @@ def _private_agent_name_autofill_html(html):
 
 
 INLINE_INDEX_HTML = _private_agent_name_autofill_html(INLINE_INDEX_HTML)
+
+
+def personal_cash_order_details(db, card):
+    order=dispatch_order_for_card(db,card)
+    crew=[]
+    if order:
+        for assignment in sorted(dispatch_assignments(db,order),key=lambda a:a.role!='brigadier'):
+            crew.append({'name':dispatch_crew_person(_employee_dict(assignment.employee)),
+                'leader':assignment.role=='brigadier'})
+        external=_order_external_member_count(order,db)
+        if external:
+            crew.append({'name':f'Сторонняя организация · {external} чел.', 'leader':False})
+        spec={'category':order.category,'team_size':order.team_size}
+    else:
+        spec=cabinet_assigned_spec(db,card)
+    return {'crew':crew,'category':(spec or {}).get('category'),
+        'team_size':(spec or {}).get('team_size')}
+
+
+def _personal_cash_crew_disclosure_html(html):
+    start=html.index('async function openPersonalCashDay(day){')
+    end=html.index('\n</script>',start)
+    section=html[start:end]
+    anchor='  function values(){'
+    if section.count(anchor)!=1:raise ValueError('Private cash disclosure binding missing')
+    section=section.replace(anchor,r'''  qsa('[data-private-cash]',body).forEach(input=>{
+   const item=data.items.find(item=>String(item.key)===input.dataset.privateCash);
+   if(!item)return;
+   const row=input.closest('.private-cash-row'),title=row?.querySelector('.name b');if(!title)return;
+   const button=document.createElement('button');button.type='button';button.className='private-cash-crew-toggle';
+   button.textContent=title.textContent+' ▾';button.setAttribute('aria-expanded','false');
+   button.setAttribute('aria-label','Показать состав заказа: '+item.name);title.replaceWith(button);
+   const panel=document.createElement('div');panel.className='private-cash-crew-panel';panel.hidden=true;
+   panel.id='private-cash-crew-'+item.key;button.setAttribute('aria-controls',panel.id);
+   const detail=item.order_details||{},labels={standard:'Стандарт',vip:'Вип',elite:'Элит',carryout:'Вынос'};
+   const category=labels[detail.category]||'Категория не указана';
+   panel.innerHTML='<b>'+esc(category)+(detail.team_size?' · '+esc(detail.team_size)+' чел.':' · Количество не указано')+'</b>'+
+    (detail.crew?.length?'<ol>'+detail.crew.map(person=>'<li>'+(person.leader?'<strong>':'')+esc(person.name)+(person.leader?' · бригадир</strong>':'')+'</li>').join('')+'</ol>':'<p>Состав не назначен</p>');
+   button.onclick=()=>openPersonalCashCrewPopover(panel,button);
+  });
+''' + anchor,1)
+    html=html[:start]+section+html[end:]
+    return html.replace('</body>',r'''<style>
+#privateCashBody .private-cash-crew-toggle{display:block;max-width:100%;min-height:36px;padding:0;border:0;background:transparent;color:var(--text);font:inherit;font-weight:700;text-align:left;white-space:normal;overflow-wrap:anywhere;cursor:pointer}
+#privateCashBody .private-cash-crew-toggle:focus-visible{outline:2px solid var(--gold);outline-offset:2px;border-radius:4px}
+.private-cash-crew-panel{position:fixed;z-index:2000;box-sizing:border-box;width:max-content;max-width:min(320px,calc(100vw - 24px));max-height:240px;overflow:auto;margin:0;padding:8px 10px;box-shadow:0 5px 18px #0003;border:1px solid var(--gold2);border-radius:10px;background:var(--panel2);font-size:12px;line-height:1.4;overflow-wrap:anywhere}
+.private-cash-crew-panel[hidden]{display:none}
+.private-cash-crew-panel ol{margin:5px 0 0;padding-left:18px}
+.private-cash-crew-panel li{padding:2px 0}
+.private-cash-crew-panel p{margin:5px 0 0;color:var(--muted)}
+</style><script>
+function openPersonalCashCrewPopover(panel,button){
+ const wasOpen=panel.isConnected&&!panel.hidden;
+ globalThis.__legionCashCrewClose?.();
+ if(wasOpen||!button.isConnected)return;
+ let timer=null,observer=null;
+ const close=()=>{
+  clearTimeout(timer);observer?.disconnect();panel.hidden=true;panel.remove();button.setAttribute('aria-expanded','false');
+  document.removeEventListener('pointerdown',outside,true);document.removeEventListener('keydown',key,true);
+  document.removeEventListener('scroll',scroll,true);window.removeEventListener('resize',close);
+  if(globalThis.__legionCashCrewClose===close)globalThis.__legionCashCrewClose=null;
+ };
+ const outside=event=>{if(!panel.contains(event.target)&&!button.contains(event.target))close()};
+ const key=event=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();close();if(button.isConnected)button.focus({preventScroll:true})}};
+ const scroll=event=>{if(event.target!==panel&&!panel.contains(event.target))close()};
+ globalThis.__legionCashCrewClose=close;
+ document.body.append(panel);panel.hidden=false;button.setAttribute('aria-expanded','true');
+ const viewport=window.visualViewport,offsetX=viewport?.offsetLeft||0,offsetY=viewport?.offsetTop||0;
+ const width=viewport?.width||window.innerWidth,height=viewport?.height||window.innerHeight;
+ panel.style.maxWidth=Math.max(100,Math.min(320,width-24))+'px';
+ panel.style.maxHeight=Math.max(80,Math.min(240,height-24))+'px';
+ const anchor=button.getBoundingClientRect(),size=panel.getBoundingClientRect();
+ const left=Math.max(offsetX+12,Math.min(anchor.left,offsetX+width-size.width-12));
+ let top=anchor.bottom+5;
+ if(top+size.height>offsetY+height-12)top=Math.max(offsetY+12,anchor.top-size.height-5);
+ panel.style.left=left+'px';panel.style.top=top+'px';
+ document.addEventListener('pointerdown',outside,true);document.addEventListener('keydown',key,true);
+ document.addEventListener('scroll',scroll,true);window.addEventListener('resize',close);
+ observer=new MutationObserver(()=>{if(!button.isConnected)close()});observer.observe(document.body,{childList:true,subtree:true});
+ timer=setTimeout(close,5000);
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML = _personal_cash_crew_disclosure_html(INLINE_INDEX_HTML)
