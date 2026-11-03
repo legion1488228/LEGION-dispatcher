@@ -14086,17 +14086,6 @@ def dispatch_set_pair_meta(db, order, partner_id, color=None):
     plan.payload = json.dumps(meta, ensure_ascii=False)
 
 
-def dispatch_pair_crews(db, order, partner, candidate=None):
-    def crew(value):
-        rows = dispatch_assignments(db, value)
-        return (next((a.employee_id for a in rows if a.role == 'brigadier'), None),
-            {a.employee_id for a in rows}, _order_external_member_count(value, db))
-    leader, people, external = candidate if candidate is not None else crew(order)
-    other_leader, other_people, other_external = crew(partner)
-    if ((leader and other_leader and leader != other_leader)
-            or len(set(people) | other_people) + max(external, other_external) > max(order.team_size, partner.team_size)):
-        raise HTTPException(409, 'Для сдвоенных заказов нужен общий состав и один бригадир. Проверьте назначения.')
-
 
 def dispatch_unlink_pair(db, order):
     partner = dispatch_pair_partner(db, order)
@@ -14115,7 +14104,10 @@ def dispatch_pair_demand(db, rows, requested):
                for o in (order, partner)): continue
         # Reuse the smaller crew; a 4+6 pair needs six distinct people.
         reused = min((order, partner), key=lambda o:(o.team_size, -o.id))
-        effective[reused.source] = max(0, effective[reused.source] - reused.team_size)
+        first=dispatch_assignments(db,order);second=dispatch_assignments(db,partner)
+        shared=(len({a.employee_id for a in first}&{a.employee_id for a in second})+
+            min(_order_external_member_count(order,db),_order_external_member_count(partner,db))) if first and second else reused.team_size
+        effective[reused.source] = max(0, effective[reused.source] - min(reused.team_size,shared))
     return effective
 
 
@@ -14683,7 +14675,7 @@ def dispatch_delete_order(order_id: int, data: DispatchRevision, db: Session = D
 
 
 @app.post('/api/dispatch-board/orders/{order_id}/pair')
-def dispatch_pair_order(order_id: int, data: DispatchPairInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+async def dispatch_pair_order(order_id: int, data: DispatchPairInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     dispatch_guard(db, user)
     order = db.get(Order, order_id)
     if not order or order.status == 'cancelled': raise HTTPException(404, 'Заказ не найден')
@@ -14706,7 +14698,18 @@ def dispatch_pair_order(order_id: int, data: DispatchPairInput, db: Session = De
     for item in (order, partner):
         if item.status == 'draft' or item.category not in ('standard','vip','elite') or item.team_size <= 0:
             raise HTTPException(409, 'Перед сдвоением заполните категорию, количество, фамилию и время обоих заказов')
-    dispatch_pair_crews(db, order, partner)
+    first=dispatch_assignments(db,order)
+    other=dispatch_assignments(db,partner)
+    copy_source,copy_target=(order,partner) if first and not other else (partner,order) if other and not first else (None,None)
+    if copy_source is not None:
+        rows=dispatch_assignments(db,copy_source)
+        leader=next((row.employee_id for row in rows if row.role=='brigadier'),None)
+        if leader is None: raise HTTPException(409,'В исходном составе не назначен бригадир')
+        copied=DispatchCrewInput(revision=dispatch_order_data(db,copy_target,0)['revision'],
+            brigadier_id=leader,member_ids=[row.employee_id for row in rows if row.employee_id!=leader],
+            second_order_employee_ids=[row.employee_id for row in rows],
+            external_member_count=_order_external_member_count(copy_source,db),allow_partial=True)
+        await _dispatch_set_crew(copy_target.id,copied,db,user,commit=False)
     used_colors = set(dispatch_pair_colors(db, dispatch_rows(db, order.work_date)).values())
     color = 0
     while color in used_colors: color += 1
@@ -14716,8 +14719,7 @@ def dispatch_pair_order(order_id: int, data: DispatchPairInput, db: Session = De
     return {'ok':True}
 
 
-@app.post('/api/dispatch-board/orders/{order_id}/crew')
-async def dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+async def _dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session, user: TelegramUser, commit=True):
     dispatch_guard(db,user)
     order=db.get(Order,order_id)
     if not order: raise HTTPException(404,'Заказ не найден')
@@ -14748,7 +14750,6 @@ async def dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session 
             or not profiles[data.brigadier_id].tg_id)):
         raise HTTPException(409,'Проверьте бригадира, его Telegram ID и сотрудников')
     partner = dispatch_pair_partner(db, order)
-    if partner: dispatch_pair_crews(db, order, partner, (data.brigadier_id, set(ids), data.external_member_count))
     for other in dispatch_rows(db,order.work_date):
         if other.id==order.id or other.source!=order.source: continue
         if other.deceased_name.strip().casefold()==order.deceased_name.strip().casefold() and any(
@@ -14804,10 +14805,15 @@ async def dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session 
             'revision':after['revision'],'confirmed_at':None,'activation_confirmed_at':activation_stamp,
             'previous_revisions':list(dict.fromkeys([*revisions,before['revision']])) if same_leader else []}
     plan.payload=json.dumps(meta,ensure_ascii=False)
-    db.commit()
-    notice_status=await dispatch_deliver_crew_change(db,notice) if notice else None
+    if commit: db.commit()
+    notice_status=await dispatch_deliver_crew_change(db,notice) if notice and commit else None
     return {'ok':True,'crew_notice_status':notice_status,'number_reassignment':reassignment_token}
 
+
+
+@app.post('/api/dispatch-board/orders/{order_id}/crew')
+async def dispatch_set_crew(order_id: int, data: DispatchCrewInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    return await _dispatch_set_crew(order_id,data,db,user)
 
 
 @app.delete('/api/dispatch-board/orders/{order_id}/crew')
@@ -15395,7 +15401,6 @@ async def dispatch_send_single(order_id: int, data: DispatchSingleSendInput, db:
     if not item.get('composition_complete'):raise HTTPException(409,'Сначала назначьте полный состав этого заказа')
     if not (item.get('brigadier') or {}).get('tg_id'):raise HTTPException(409,'У бригадира не указан Telegram ID')
     partner=dispatch_pair_partner(db,order)
-    if partner:dispatch_pair_crews(db,order,partner)
     # A full order replaces the pending crew-change acknowledgement action.
     # Keep existing confirmation, but allow the new full-order button to work.
     plan=db.get(DispatchPlan,item['id'])
@@ -15444,7 +15449,6 @@ async def dispatch_send(work_date: date, data: DispatchRevision, db: Session = D
         leader=item['brigadier']
         if not leader.get('tg_id'): raise HTTPException(409,'У бригадира не указан Telegram ID')
         partner=dispatch_pair_partner(db,db.get(Order,item['id']))
-        if partner: dispatch_pair_crews(db,db.get(Order,item['id']),partner)
         receipt_status=dispatch_receipt_info(db,item).get('status')
         if receipt_status=='unknown':raise HTTPException(409,'Доставка заказа не подтверждена. Проверьте сообщения у бригадира перед повторной отправкой.')
         if receipt_status not in {'confirmed','sent'}:
@@ -21568,3 +21572,169 @@ function openPersonalCashCrewPopover(panel,button){
 
 
 INLINE_INDEX_HTML = _personal_cash_crew_disclosure_html(INLINE_INDEX_HTML)
+
+def _unified_small_popovers_html(html):
+    # Contacts are enabled only in the GBU directory, never in an order card.
+    start=html.index('async function openGbuAgents(){')
+    end=html.index('\n</script>',start)
+    part=html[start:end]
+    old="   qsa('[data-copy-agent-phone]',root)"
+    if part.count(old)!=1:raise ValueError('Directory contact binding missing')
+    part=part.replace(old,r'''   qsa('.gbu-agent-card',root).forEach((card,index)=>{
+    const heading=card.querySelector(':scope > b'),agent=list[index];if(!heading||!agent)return;
+    const button=document.createElement('button');button.type='button';button.className='legion-agent-contact';button.textContent=heading.textContent;
+    button.setAttribute('aria-label','Контакт агента '+(agent.full_name||''));heading.replaceWith(button);
+    button.onclick=()=>{
+     const phone=gbuAgentDomesticPhone(agent.phone),digits=phone.replace(/[^+0-9]/g,'');
+     const panel=legionOpenSmallPopover(button,'Агент','<p class="legion-pop-name">'+esc(agent.full_name||'—')+'</p><p>'+esc(phone||'Номер не указан')+'</p>'+(phone?'<div class="legion-pop-actions"><a href="tel:'+esc(digits)+'">Позвонить</a><button type="button" data-agent-copy>Копировать</button></div>':''));
+     panel?.querySelector('[data-agent-copy]')?.addEventListener('click',()=>copyGbuAgentPhone(phone));
+    };
+   });
+''' + old,1)
+    html=html[:start]+part+html[end:]
+    # Keep all existing cash calculations and drill-down data; change their host only.
+    start=html.index('function bindOwnerCashDetails(');end=html.index('\n</script>',start)
+    part=html[start:end]
+    part=part.replace(" const host=qs('#ownerCashDetail',body);let request=0;", " let host=qs('#ownerCashDetail',body),detailTrigger=null;let request=0;",1)
+    a=part.index(' const show=(title,content)=>');b=part.index('\n body.onclick=',a)
+    part=part[:a]+" const show=(title,content)=>{const panel=legionOpenSmallPopover(detailTrigger,title,content,()=>{request++});host=panel?.querySelector('[data-legion-pop-content]')};"+part[b:]
+    anchor="  if(button.dataset.ownerCashCheck)"
+    part=part.replace(anchor,"  detailTrigger=button;\n"+anchor,1)
+    part=part.replace("  const seq=++request", "  globalThis.legionPopoverClose?.();\n  const seq=++request",1)
+    part=part.replace("if(!active()||seq!==request)return;", "if(!active()||seq!==request||!host?.isConnected)return;",1)
+    part=part.replace("if(active()&&seq===request)host.querySelector", "if(active()&&seq===request&&host?.isConnected)host.querySelector",1)
+    html=html[:start]+part+html[end:]
+    # Comment preview is compact. The established versioned editor remains intact.
+    if html.count('async function openDayComment(day){')!=1:raise ValueError('Day comment entry missing')
+    html=html.replace('async function openDayComment(day){','async function openDayCommentEditor(day){',1)
+    html=html.replace("qs('#dayCommentBtn').onclick=()=>openDayComment(day);", "qs('#dayCommentBtn').onclick=e=>openDayComment(day,e.currentTarget);",1)
+    html=html.replace("qs('[data-plan-comment]',root).onclick=()=>openDayComment(day);", "qs('[data-plan-comment]',root).onclick=e=>openDayComment(day,e.currentTarget);",1)
+    return html.replace('</body>',r'''<style id="legion-unified-small-popovers">
+.legion-small-popover{position:fixed;z-index:2400;box-sizing:border-box;width:max-content;min-width:200px;max-width:min(340px,calc(100vw - 24px));max-height:min(420px,calc(100dvh - 24px));overflow:auto;padding:10px 12px;border:1px solid var(--gold2);border-radius:12px;background:var(--panel);color:var(--text);box-shadow:0 5px 18px #0003;font-size:13px;line-height:1.4;overflow-wrap:anywhere;overscroll-behavior:contain}
+.legion-small-popover>header{display:flex;align-items:center;justify-content:space-between;gap:10px;padding-bottom:6px;margin-bottom:7px;border-bottom:1px solid var(--line)}
+.legion-small-popover>header strong{font-size:14px;min-width:0}
+.legion-small-popover>header button{flex:none;width:28px;min-width:28px;height:28px;min-height:28px;margin:0;padding:0;border:0;border-radius:7px;background:var(--panel2);color:var(--text);font-size:20px}
+.legion-small-popover p{margin:6px 0;white-space:pre-wrap}.legion-small-popover .legion-pop-name{font-weight:700}
+.legion-small-popover .legion-pop-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px}
+.legion-small-popover .legion-pop-actions button,.legion-small-popover .legion-pop-actions a{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;min-height:36px;padding:6px 9px;border:1px solid var(--gold2);border-radius:8px;background:var(--panel2);color:var(--text);font:inherit;text-decoration:none}
+#gbuAgentsList .legion-agent-contact{display:block;width:100%;min-height:30px;padding:0;border:0;background:transparent;color:var(--text);font:inherit;font-size:11px;font-weight:700;line-height:1.2;text-align:left;overflow-wrap:anywhere;cursor:pointer}
+#gbuAgentsList .gbu-agent-card:has(.gbu-agent-edit)>.legion-agent-contact{padding-right:31px}
+.private-cash-crew-panel,.bc-photo-viewer .bc-crew-disclosure,.bc-photo-viewer .dispatch-control-crew-panel{border:1px solid var(--gold2);border-radius:12px;background:var(--panel);color:var(--text);padding:10px 12px;box-shadow:0 5px 18px #0003;font-size:13px;line-height:1.4}
+.private-cash-crew-panel>b{display:block;padding-bottom:6px;border-bottom:1px solid var(--line)}
+.cash-note-dialog{width:min(340px,100%);max-width:340px;padding:12px;border:1px solid var(--gold2);border-radius:12px;background:var(--panel);box-shadow:0 5px 18px #0003}
+.cash-note-dialog .cash-note-heading{padding-bottom:6px;border-bottom:1px solid var(--line)}
+.cash-note-dialog .cash-note-heading h3{font-size:14px}
+#modal:has(#dayCommentForm){width:calc(100% - 24px);max-width:360px;left:12px;right:12px;margin-left:auto;margin-right:auto;padding:12px;border:1px solid var(--gold2);border-radius:12px}
+#modal:has(#dayCommentForm) .modal-head h3{font-size:16px}
+#dayCommentForm{margin-top:8px!important}.day-comment-text{min-height:96px;padding:8px}
+.gbu-payroll-comment textarea,.gbu-comment-panel{border-color:var(--gold2);border-radius:12px}
+</style><script>
+function legionOpenSmallPopover(trigger,title,content,onClose=null){
+ globalThis.legionPopoverClose?.();globalThis.__legionCashCrewClose?.();
+ if(!trigger?.isConnected)return null;
+ const panel=document.createElement('section');panel.className='legion-small-popover';panel.setAttribute('role','region');panel.setAttribute('aria-label',title);
+ panel.innerHTML='<header><strong>'+esc(title)+'</strong><button type="button" data-legion-pop-close aria-label="Закрыть вкладку">×</button></header><div data-legion-pop-content>'+content+'</div>';
+ let observer;
+ const originalExpanded=trigger.getAttribute('aria-expanded');trigger.setAttribute('aria-expanded','true');
+ const close=()=>{
+  if(globalThis.legionPopoverClose!==close)return;
+  globalThis.legionPopoverClose=null;panel.remove();observer?.disconnect();
+  if(originalExpanded===null)trigger.removeAttribute('aria-expanded');else trigger.setAttribute('aria-expanded',originalExpanded);
+  document.removeEventListener('pointerdown',outside,true);document.removeEventListener('keydown',key,true);document.removeEventListener('scroll',scroll,true);window.removeEventListener('resize',close);
+  if(onClose)onClose();
+ };
+ const outside=event=>{if(!panel.contains(event.target)&&!trigger.contains(event.target))close()};
+ const key=event=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();close();if(trigger.isConnected)trigger.focus({preventScroll:true})}};
+ const scroll=event=>{if(event.target!==panel&&!panel.contains(event.target))close()};
+ globalThis.legionPopoverClose=close;
+ const dialog=trigger.closest('dialog[open]');(dialog||document.body).append(panel);
+ const viewport=window.visualViewport,width=viewport?.width||window.innerWidth,height=viewport?.height||window.innerHeight,x=viewport?.offsetLeft||0,y=viewport?.offsetTop||0;
+ panel.style.maxWidth=Math.max(100,Math.min(340,width-24))+'px';panel.style.maxHeight=Math.max(80,Math.min(420,height-24))+'px';
+ const rect=trigger.getBoundingClientRect(),size=panel.getBoundingClientRect();
+ panel.style.left=Math.max(x+12,Math.min(rect.left,x+width-size.width-12))+'px';
+ panel.style.top=(rect.bottom+5+size.height<=y+height-12?rect.bottom+5:Math.max(y+12,rect.top-size.height-5))+'px';
+ panel.querySelector('[data-legion-pop-close]').onclick=close;
+ document.addEventListener('pointerdown',outside,true);document.addEventListener('keydown',key,true);document.addEventListener('scroll',scroll,true);window.addEventListener('resize',close);
+ observer=new MutationObserver(()=>{if(!trigger.isConnected||dialog&&!dialog.open||document.querySelector('#modal')?.classList.contains('hidden'))close()});observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['class','open']});
+ return panel;
+}
+async function openDayComment(day,trigger=null){
+ trigger=trigger||document.activeElement;
+ const panel=legionOpenSmallPopover(trigger,'Комментарий','<p data-comment-preview>Загрузка…</p><div class="legion-pop-actions"><button type="button" data-comment-edit>Изменить</button></div>');
+ if(!panel)return;
+ panel.querySelector('[data-comment-edit]').onclick=()=>{globalThis.legionPopoverClose?.();openDayCommentEditor(day)};
+ try{const data=await api('/api/day-comments/'+encodeURIComponent(day));if(panel.isConnected)panel.querySelector('[data-comment-preview]').textContent=data.text||'Комментарий пока не добавлен'}
+ catch(error){if(panel.isConnected)panel.querySelector('[data-comment-preview]').textContent=error.message}
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML = _unified_small_popovers_html(INLINE_INDEX_HTML)
+
+
+@app.get('/api/dispatch-board/orders/{order_id}/crew-copy-options')
+def dispatch_crew_copy_options(order_id: int, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    dispatch_guard(db,user)
+    target=db.get(Order,order_id)
+    if not target or target.status=='cancelled':raise HTTPException(404,'Заказ не найден')
+    result=[]
+    for order in dispatch_rows(db,target.work_date):
+        if order.id==target.id or order.status=='draft':continue
+        rows=dispatch_assignments(db,order)
+        leader=next((a.employee_id for a in rows if a.role=='brigadier'),None)
+        if leader is None:continue
+        result.append({'id':order.id,'source':order.source,'surname':order.deceased_name,
+            'leader_id':leader,'member_ids':[a.employee_id for a in rows if a.employee_id!=leader],
+            'external_member_count':_order_external_member_count(order,db)})
+    return JSONResponse({'items':result},headers={'Cache-Control':'private, no-store'})
+
+def _dispatch_copy_crew_html(html):
+    a=html.index('async function openDispatchCrew(');b=html.index('\nconst dispatchOriginalNumbers=',a)
+    part=html[a:b]
+    anchor=' const people=data.items,old=new Set('
+    if part.count(anchor)!=1:raise ValueError('Crew picker data missing')
+    part=part.replace(anchor," let copyOptions=[];try{copyOptions=(await api('/api/dispatch-board/orders/'+order.id+'/crew-copy-options')).items||[]}catch{}if(!live())return;\n"+anchor,1)
+    anchor='<input class="search" data-plan-find placeholder="Поиск среди готовых: имя или метро">'
+    if part.count(anchor)!=1:raise ValueError('Crew search input missing')
+    part=part.replace(anchor,r'''${copyOptions.length?`<div class="dispatch-copy-crew"><label>Состав из другого заказа<select data-copy-crew-source><option value="">Выберите заказ</option>${copyOptions.filter(item=>step===1||item.leader_id===leader).map(item=>`<option value="${item.id}">${item.source==='gbu'?'ГБУ':'Частный'} · ${esc(item.surname)} · ${item.member_ids.length+1+item.external_member_count} чел.</option>`).join('')}</select></label><button type="button" data-copy-crew disabled>Дублировать состав</button></div>`:''}'''+anchor,1)
+    anchor=" const next=qs('[data-plan-next]',root);"
+    binding=r''' const copySelect=qs('[data-copy-crew-source]',root),copyButton=qs('[data-copy-crew]',root);
+ if(copySelect&&copyButton){
+  copySelect.onchange=()=>copyButton.disabled=!copySelect.value;
+  copyButton.onclick=()=>{
+   try{
+    const source=copyOptions.find(item=>Number(item.id)===Number(copySelect.value));
+    const copied=dispatchCopyCrewSelection(source,people,old,order.team_size);
+    leader=copied.leader;selected=new Set(copied.members);externalCount=copied.external;second=new Set(copied.second);step=2;draw();
+    qs('[data-plan-error]',root).textContent='Состав скопирован. Можно изменить сотрудников и нажать «Назначить состав».';
+   }catch(error){qs('[data-plan-error]',root).textContent=error.message}
+  };
+ }
+'''
+    if part.count(anchor)!=1:raise ValueError('Crew next button missing')
+    part=part.replace(anchor,binding+anchor,1)
+    html=html[:a]+part+html[b:]
+    return html.replace('</body>',r'''<style>
+.dispatch-copy-crew{display:flex;align-items:end;flex-wrap:wrap;gap:8px;margin:8px 0 10px;padding:9px;border:1px solid var(--gold2);border-radius:10px;background:var(--panel2)}
+.dispatch-copy-crew label{display:grid;flex:1;min-width:150px;gap:5px;font-size:12px}
+.dispatch-copy-crew select{width:100%;min-width:0;box-sizing:border-box;min-height:36px;font-size:14px}
+.dispatch-copy-crew button{min-height:36px;padding:7px 10px;font-size:12px}
+.bc-photo-viewer .bc-compact-crew{border:1px solid var(--gold2);border-radius:12px;background:var(--panel);padding:10px 12px;box-shadow:0 5px 18px #0003;font-size:13px;line-height:1.4}
+</style><script>
+function dispatchCopyCrewSelection(source,people,current,teamSize){
+ if(!source)throw new Error('Выберите исходный заказ');
+ const members=[...source.member_ids],ids=[source.leader_id,...members],external=Number(source.external_member_count||0);
+ if(ids.length+external>teamSize)throw new Error('В исходной бригаде больше людей, чем нужно на этот заказ. Сначала измените количество человек в заказе.');
+ if(new Set(ids).size!==ids.length)throw new Error('В исходном составе есть повторяющиеся сотрудники');
+ const second=[];
+ for(const id of ids){
+  const person=people.find(p=>p.id===id);
+  if(!person||(!current.has(id)&&(person.archived||person.ready_for_day===false||person.workload>=2)))throw new Error('Не все сотрудники исходной бригады доступны. Проверьте готовность и занятость.');
+  if(person.workload>0&&!current.has(id))second.push(id);
+ }
+ return {leader:source.leader_id,members,external,second};
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML = _dispatch_copy_crew_html(INLINE_INDEX_HTML)
