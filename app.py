@@ -16172,6 +16172,10 @@ def _historical_payroll_roster_html(html):
     last = report.index(" dialog.addEventListener('close',", first)
     report = report[:first] + ''' // Dismiss on a tap in empty report space or on the backdrop.
  dialog.setAttribute('closedby','closerequest');
+ const card=document.createElement('div');
+ card.className='gbu-payroll-report-surface';
+ card.append(...dialog.childNodes);
+ dialog.append(card);
  const blank=target=>!target.closest('button,a,input,textarea,select,label,summary,[role="button"]')&&target.matches('dialog,div,section,header,footer');
  let reportTap=null,reportDragged=false;
  dialog.addEventListener('pointerdown',event=>{
@@ -16184,8 +16188,7 @@ def _historical_payroll_roster_html(html):
  dialog.addEventListener('click',event=>{
   event.stopPropagation();const tap=reportTap;reportTap=null;
   if(!tap||reportDragged)return;
-  const bounds=dialog.getBoundingClientRect();
-  const outside=event.target===dialog&&(event.clientX<bounds.left||event.clientX>bounds.right||event.clientY<bounds.top||event.clientY>bounds.bottom);
+  const outside=event.target===dialog;
   if(!outside&&(!tap.blank||!blank(event.target)))return;
   if(Math.hypot(event.clientX-tap.x,event.clientY-tap.y)>10)return;
   dialog.close();
@@ -21910,7 +21913,8 @@ INLINE_INDEX_HTML = _dispatch_compact_summary_actions_html(INLINE_INDEX_HTML)
 # Intrinsic dialog sizing also avoids stretching between the browser's default
 # top/bottom dialog insets in mobile WebViews.
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>',r'''<style id="compact-employee-payroll-report">
-dialog.gbu-payroll-report-dialog{inset:auto;top:50%;left:50%;transform:translate(-50%,-50%);margin:0;box-sizing:border-box;width:calc(100% - 64px);max-width:340px;height:fit-content;min-height:0;max-height:84vh;max-height:84dvh;padding:8px;border-radius:12px;overflow:auto}
+dialog.gbu-payroll-report-dialog[open]{position:fixed;inset:0;transform:none;margin:0;box-sizing:border-box;width:100%;height:100%;max-width:none;max-height:none;padding:0;border:0;background:transparent;box-shadow:none;overflow:hidden;display:grid;place-items:center}
+.gbu-payroll-report-surface{box-sizing:border-box;width:calc(100% - 64px);max-width:340px;max-height:84vh;max-height:84dvh;padding:8px;border:1px solid #b49a60;border-radius:12px;background:var(--panel);box-shadow:0 12px 44px #0003;overflow:auto;overscroll-behavior:contain}
 .gbu-payroll-report-dialog .gbu-payroll-report-head{gap:8px;margin-bottom:4px}
 .gbu-payroll-report-dialog .gbu-payroll-report-head h3{font-size:16px;line-height:1.2}
 .gbu-payroll-report-dialog .gbu-payroll-report-head button{width:30px;min-width:30px;height:30px;min-height:30px;border-radius:8px}
