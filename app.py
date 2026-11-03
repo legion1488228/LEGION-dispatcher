@@ -15059,7 +15059,8 @@ def dispatch_receipt_info(db, item, receipt_history=None):
         notice=db.get(DispatchDelivery,carried['notice_key'])
         status=json.loads(notice.payload).get('status') if notice else None
         return {'status':'confirmed' if carried.get('confirmed_at') else
-            'sent' if status=='sent' else 'unknown', 'confirmed_at':carried.get('confirmed_at')}
+            'sent' if status=='sent' else 'unknown', 'confirmed_at':carried.get('confirmed_at'),
+            'confirmation_kind':'change'}
     if (carried.get('revision')==item['revision'] and carried.get('confirmed_at')
             and carried.get('tg_id')==item['brigadier'].get('tg_id')):
         return {'status':'confirmed','confirmed_at':carried['confirmed_at']}
@@ -20847,7 +20848,8 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style id="dispatch
 </style><script>
 function dispatchSingleSendStatusHtml(o){
  const status=o.receipt?.status||'not_sent';
- const label=status==='confirmed'?'Подтверждён ✓':status==='sent'?'Отправлен ✓':status==='unknown'?'Доставка не подтверждена':'';
+ const pendingChange=o.receipt?.confirmation_kind==='change'&&status!=='confirmed';
+ const label=pendingChange?'Ожидает подтверждения изменений':dispatchReceivedOnce(o)?'Получен ✓':status==='sent'?'Отправлен · ожидает подтверждения':status==='unknown'?'Доставка не подтверждена':status==='changed'?'Изменён · требуется отправка':'';
  return `<p class="dispatch-send-result" data-plan-send-result="${o.id}" role="status">${label}</p>`;
 }
 </script></body>''', 1)
@@ -21825,6 +21827,14 @@ def _dispatch_attention_button_html(html):
 #dispatchActionsView .dispatch-attention-row{background:rgba(210,65,65,.13);box-shadow:inset 0 0 0 1px rgba(185,50,50,.55);border-radius:5px}
 </style><script>
 let dispatchAttentionState={identity:null,enabled:false};
+function dispatchNeedsReceiptAttention(order,number){
+ const status=order.receipt?.status||'not_sent';
+ // A real current change acknowledgement remains separate from the lasting
+ // acknowledgement that this leader already received the order.
+ if(order.receipt?.confirmation_kind==='change'&&status!=='confirmed')return true;
+ if(dispatchReceivedOnce(order)||number?.closed===true)return false;
+ return Boolean(order.composition_complete||['sent','unknown','changed'].includes(status));
+}
 function dispatchAttentionSelectors(order,number){
  const selectors=[];
  if(order.is_draft)selectors.push('.dispatch-card-main');
@@ -21832,9 +21842,8 @@ function dispatchAttentionSelectors(order,number){
  if(!order.category||!(Number(order.team_size)>0))selectors.push('.dispatch-card-meta');
  if(!order.issue_time)selectors.push('.dispatch-card-times');
  if(!order.composition_complete)selectors.push('.dispatch-inline-status','[data-plan-crew-id]');
- const status=order.receipt?.status||'not_sent';
- if(status!=='confirmed'&&(order.composition_complete||['sent','unknown','changed'].includes(status)))selectors.push('.dispatch-send-result:not(:empty)','header');
- if(!number?.posted||number.posted&&!number.closed)selectors.push('header');
+ if(dispatchNeedsReceiptAttention(order,number))selectors.push('.dispatch-send-result:not(:empty)','header');
+ if(number?.posted===false||number?.posted===true&&number.closed===false)selectors.push('header');
  return [...new Set(selectors)];
 }
 function applyDispatchAttention(root,data){
@@ -21851,11 +21860,11 @@ function applyDispatchAttention(root,data){
  ['private','gbu'].forEach((source,index)=>{
   const orders=data.items.filter(order=>order.source===source),rows=orders.map(order=>numbers.get(Number(order.id)));
   const spans=metrics[index]?.querySelectorAll(':scope>span');
-  if(rows.some(row=>!row?.posted))mark(spans?.[0]);
-  if(rows.some(row=>row?.posted&&!row.closed))mark(spans?.[1]);
-  if(orders.some(order=>order.receipt?.status!=='confirmed'))mark(root.querySelector('[data-plan-receipts="'+source+'"]'));
+  if(rows.some(row=>row?.posted===false))mark(spans?.[0]);
+  if(rows.some(row=>row?.posted===true&&row.closed===false))mark(spans?.[1]);
+  if(orders.some(order=>dispatchNeedsReceiptAttention(order,numbers.get(Number(order.id)))))mark(root.querySelector('[data-plan-receipts="'+source+'"]'));
  });
- if(data.items.some(order=>!numbers.get(Number(order.id))?.posted))mark(root.querySelector('[data-plan-numbers]'));
+ if(data.items.some(order=>numbers.get(Number(order.id))?.posted===false))mark(root.querySelector('[data-plan-numbers]'));
 }
 function bindDispatchAttention(root,data){
  const identity=String(state.bootstrap?.user?.id||'')+':'+data.work_date;
