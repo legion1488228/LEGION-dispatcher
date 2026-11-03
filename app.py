@@ -16183,7 +16183,10 @@ def _historical_payroll_roster_html(html):
  dialog.addEventListener('pointercancel',()=>{reportTap=null;reportDragged=true});
  dialog.addEventListener('click',event=>{
   event.stopPropagation();const tap=reportTap;reportTap=null;
-  if(reportDragged||!tap?.blank||!blank(event.target))return;
+  if(!tap||reportDragged)return;
+  const bounds=dialog.getBoundingClientRect();
+  const outside=event.target===dialog&&(event.clientX<bounds.left||event.clientX>bounds.right||event.clientY<bounds.top||event.clientY>bounds.bottom);
+  if(!outside&&(!tap.blank||!blank(event.target)))return;
   if(Math.hypot(event.clientX-tap.x,event.clientY-tap.y)>10)return;
   dialog.close();
  });
@@ -21907,8 +21910,8 @@ INLINE_INDEX_HTML = _dispatch_compact_summary_actions_html(INLINE_INDEX_HTML)
 # Intrinsic dialog sizing also avoids stretching between the browser's default
 # top/bottom dialog insets in mobile WebViews.
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>',r'''<style id="compact-employee-payroll-report">
-dialog.gbu-payroll-report-dialog{inset:auto;top:50%;left:50%;transform:translate(-50%,-50%);margin:0;box-sizing:border-box;width:calc(100% - 48px);max-width:380px;height:fit-content;min-height:0;max-height:84vh;max-height:84dvh;padding:10px;border-radius:14px;overflow:auto}
-.gbu-payroll-report-dialog .gbu-payroll-report-head{gap:8px;margin-bottom:7px}
+dialog.gbu-payroll-report-dialog{inset:auto;top:50%;left:50%;transform:translate(-50%,-50%);margin:0;box-sizing:border-box;width:calc(100% - 64px);max-width:340px;height:fit-content;min-height:0;max-height:84vh;max-height:84dvh;padding:8px;border-radius:12px;overflow:auto}
+.gbu-payroll-report-dialog .gbu-payroll-report-head{gap:8px;margin-bottom:4px}
 .gbu-payroll-report-dialog .gbu-payroll-report-head h3{font-size:16px;line-height:1.2}
 .gbu-payroll-report-dialog .gbu-payroll-report-head button{width:30px;min-width:30px;height:30px;min-height:30px;border-radius:8px}
 .gbu-payroll-report-dialog .gbu-payroll-person-report{display:flow-root;height:auto;min-height:0;margin:0;padding:0;font-size:12px;line-height:1.3}
@@ -21919,9 +21922,9 @@ dialog.gbu-payroll-report-dialog{inset:auto;top:50%;left:50%;transform:translate
 .gbu-payroll-report-dialog .gbu-payroll-person-report h4{margin:7px 0 4px;font-size:13px;line-height:1.25}
 .gbu-payroll-report-dialog .gbu-payroll-payers{margin:4px 0 6px;padding-top:4px}
 .gbu-payroll-report-dialog .gbu-payroll-payers>span{font-size:11px;line-height:1.3}
-.gbu-payroll-report-dialog .gbu-payroll-report-category{padding:6px;margin:4px 0;font-size:12px;border-radius:8px}
-.gbu-payroll-report-dialog .gbu-payroll-report-category>.muted{margin:3px 0 0;font-size:11px}
-.gbu-payroll-report-dialog .gbu-payroll-report-order{gap:6px;margin-top:3px;padding-top:4px;font-size:11px;line-height:1.3}
+.gbu-payroll-report-dialog .gbu-payroll-report-category{padding:4px 6px;margin:3px 0;font-size:12px;border-radius:8px}
+.gbu-payroll-report-dialog .gbu-payroll-report-category>.muted{display:none}
+.gbu-payroll-report-dialog .gbu-payroll-report-order{gap:6px;margin-top:2px;padding-top:3px;font-size:11px;line-height:1.3}
 .gbu-payroll-report-dialog .gbu-payroll-report-order>span:first-child{min-width:0;overflow-wrap:anywhere}
 .gbu-payroll-report-dialog .gbu-payroll-person-report>section:last-child>:last-child{margin-bottom:0}
 </style></body>''',1)
