@@ -21820,10 +21820,10 @@ def _dispatch_attention_button_html(html):
     part=part.replace(anchor,anchor+'\n bindDispatchAttention(root,data);',1)
     html=html[:start]+part+html[end:]
     return html.replace('</body>',r'''<style id="dispatch-attention-style">
-#dispatchActionsView .dispatch-tools.dispatch-toolbar:has([data-plan-attention]){grid-template-columns:minmax(0,1fr) minmax(0,1fr) 34px;align-items:stretch}
-#dispatchActionsView .dispatch-toolbar [data-plan-attention]{display:grid;place-items:center;box-sizing:border-box;width:34px;height:34px;min-height:34px;min-width:0;padding:0;border:1px solid var(--gold2);border-radius:8px;background:var(--panel2);color:var(--gold);font-size:18px;line-height:1;touch-action:manipulation}
-#dispatchActionsView .dispatch-toolbar [data-plan-attention][aria-pressed=true]{background:var(--gold);box-shadow:inset 0 0 0 1px var(--gold2)}
-#dispatchActionsView .dispatch-toolbar [data-plan-attention]:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+#dispatchActionsView .dispatch-tools.dispatch-toolbar{grid-template-columns:repeat(2,minmax(0,1fr));align-items:stretch}
+#dispatchActionsView .dispatch-summary-actions [data-plan-attention]{display:grid;place-items:center;box-sizing:border-box;width:34px;height:34px;min-height:34px;min-width:0;padding:0;border:1px solid var(--gold2);border-radius:8px;background:var(--panel2);color:var(--gold);font-size:18px;line-height:1;touch-action:manipulation}
+#dispatchActionsView .dispatch-summary-actions [data-plan-attention][aria-pressed=true]{background:var(--gold);box-shadow:inset 0 0 0 1px var(--gold2)}
+#dispatchActionsView .dispatch-summary-actions [data-plan-attention]:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
 #dispatchActionsView .dispatch-attention-row{background:rgba(210,65,65,.13);box-shadow:inset 0 0 0 1px rgba(185,50,50,.55);border-radius:5px}
 </style><script>
 let dispatchAttentionState={identity:null,enabled:false};
@@ -21869,9 +21869,9 @@ function applyDispatchAttention(root,data){
 function bindDispatchAttention(root,data){
  const identity=String(state.bootstrap?.user?.id||'')+':'+data.work_date;
  if(dispatchAttentionState.identity!==identity)dispatchAttentionState={identity,enabled:false};
- const toolbar=root.querySelector('.dispatch-toolbar');if(!toolbar)return;
+ const toolbar=root.querySelector('.dispatch-summary-actions');if(!toolbar)return;
  let button=toolbar.querySelector('[data-plan-attention]');
- if(!button){button=document.createElement('button');button.type='button';button.setAttribute('data-plan-attention','');button.textContent='⚠️';button.setAttribute('aria-label','Подсветить заказы, требующие внимания');button.title='Требует внимания';toolbar.append(button)}
+ if(!button){button=document.createElement('button');button.type='button';button.setAttribute('data-plan-attention','');button.textContent='⚠️';button.setAttribute('aria-label','Подсветить заказы, требующие внимания');button.title='Требует внимания';toolbar.prepend(button)}
  button.setAttribute('aria-pressed',String(dispatchAttentionState.enabled));
  button.onclick=()=>{dispatchAttentionState.enabled=!dispatchAttentionState.enabled;button.setAttribute('aria-pressed',String(dispatchAttentionState.enabled));applyDispatchAttention(root,data)};
  applyDispatchAttention(root,data);
@@ -21880,3 +21880,25 @@ function bindDispatchAttention(root,data){
 
 
 INLINE_INDEX_HTML = _dispatch_attention_button_html(INLINE_INDEX_HTML)
+
+
+def _dispatch_compact_summary_actions_html(html):
+    start=html.index('function dispatchSummaryPanel(data){')
+    end=html.index('</script>',start)
+    part=html[start:end]
+    first=part.index('<button type="button" class="dispatch-summary-comment')
+    last=part.index('</button>',first)+len('</button>')
+    button=part[first:last]
+    icon_start=button.index('<span aria-hidden="true">')
+    button=button[:icon_start]+'<span aria-hidden="true">💬</span></button>'
+    part=part[:first]+'<div class="dispatch-summary-actions">'+button+'</div>'+part[last:]
+    html=html[:start]+part+html[end:]
+    return html.replace('</body>',r'''<style id="dispatch-compact-summary-actions">
+#dispatchActionsView .dispatch-summary-stats{grid-template-columns:minmax(0,1fr) 34px minmax(0,1fr)}
+#dispatchActionsView .dispatch-summary-actions{display:grid;grid-template-rows:repeat(2,34px);align-content:center;gap:4px;min-width:0}
+#dispatchActionsView .dispatch-summary-actions .dispatch-summary-comment{display:grid;place-items:center;box-sizing:border-box;width:34px;height:34px;min-width:0;min-height:34px;margin:0;padding:0;font-size:18px;line-height:1;border-radius:8px}
+#dispatchActionsView .dispatch-summary-actions .dispatch-summary-comment:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+</style></body>''',1)
+
+
+INLINE_INDEX_HTML = _dispatch_compact_summary_actions_html(INLINE_INDEX_HTML)
