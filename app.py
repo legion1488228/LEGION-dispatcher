@@ -15979,7 +15979,7 @@ async function openDispatchEditor(order,source='private',slotNumber=null){
   lookupPrivatePhone();
  }
  const sizes=()=>{const allowed=form.elements.category.value==='carryout'?[2,3,4]:(source==='gbu'||form.elements.category.value!=='standard'?[4,6]:[3,4,5,6]);const old=Number(form.elements.team_size.value)||order?.team_size;form.elements.team_size.innerHTML='<option value="">Выберите количество</option>'+allowed.map(n=>`<option value="${n}" ${n===old?'selected':''}>${n}</option>`).join('')};sizes();form.elements.category.onchange=sizes;
- form.elements.issue_time.oninput=()=>{const parts=form.elements.issue_time.value.split(':').map(Number);if(parts.length===2){const minutes=(parts[0]*60+parts[1]-30+1440)%1440;qs('[data-plan-arrival]',form).value=String(Math.floor(minutes/60)).padStart(2,'0')+':'+String(minutes%60).padStart(2,'0')}};
+ form.elements.issue_time.oninput=()=>{if(!form.elements.issue_time.value){qs('[data-plan-arrival]',form).value='';return}const parts=form.elements.issue_time.value.split(':').map(Number);if(parts.length===2){const minutes=(parts[0]*60+parts[1]-30+1440)%1440;qs('[data-plan-arrival]',form).value=String(Math.floor(minutes/60)).padStart(2,'0')+':'+String(minutes%60).padStart(2,'0')}};
  const crew=qs('[data-plan-crew]',form);if(crew)crew.onclick=()=>{chooseCrewAfterSave=true;form.requestSubmit()};
  const clear=qs('[data-plan-clear]',form);if(clear){clear.disabled=order.approved;clear.onclick=async()=>{clear.disabled=true;try{await api('/api/dispatch-board/orders/'+order.id+'/crew',{method:'DELETE',body:JSON.stringify({revision:order.revision})});closeModal();await loadDispatchBoard()}catch(e){qs('[data-plan-error]',form).textContent=e.message;clear.disabled=false}}}
  form.onsubmit=async e=>{e.preventDefault();const button=qs('[type=submit]',form);if(button.disabled)return;button.disabled=true;
@@ -17131,13 +17131,14 @@ class PrivateIntakeEvent(Base):
 
 class PrivateIntakeInput(BaseModel):
     tg_id: StrictInt
-    action: Literal['start','append','finish','list','time','cancel','resume','reply']
+    action: Literal['start','append','finish','list','open','rename','replace','time','cancel','resume','reply']
     request_key: StrictStr=Field(min_length=1,max_length=100)
     agent_name: StrictStr=Field(default='',max_length=200)
     agent_phone: StrictStr=Field(default='',max_length=50)
     text: StrictStr=Field(default='',max_length=4096)
     order_id: StrictInt | None=None
     photo: StrictStr=Field(default='',max_length=500)
+    expected_revision: StrictStr | None=None
     reply_chat_id: StrictInt | None=None
     reply_message_id: StrictInt | None=None
 
@@ -17158,7 +17159,15 @@ def private_intake_info(db,order):
     mapping,_=dispatch_slot_layout(db,order.work_date,rows)
     number=(private_intake_chat_numbers(db,order.work_date,rows).get(order.id,meta.get('chat_number'))
         if meta.get('private_intake') else mapping.get(order.id,meta.get('slot_number')))
-    return {'id':order.id,'number':number,'agent_name':order.organization or order.agent_name or 'Без агента',
+    source_text=private_intake_join_text(meta.get('source_messages',[]))
+    issue_time=order.issue_time.strftime('%H:%M') if order.issue_time else ''
+    if issue_time=='00:00' and ('issue_time' in meta.get('missing_fields',[]) or not order.arrival_time):
+        issue_time=''
+    return {'id':order.id,'number':number,'deceased_name':order.deceased_name,'issue_time':issue_time,
+        'source_text':source_text,
+        'edit_revision':dispatch_hash([order.organization,order.agent_name,source_text,
+            meta.get('source_revision',0),str(order.issue_time),str(order.arrival_time)]),
+        'agent_name':order.organization or order.agent_name or 'Без агента',
         'is_reservation':not bool(meta.get('source_messages')),
         'work_date':str(order.work_date),'cancelled':order.status=='cancelled'}
 
@@ -17194,7 +17203,7 @@ async def private_intake_deliver(db,event):
 @app.post('/api/bot/private-intake',dependencies=[Depends(_bot_key)])
 async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
     if not dispatch_can_access(db,data.tg_id):raise HTTPException(403,'Только владелец и диспетчеры')
-    original_hash=dispatch_hash(data.model_dump())
+    original_hash=dispatch_hash(data.model_dump(exclude={'expected_revision'} if data.expected_revision is None else set()))
     key=str(data.tg_id)+':'+data.request_key
     # Serialize one operator's retries and current-order changes, then lock the work day.
     if db.get_bind().dialect.name=='postgresql':
@@ -17210,6 +17219,11 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
         rows=list(db.scalars(select(Order).where(Order.source=='private',Order.work_date>=tomorrow-timedelta(days=1),Order.work_date<=tomorrow+timedelta(days=7)).order_by(Order.work_date,Order.id)))
         return {'ok':True,'items':[private_intake_info(db,o) for o in rows],
             'next_number':private_intake_prompt_number(db,tomorrow,rows)}
+    if data.action=='open':
+        order=db.get(Order,data.order_id)
+        if not order or order.source!='private' or order.status=='cancelled':
+            raise HTTPException(404,'Частный заказ не найден')
+        return {'ok':True,**private_intake_info(db,order)}
     targets=private_intake_targets(db)
     if data.action=='reply' and data.reply_chat_id not in targets:return {'ok':True,'ignored':True}
     if not targets and data.action!='finish':raise HTTPException(409,'Не настроен чат сверки ЛЕГИОН. Проверьте настройки чатов.')
@@ -17221,6 +17235,7 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
         if oid is None:return {'ok':True,'ignored':True}
         data=data.model_copy(update={'action':'append','order_id':oid})
     order=None
+    edits=[]
     if data.action=='start':
         if not data.agent_name.strip():raise HTTPException(422,'Введите агента')
         resolved_agent_phone=brigadier_phone8(data.agent_phone) or private_agent_phone_lookup(db,data.agent_name)
@@ -17272,6 +17287,7 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
         order=db.get(Order,data.order_id or (session.order_id if session else None))
         if not order or order.source!='private':raise HTTPException(404,'Частный заказ не найден')
         dispatch_day_lock(db,order.work_date)
+        db.refresh(order,with_for_update=True)
         if order.status=='cancelled':raise HTTPException(409,'Заказ отменён')
         plan=db.get(DispatchPlan,order.id)
         if not plan:raise HTTPException(409,'Заказ не поддерживает этот режим')
@@ -17282,11 +17298,41 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
         meta=json.loads(plan.payload)
         if auto_phone:
             meta['agent_phone_auto']=auto_phone;plan.payload=json.dumps(meta,ensure_ascii=False)
-        number=private_intake_info(db,order)['number']
+        info=private_intake_info(db,order)
+        number=info['number']
         heading=f'Частный №{number} · {order.work_date.strftime("%d.%m")} · {order.agent_name}'
-        if order.work_date<datetime.now(MOSCOW).date() and data.action in {'resume','append','time'}:
+        if order.work_date<datetime.now(MOSCOW).date() and data.action in {'resume','append','time','rename','replace'}:
             raise HTTPException(409,'Дата заказа уже прошла')
-        if data.action=='resume':
+        if data.action in {'rename','replace','time'} and data.expected_revision is not None and data.expected_revision!=info['edit_revision']:
+            raise HTTPException(409,'Заказ изменился. Откройте его заново.')
+        if data.action in {'rename','replace'}:
+            if data.expected_revision is None:
+                raise HTTPException(409,'Откройте заказ заново.')
+            notice=None
+            if data.action=='rename':
+                name=data.agent_name.strip()
+                if not name or len(name.splitlines())!=1:raise HTTPException(422,'Введите название одной строкой')
+                refs=private_intake_heading_refs(db,order)
+                if meta.get('private_intake') and not refs:
+                    raise HTTPException(409,'Не найден исходный заголовок в группе')
+                if name!=info['agent_name']:
+                    order.organization=name
+                    heading_text=f'<b><u>{number} заказ</u></b>: {escape(name)} 👇'
+                    edits=[{**ref,'text':heading_text,'parse_mode':'HTML'} for ref in refs]
+            else:
+                if not data.text.strip() or len(data.text)>3500:
+                    raise HTTPException(422,'Введите текст заказа до 3500 символов')
+                refs=private_intake_edit_refs(db,order,meta)
+                if not refs:
+                    raise HTTPException(409,'Не найден исходный текст в группе. Для первого текста используйте «Дополнить».')
+                messages=meta.get('source_messages',[])
+                photos=[{**m,'text':''} for m in messages if m.get('photo')]
+                meta.update(source_messages=[{'text':data.text,'by':data.tg_id,
+                    'at':datetime.now(MOSCOW).isoformat()},*photos],
+                    edit_group_messages=refs,source_revision=int(meta.get('source_revision',0))+1)
+                edits=[{**ref,'text':data.text} for ref in refs]
+            plan.payload=json.dumps(meta,ensure_ascii=False)
+        elif data.action=='resume':
             refs=private_intake_edit_refs(db,order,meta)
             if not refs and any(m.get('text','').strip() for m in meta.get('source_messages',[])):
                 raise HTTPException(409,'Доставка предыдущего текста не подтверждена. Проверьте сообщение в группе.')
@@ -17321,6 +17367,17 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
             order.arrival_time=(datetime.combine(order.work_date,order.issue_time)-timedelta(minutes=30)).time()
             meta['missing_fields']=[f for f in meta.get('missing_fields',[]) if f!='issue_time'];plan.payload=json.dumps(meta,ensure_ascii=False)
             notice=f'<b>{escape(heading)}</b>\nВремя выдачи изменено: {old} → {data.text}'
+            refs=private_intake_edit_refs(db,order,meta) if info['source_text'] else []
+            if refs:
+                updated=private_intake_update_times(info['source_text'],data.text,order.arrival_time.strftime('%H:%M'))
+                messages=meta.get('source_messages',[])
+                photos=[{**m,'text':''} for m in messages if m.get('photo')]
+                if len(updated)>3500:raise HTTPException(422,'Текст заказа превышает 3500 символов')
+                meta.update(source_messages=[{'text':updated,'by':data.tg_id,
+                    'at':datetime.now(MOSCOW).isoformat()},*photos],
+                    edit_group_messages=refs,source_revision=int(meta.get('source_revision',0))+1)
+                plan.payload=json.dumps(meta,ensure_ascii=False)
+                edits=[{**ref,'text':updated} for ref in refs]
             private_intake_queue_update(db,order,meta,f'Время выдачи изменено: {old} → {data.text}')
         elif data.action=='cancel':
             card=dispatch_match_card(db,order)
@@ -17338,7 +17395,9 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
             notice=f'<b>{escape(heading)}</b>\n<b>ОТМЕНЁН</b>\nНумерация оставшихся заказов обновлена.'
     result={'ok':True,**(private_intake_info(db,order) if order else {})}
     deliveries=[]
-    if data.action=='append':
+    if edits:
+        deliveries=[{'status':'pending','method':'editMessageText','data':edit} for edit in edits]
+    elif data.action=='append':
         value=private_intake_join_text(meta['source_messages'])
         if data.text.strip() and meta.get('edit_group_messages'):
             deliveries=[{'status':'pending','method':'editMessageText','data':{
@@ -17387,7 +17446,33 @@ def private_intake_order_notice(db,order,notice,revision,action):
 
 
 def private_intake_join_text(messages):
-    return '\n\n'.join(m.get('text','').strip() for m in messages if m.get('text','').strip())
+    return '\n\n'.join(m.get('text','') for m in messages if m.get('text','').strip())
+
+
+def private_intake_update_times(source, issue, arrival):
+    clock=r'(?:[01]?\d|2[0-3])[:.][0-5]\d(?!\d)'
+    source, count=re.subn(r'(?im)^([ \t]*выдача[ \t:—-]*(?:в[ \t]+)?)'+clock,
+        lambda match: match[1]+issue,source,count=1)
+    if not count:
+        source+='\nВыдача в '+issue
+    return re.sub(r'(?im)^([ \t]*(?:быть|подача)[ \t:—-]*(?:в[ \t]+)?)'+clock,
+        lambda match: match[1]+arrival,source,count=1)
+
+
+def private_intake_heading_refs(db,order):
+    refs={}
+    for event in db.scalars(select(PrivateIntakeEvent)):
+        saved=json.loads(event.payload)
+        if saved.get('result',{}).get('id')!=order.id:continue
+        for delivery in saved.get('deliveries',[]):
+            payload=delivery.get('data',{})
+            chat=payload.get('chat_id',0)
+            if (delivery.get('method')=='sendMessage' and delivery.get('status')=='sent'
+                    and chat<0 and re.match(r'<b><u>\d+ заказ</u></b>:',payload.get('text',''))
+                    and delivery.get('message_id')):
+                mid=delivery['message_id']
+                refs[chat]=max(mid,refs.get(chat,0))
+    return [{'chat_id':chat,'message_id':mid} for chat,mid in refs.items()]
 
 
 def private_intake_edit_refs(db,order,meta):
@@ -21451,15 +21536,17 @@ def private_agent_history_name(db, alias, phone=''):
     if not key or key in {'агент','гбу','частный','частные','без агента'}:
         return ''
     matches={}
+    has_saved_name=False
     for organization,name,saved_phone in db.execute(select(Order.organization,Order.agent_name,Order.agent_phone).where(
             Order.source=='private',Order.status!='cancelled',Order.agent_name!='')):
         if private_agent_phone_key(str(organization or '').strip() or name)!=key:
             continue
+        has_saved_name=True
         if number and private_agent_phone_number(saved_phone)!=number:
             continue
         value=' '.join(str(name or '').split())
         if value:matches.setdefault(private_agent_phone_key(value),value)
-    if matches:
+    if has_saved_name:
         return next(iter(matches.values())) if len(matches)==1 else ''
     # Personal aliases conventionally start with a name, then a branch number
     # or Moscow tag. Other aliases may be organizations and need a saved name.
