@@ -18111,15 +18111,13 @@ def _gbu_payroll_descending_html(html):
 INLINE_INDEX_HTML = _gbu_payroll_descending_html(INLINE_INDEX_HTML)
 
 
-# Keep the dispatch viewport stable while the ten-second background refresh
-# rebuilds the board.  In particular, preserve the expanded free-staff groups
-# and use the visible free-staff panel as a visual anchor.
+# Preserve the position at render time, including scrolling during the request.
 def _dispatch_refresh_scroll_html(html):
     first = html.index('async function loadDispatchBoard(){')
     last = html.index('\nfunction dispatchImportNumbers(', first)
     block = html[first:last]
-    old = " const ticket=++dispatchLoad,day=state.selectedDate,root=qs('#dispatchActionsView');"
-    new = old + "\n const scrollSnapshot=dispatchScrollSnapshot(root);"
+    old = "return;dispatchBoard=data;"
+    new = "return;const scrollSnapshot=dispatchScrollSnapshot(root);dispatchBoard=data;"
     if block.count(old) != 1:
         raise RuntimeError('Dispatch scroll capture anchor missing')
     block = block.replace(old, new, 1)
@@ -18131,10 +18129,8 @@ def _dispatch_refresh_scroll_html(html):
     helpers = r'''function dispatchScrollSnapshot(root){
  const scroller=document.scrollingElement||document.documentElement;
  if(!root||!root.classList.contains('active')||!scroller||!root.children.length)return null;
- const free=qs('.dispatch-free',root),rect=free?.getBoundingClientRect(),height=window.innerHeight||document.documentElement.clientHeight;
  return {
   scroller,pageTop:scroller.scrollTop,pageLeft:scroller.scrollLeft,
-  anchorTop:rect&&rect.bottom>0&&rect.top<height?rect.top:null,
   openFree:qsa('.dispatch-free details',root).filter(details=>details.open).map(details=>details.querySelector('summary')?.textContent||'')
  };
 }
@@ -18142,15 +18138,9 @@ function dispatchRestoreScroll(root,snapshot){
  if(!snapshot||!root?.isConnected)return;
  const openFree=new Set(snapshot.openFree);
  qsa('.dispatch-free details',root).forEach(details=>{details.open=openFree.has(details.querySelector('summary')?.textContent||'')});
- const restore=()=>{
-  if(!root.isConnected||currentViewId()!=='dispatchActionsView')return;
-  const anchor=qs('.dispatch-free',root);
-  let top=snapshot.pageTop;
-  if(anchor&&snapshot.anchorTop!==null)top=snapshot.scroller.scrollTop+anchor.getBoundingClientRect().top-snapshot.anchorTop;
-  snapshot.scroller.scrollTop=top;snapshot.scroller.scrollLeft=snapshot.pageLeft;
- };
- fitDispatchCardSizes();restore();
- requestAnimationFrame(()=>{fitDispatchCardSizes();restore();requestAnimationFrame(restore)});
+ fitDispatchCardSizes();
+ snapshot.scroller.scrollTop=snapshot.pageTop;
+ snapshot.scroller.scrollLeft=snapshot.pageLeft;
 }
 '''
     return html[:first] + helpers + block + html[last:]
