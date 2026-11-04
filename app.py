@@ -4079,6 +4079,8 @@ async def free_staff_telegram_call(method, payload):
         response = await client.post(f'https://api.telegram.org/bot{token}/{method}', json=payload)
         data = response.json()
     if not data.get('ok'):
+        if method == 'deleteMessage' and 'message to delete not found' in str(data.get('description', '')).lower():
+            return True
         if method == 'editMessageText' and 'message is not modified' in str(data.get('description', '')):
             return True
         raise ValueError('Telegram не подтвердил обновление списка')
@@ -14655,6 +14657,27 @@ def dispatch_people(order_id: int, db: Session = Depends(get_db), user: Telegram
         for p in rows if p.id in ready or p.id in assigned]}
 
 
+def dispatch_remove_order_number(db, order, actor_id):
+    card = dispatch_match_card(db, order)
+    if not card:
+        return
+    card = db.scalar(select(NumberCardEvent).where(
+        NumberCardEvent.id == card.id).with_for_update())
+    if not card or db.get(NumberCardDeletion, card.id):
+        return
+    transfer = db.get(NumberReassignment, card.id)
+    if transfer and transfer.status == 'pending':
+        raise HTTPException(409, 'Дождитесь завершения замены бригадира')
+    if effective_order_photo(db, card)['first_received'] or not cabinet_order_deletion_info(db, card)['can_delete']:
+        raise HTTPException(409, 'После фотоотчёта заказ нельзя удалить')
+    db.add(NumberCardDeletion(event_id=card.id, deleted_by_tg_id=actor_id))
+    db.add(PrivateIntakeEvent(key=f'delete-order-number:{card.id}', payload=json.dumps({
+        'result': {'ok': True},
+        'deliveries': [{'status': 'pending', 'method': 'deleteMessage',
+            'data': {'chat_id': card.chat_id, 'message_id': card.message_id}}],
+    })))
+
+
 @app.delete('/api/dispatch-board/orders/{order_id}')
 def dispatch_delete_order(order_id: int, data: DispatchRevision, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     dispatch_guard(db,user)
@@ -14663,9 +14686,7 @@ def dispatch_delete_order(order_id: int, data: DispatchRevision, db: Session = D
     dispatch_day_lock(db,order.work_date)
     if order.status=='cancelled': return {'ok':True,'id':order.id}
     dispatch_editable(db,order,data.revision)
-    card=dispatch_match_card(db,order)
-    if card and effective_order_photo(db,card)['first_received']:
-        raise HTTPException(409,'После фотоотчёта заказ нельзя удалить')
+    dispatch_remove_order_number(db, order, user.id)
     if dispatch_pair_partner(db, order): dispatch_unlink_pair(db, order)
     plan=db.get(DispatchPlan,order.id)
     if order.source=='private' and plan and json.loads(plan.payload).get('private_intake'):
@@ -17193,7 +17214,7 @@ async def private_intake_deliver(db,event):
         target['status']='sending';event.payload=json.dumps(saved,ensure_ascii=False);db.commit()
         try:
             result=await free_staff_telegram_call(target['method'],target['data'])
-            if target['method']=='editMessageText' and result is True:
+            if target['method'] in {'editMessageText','deleteMessage'} and result is True:
                 result={'message_id':target['data']['message_id']}
             if not isinstance(result,dict) or not result.get('message_id'):raise ValueError('Нет подтверждения')
             target.update(status='sent',message_id=result['message_id'])
@@ -17386,8 +17407,8 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
                 edits=[{**ref,'text':updated} for ref in refs]
             private_intake_queue_update(db,order,meta,f'Время выдачи изменено: {old} → {data.text}')
         elif data.action=='cancel':
-            card=dispatch_match_card(db,order)
-            if plan.approved_card_id or (card and effective_order_photo(db,card)['first_received']):raise HTTPException(409,'После фото или подтверждения зарплаты отмена здесь недоступна')
+            if plan.approved_card_id:raise HTTPException(409,'После подтверждения зарплаты отмена здесь недоступна')
+            dispatch_remove_order_number(db, order, data.tg_id)
             if dispatch_pair_partner(db,order):dispatch_unlink_pair(db,order)
             crew=dispatch_assignments(db,order)
             cancelled_leader=next((a.employee.tg_id for a in crew if a.role=='brigadier' and a.employee),None)
