@@ -14418,8 +14418,8 @@ def private_agent_phone_lookup(db, name, exclude_order_id=None):
 def private_agent_phone_endpoint(name: str, phone: str = '', db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     dispatch_guard(db,user)
     if len(name)>200:raise HTTPException(422,'Слишком длинное имя агента')
-    found_phone=private_agent_phone_lookup(db,name)
-    return JSONResponse({'phone':found_phone, 'agent_name':private_agent_history_name(db,name,phone or found_phone)},headers={'Cache-Control':'private, no-store'})
+    agent_name, found_phone=dispatch_private_agent_contact(db,name,'',phone)
+    return JSONResponse({'phone':found_phone, 'agent_name':agent_name},headers={'Cache-Control':'private, no-store'})
 
 
 @app.get('/api/dispatch-board/agent-match')
@@ -14478,11 +14478,14 @@ def dispatch_create(data: DispatchPlanInput, db: Session = Depends(get_db), user
         if data.slot_number not in empty[data.source]:
             raise HTTPException(409,'Карточка уже заполнена или недоступна. Обновите страницу')
     arrival = (datetime.combine(data.work_date, data.issue_time)-timedelta(minutes=30)).time() if data.issue_time else None
+    agent_name, agent_phone = data.agent_name.strip(), brigadier_phone8(data.agent_phone)
+    if data.source == 'private':
+        agent_name, agent_phone = dispatch_private_agent_contact(db,data.organization,agent_name,agent_phone)
     order = Order(public_id=_public_id(), source=data.source, work_date=data.work_date,
         issue_time=data.issue_time or time(0,0), arrival_time=arrival, deceased_name=data.deceased_name.strip(),
         route='\n'.join(route_fields.values()), category=data.category or '', team_size=data.team_size or 0,
-        organization=data.organization.strip(), notes=(data.notes or '').strip(), kickback_rub=0, agent_name=data.agent_name.strip(),
-        agent_phone=brigadier_phone8(data.agent_phone) or (private_agent_phone_lookup(db,data.organization or data.agent_name) if data.source=='private' else ''), other_agent_phone='', status='draft' if missing else 'new')
+        organization=data.organization.strip(), notes=(data.notes or '').strip(), kickback_rub=0, agent_name=agent_name,
+        agent_phone=agent_phone, other_agent_phone='', status='draft' if missing else 'new')
     db.add(order); db.flush()
     db.add(DispatchPlan(order_id=order.id, request_key=data.request_key, payload=json.dumps({
         'agent_phone_auto':order.agent_phone if data.agent_phone_auto or not data.agent_phone.strip() else '',
@@ -14609,8 +14612,9 @@ def dispatch_update(order_id: int, data: DispatchPlanInput, db: Session = Depend
         if value is None: value = {'category':'','team_size':0,'issue_time':time(0,0)}.get(field,value)
         setattr(order, field, value.strip() if isinstance(value,str) else value)
     order.agent_phone=brigadier_phone8(order.agent_phone)
-    if order.source=='private' and not order.agent_phone:
-        order.agent_phone=private_agent_phone_lookup(db,order.organization or order.agent_name,order.id)
+    if order.source=='private':
+        order.agent_name,order.agent_phone=dispatch_private_agent_contact(
+            db,order.organization,order.agent_name,order.agent_phone,order.id)
     if data.notes is not None: order.notes=data.notes.strip()
     order.arrival_time=(datetime.combine(data.work_date,data.issue_time)-timedelta(minutes=30)).time() if data.issue_time else None
     if missing: order.status='draft'
@@ -21530,17 +21534,32 @@ def _payroll_pending_navigation_html(html):
 INLINE_INDEX_HTML = _payroll_pending_navigation_html(INLINE_INDEX_HTML)
 
 
-def private_agent_history_name(db, alias, phone=''):
+def dispatch_private_agent_contact(db, alias, name, phone, exclude_order_id=None):
+    alias=str(alias or '').strip() or name
+    if not alias or (name and phone):
+        return name,phone
+    phone=private_agent_phone_number(phone) or private_agent_phone_lookup(db,alias,exclude_order_id)
+    if not name:
+        name=private_agent_history_name(db,alias,phone,exclude_order_id)
+    return name,phone
+
+
+def private_agent_history_name(db, alias, phone='', exclude_order_id=None):
     key=private_agent_phone_key(alias)
     number=private_agent_phone_number(phone)
     if not key or key in {'агент','гбу','частный','частные','без агента'}:
         return ''
+    personal_alias = re.fullmatch(
+        r'([а-яё][а-яё-]{1,39})\s+(?:\d+(?:\s+.+)?|мск)',
+        ' '.join(str(alias or '').split()), re.IGNORECASE)
     matches={}
     has_saved_name=False
-    for organization,name,saved_phone in db.execute(select(Order.organization,Order.agent_name,Order.agent_phone).where(
+    for oid,organization,name,saved_phone in db.execute(select(Order.id,Order.organization,Order.agent_name,Order.agent_phone).where(
             Order.source=='private',Order.status!='cancelled',Order.agent_name!='')):
-        if private_agent_phone_key(str(organization or '').strip() or name)!=key:
+        if oid==exclude_order_id or private_agent_phone_key(str(organization or '').strip() or name)!=key:
             continue
+        if personal_alias and private_agent_phone_key(name)==key:
+            continue  # Older bot bookings sometimes stored the alias as the contact name.
         has_saved_name=True
         if number and private_agent_phone_number(saved_phone)!=number:
             continue
@@ -21550,9 +21569,6 @@ def private_agent_history_name(db, alias, phone=''):
         return next(iter(matches.values())) if len(matches)==1 else ''
     # Personal aliases conventionally start with a name, then a branch number
     # or Moscow tag. Other aliases may be organizations and need a saved name.
-    personal_alias = re.fullmatch(
-        r'([а-яё][а-яё-]{1,39})\s+(?:\d+(?:\s+.+)?|мск)',
-        ' '.join(str(alias or '').split()), re.IGNORECASE)
     if personal_alias:
         return personal_alias[1].capitalize()
     return ''
