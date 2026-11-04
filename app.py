@@ -21459,7 +21459,16 @@ def private_agent_history_name(db, alias, phone=''):
             continue
         value=' '.join(str(name or '').split())
         if value:matches.setdefault(private_agent_phone_key(value),value)
-    return next(iter(matches.values())) if len(matches)==1 else ''
+    if matches:
+        return next(iter(matches.values())) if len(matches)==1 else ''
+    # Personal aliases conventionally start with a name, then a branch number
+    # or Moscow tag. Other aliases may be organizations and need a saved name.
+    personal_alias = re.fullmatch(
+        r'([а-яё][а-яё-]{1,39})\s+(?:\d+(?:\s+.+)?|мск)',
+        ' '.join(str(alias or '').split()), re.IGNORECASE)
+    if personal_alias:
+        return personal_alias[1].capitalize()
+    return ''
 
 
 def _private_agent_name_autofill_html(html):
@@ -21468,7 +21477,12 @@ def _private_agent_name_autofill_html(html):
     html=html[:start]+r''' if(source==='private'&&!order?.approved){
   let generation=0,filledPhone='',filledName='';
   const nameInput=form.elements.agent_name,organizationInput=form.elements.organization;
+  const nameLabel=nameInput.closest('label');
+  const nameLabelText=Array.from(nameLabel?.childNodes||[]).find(node=>node.nodeType===3&&node.textContent.trim()==='Имя агента');
+  const markAutoName=automatic=>{if(nameLabelText)nameLabelText.textContent=automatic?'Имя агента (авто!)':'Имя агента'};
+  let lookupTimer;
   const lookupPrivateAgent=async()=>{
+   clearTimeout(lookupTimer);
    const ticket=++generation,alias=organizationInput.value.trim()||nameInput.value.trim();
    const oldPhone=phoneInput.value,oldName=nameInput.value;
    if(!alias||oldPhone.trim()&&oldName.trim())return;
@@ -21476,16 +21490,17 @@ def _private_agent_name_autofill_html(html):
     const result=await api('/api/dispatch-board/private-agent-phone?name='+encodeURIComponent(alias)+'&phone='+encodeURIComponent(oldPhone));
     if(!live()||ticket!==generation||oldPhone!==phoneInput.value||oldName!==nameInput.value||alias!==(organizationInput.value.trim()||nameInput.value.trim()))return;
     if(!phoneInput.value.trim()&&result.phone){phoneInput.value=domesticAgentPhone(result.phone);filledPhone=phoneInput.value;markAutoPhone(true)}
-    if(!nameInput.value.trim()&&result.agent_name){nameInput.value=result.agent_name;filledName=result.agent_name}
+    if(!nameInput.value.trim()&&result.agent_name){nameInput.value=result.agent_name;filledName=result.agent_name;markAutoName(true)}
    }catch(error){/* History must not prevent manual editing. */}
   };
   organizationInput.addEventListener('input',()=>{
    generation++;
    if(filledPhone&&phoneInput.value===filledPhone){phoneInput.value='';markAutoPhone(false)}
    if(filledName&&nameInput.value===filledName)nameInput.value='';
-   filledPhone='';filledName='';
+   filledPhone='';filledName='';markAutoName(false);
+   clearTimeout(lookupTimer);lookupTimer=setTimeout(lookupPrivateAgent,350);
   });
-  nameInput.addEventListener('input',()=>{generation++;filledName=''});
+  nameInput.addEventListener('input',()=>{generation++;filledName='';markAutoName(false)});
   phoneInput.addEventListener('input',()=>{generation++;filledPhone=''});
   for(const input of [organizationInput,nameInput,phoneInput])input.addEventListener('change',lookupPrivateAgent);
   lookupPrivateAgent();
