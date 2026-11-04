@@ -14104,10 +14104,7 @@ def dispatch_pair_demand(db, rows, requested):
                for o in (order, partner)): continue
         # Reuse the smaller crew; a 4+6 pair needs six distinct people.
         reused = min((order, partner), key=lambda o:(o.team_size, -o.id))
-        first=dispatch_assignments(db,order);second=dispatch_assignments(db,partner)
-        shared=(len({a.employee_id for a in first}&{a.employee_id for a in second})+
-            min(_order_external_member_count(order,db),_order_external_member_count(partner,db))) if first and second else reused.team_size
-        effective[reused.source] = max(0, effective[reused.source] - min(reused.team_size,shared))
+        effective[reused.source] = max(0, effective[reused.source] - reused.team_size)
     return effective
 
 
@@ -14389,6 +14386,7 @@ def private_agent_phone_key(value):
 def private_agent_phone_number(value):
     digits=re.sub(r'\D', '', str(value or ''))
     if len(digits)==11 and digits[0] in '78':return '8'+digits[1:]
+    if len(digits)==10 and digits.startswith('9'):return '8'+digits
     return ''
 
 
@@ -14397,10 +14395,9 @@ def private_agent_unique_phone(phones):
     return next(iter(values)) if len(values)==1 else ''
 
 
-def private_agent_phone_lookup(db, name, exclude_order_id=None):
-    """Exact private-agent aliases only; conflicting numbers require manual input."""
+def private_agent_phone_candidates(db, name, exclude_order_id=None):
     key=private_agent_phone_key(name)
-    if not key or key in {'агент','гбу','частный','частные','без агента'}:return ''
+    if not key or key in {'агент','гбу','частный','частные','без агента'}:return []
     phones=[]
     for full_name,phone in db.execute(select(Agent.full_name,Agent.phone).where(Agent.active.is_(True))):
         if private_agent_phone_key(full_name)==key:phones.append(phone)
@@ -14409,9 +14406,13 @@ def private_agent_phone_lookup(db, name, exclude_order_id=None):
                 Order.source=='private',Order.agent_phone!='',Order.status!='cancelled')):
         if oid==exclude_order_id:continue
         # Prefer the operator's own alias rather than a common first name.
-        alias=organization.strip() or agent_name.strip()
-        if private_agent_phone_key(alias)==key:phones.append(phone)
-    return private_agent_unique_phone(phones)
+        if key in {private_agent_phone_key(organization),private_agent_phone_key(agent_name)}:
+            phones.append(phone)
+    return sorted({number for phone in phones if (number:=private_agent_phone_number(phone))})
+
+
+def private_agent_phone_lookup(db, name, exclude_order_id=None):
+    return private_agent_unique_phone(private_agent_phone_candidates(db,name,exclude_order_id))
 
 
 @app.get('/api/dispatch-board/private-agent-phone')
@@ -14419,7 +14420,8 @@ def private_agent_phone_endpoint(name: str, phone: str = '', db: Session = Depen
     dispatch_guard(db,user)
     if len(name)>200:raise HTTPException(422,'Слишком длинное имя агента')
     agent_name, found_phone=dispatch_private_agent_contact(db,name,'',phone)
-    return JSONResponse({'phone':found_phone, 'agent_name':agent_name},headers={'Cache-Control':'private, no-store'})
+    return JSONResponse({'phone':found_phone, 'agent_name':agent_name,
+        'phone_options':private_agent_phone_candidates(db,name) if not found_phone else []},headers={'Cache-Control':'private, no-store'})
 
 
 @app.get('/api/dispatch-board/agent-match')
@@ -16022,7 +16024,7 @@ async function openDispatchCrew(order,edit=false){
  let leader=order.brigadier?.id||null,selected=new Set(order.members.map(p=>p.id)),second=new Set();let step=leader?2:1;
  const people=data.items,old=new Set([order.brigadier?.id,...order.members.map(p=>p.id)]);
  const name=p=>dispatchPerson(p),busy=p=>p.workload>0;
- function row(p,isLeader){const checked=isLeader?leader===p.id:selected.has(p.id);const blocked=(p.workload>=2||p.ready_for_day===false)&&!old.has(p.id);return `<label class="dispatch-choice" data-plan-person="${p.id}" data-plan-search="${esc(name(p).toLowerCase().replaceAll('ё','е'))}"><span>${esc(name(p))}<small>${p.height_cm||'—'}${busy(p)?' · уже на заказе':''}${p.ready_for_day===false?' · готовность не подтверждена':''}</small></span><input type="${isLeader?'radio':'checkbox'}" name="${isLeader?'leader':'member'}" value="${p.id}" ${checked?'checked':''} ${blocked?'disabled':''}>${busy(p)&&!blocked&&!old.has(p.id)?`<button type="button" data-plan-second="${p.id}" aria-pressed="${second.has(p.id)}">2-й заказ${second.has(p.id)?' ✓':''}</button>`:''}</label>`}
+ function row(p,isLeader){const checked=isLeader?leader===p.id:selected.has(p.id);const blocked=(p.workload>=2||p.ready_for_day===false)&&!old.has(p.id);return `<label class="dispatch-choice" data-plan-person="${p.id}" data-plan-search="${esc([p.full_name,p.metro].filter(Boolean).join(' ').toLowerCase().replaceAll('ё','е'))}"><span>${esc(name(p))}<small>${p.height_cm||'—'}${busy(p)?' · уже на заказе':''}${p.ready_for_day===false?' · готовность не подтверждена':''}</small></span><input type="${isLeader?'radio':'checkbox'}" name="${isLeader?'leader':'member'}" value="${p.id}" ${checked?'checked':''} ${blocked?'disabled':''}>${busy(p)&&!blocked&&!old.has(p.id)?`<button type="button" data-plan-second="${p.id}" aria-pressed="${second.has(p.id)}">2-й заказ${second.has(p.id)?' ✓':''}</button>`:''}</label>`}
  function draw(){if(!live())return;const p=people.find(p=>p.id===leader),need=order.team_size-1;
  const sorted=people.filter(p=>p.id!==leader).sort((a,b)=>{const diff=x=>p?.height_cm&&x.height_cm?Math.abs(x.height_cm-p.height_cm):1000;return Number(diff(a)>3)-Number(diff(b)>3)||diff(a)-diff(b)||name(a).localeCompare(name(b),'ru')});
  root.innerHTML=`<p>Шаг ${step} из 2 · ${order.source==='gbu'?'ГБУ ⬛️':'Частный'} №${order.number}</p>${step===2?`<p><b>Бригадир: ${esc(name(p))} · ${p.height_cm||'—'}</b> <button type="button" data-plan-back>Изменить</button></p>`:''}<input class="search" data-plan-find placeholder="Поиск среди готовых: имя или метро"><small class="dispatch-ready-hint">Готовы на ${esc(dispatchShortDay(order.work_date))}. Уже назначенные сотрудники сохранены.</small><div class="${step===1?'dispatch-leaders':'dispatch-people'}">${(step===1?people.filter(p=>p.group_code==='brigadier').sort((a,b)=>name(a).localeCompare(name(b),'ru')):sorted).map(p=>row(p,step===1)).join('')}</div>${step===2?'<small>Сначала сотрудники с разницей в росте до 3 см, затем остальные.</small>':''}<p class="dispatch-selected" data-plan-selected></p><p data-plan-error role="status"></p><button type="button" class="primary" data-plan-next>${step===1?'Далее: сотрудники ›':'Назначить состав'}</button>`;
@@ -21580,6 +21582,8 @@ def _private_agent_name_autofill_html(html):
     html=html[:start]+r''' if(source==='private'&&!order?.approved){
   let generation=0,filledPhone='',filledName='';
   const nameInput=form.elements.agent_name,organizationInput=form.elements.organization;
+  const phoneOptions=document.createElement('datalist');
+  phoneOptions.id='dispatch-private-agent-phones';phoneInput.setAttribute('list',phoneOptions.id);phoneInput.after(phoneOptions);
   const nameLabel=nameInput.closest('label');
   const nameLabelText=Array.from(nameLabel?.childNodes||[]).find(node=>node.nodeType===3&&node.textContent.trim()==='Имя агента');
   const markAutoName=automatic=>{if(nameLabelText)nameLabelText.textContent=automatic?'Имя агента (авто!)':'Имя агента'};
@@ -21592,12 +21596,13 @@ def _private_agent_name_autofill_html(html):
    try{
     const result=await api('/api/dispatch-board/private-agent-phone?name='+encodeURIComponent(alias)+'&phone='+encodeURIComponent(oldPhone));
     if(!live()||ticket!==generation||oldPhone!==phoneInput.value||oldName!==nameInput.value||alias!==(organizationInput.value.trim()||nameInput.value.trim()))return;
+    phoneOptions.replaceChildren(...(result.phone_options||[]).map(value=>new Option(value,value)));
     if(!phoneInput.value.trim()&&result.phone){phoneInput.value=domesticAgentPhone(result.phone);filledPhone=phoneInput.value;markAutoPhone(true)}
     if(!nameInput.value.trim()&&result.agent_name){nameInput.value=result.agent_name;filledName=result.agent_name;markAutoName(true)}
    }catch(error){/* History must not prevent manual editing. */}
   };
   organizationInput.addEventListener('input',()=>{
-   generation++;
+   generation++;phoneOptions.replaceChildren();
    if(filledPhone&&phoneInput.value===filledPhone){phoneInput.value='';markAutoPhone(false)}
    if(filledName&&nameInput.value===filledName)nameInput.value='';
    filledPhone='';filledName='';markAutoName(false);
@@ -22049,4 +22054,13 @@ dialog.gbu-payroll-report-dialog[open]{position:fixed;inset:0;transform:none;mar
 .gbu-payroll-report-dialog .gbu-payroll-report-order{gap:6px;margin-top:2px;padding-top:3px;font-size:11px;line-height:1.3}
 .gbu-payroll-report-dialog .gbu-payroll-report-order>span:first-child{min-width:0;overflow-wrap:anywhere}
 .gbu-payroll-report-dialog .gbu-payroll-person-report>section:last-child>:last-child{margin-bottom:0}
+</style></body>''',1)
+
+# Preserve the search filter when compact crew layouts set display explicitly.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '''
+<style>
+#dispatchCrew .dispatch-choice[hidden],
+.bc-photo-viewer .photo-crew-editor .gbu-crew-choice[hidden]{
+ display:none!important;
+}
 </style></body>''',1)
