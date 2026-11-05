@@ -21916,6 +21916,10 @@ def _control_attention_header_html(html):
 #ownerBrigadeControlContent .bc-heading .bc-attention-toggle:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
 #ownerBrigadeControlContent .bc-heading .bc-heading-contact{height:34px;min-height:34px;padding:2px 3px}
 #ownerBrigadeControlContent .bc-stage.bc-needs-attention{background:rgba(210,65,65,.13);box-shadow:inset 0 0 0 1px rgba(185,50,50,.55);color:var(--text)}
+#ownerBrigadeControlContent .bc-stage-photo.bc-photo-split{position:relative;background:linear-gradient(to right,var(--bc-photo-first) 0%,var(--bc-photo-first) 50%,var(--bc-photo-second) 50%,var(--bc-photo-second) 100%)!important;box-shadow:none}
+#ownerBrigadeControlContent .bc-stage-photo.bc-photo-split::after{content:"";position:absolute;left:50%;top:2px;bottom:2px;width:1px;background:var(--line);pointer-events:none}
+#ownerBrigadeControlContent .bc-photo-split .bc-stage-icon,#ownerBrigadeControlContent .bc-photo-split>b,#ownerBrigadeControlContent .bc-photo-split .bc-stage-state{position:relative;z-index:1}
+#ownerBrigadeControlContent .bc-photo-split .bc-photo-mark.is-received{color:var(--green)}
 @media(max-width:350px){#ownerBrigadeControlContent .bc-heading:has(.bc-attention-toggle){grid-template-columns:minmax(0,1fr) 55px 32px 50px;gap:3px}#ownerBrigadeControlContent .bc-heading .bc-attention-toggle{width:32px}#ownerBrigadeControlContent .bc-heading .bc-date-short{font-size:10px}#ownerBrigadeControlContent .bc-heading .bc-heading-contact b{font-size:12px}}
 </style><script>
 let ownerBrigadeControlAttention=false;
@@ -21935,14 +21939,30 @@ function controlAttentionStages(card,day,now=new Date()){
  if(past&&!card.completed)result.push('done');
  return result;
 }
+function controlPhotoSlotColors(card,needsAttention){
+ const waiting=needsAttention?'rgba(210,65,65,.13)':'var(--panel2)';
+ return [card.first_received,card.second_received].map(ready=>ready?'rgba(58,142,108,.16)':waiting);
+}
 function applyControlAttention(root,data){
  root.querySelectorAll('.bc-needs-attention').forEach(row=>row.classList.remove('bc-needs-attention'));
- if(!ownerBrigadeControlAttention)return;
  const now=new Date();
  for(const card of data.items){
   const order=root.querySelector('[data-control-card="'+Number(card.id)+'"]');
   if(!order)continue;
-  for(const stage of controlAttentionStages(card,data.work_date,now))order.querySelector('.bc-stage-'+stage)?.classList.add('bc-needs-attention');
+  const stages=ownerBrigadeControlAttention?controlAttentionStages(card,data.work_date,now):[];
+  if(card.source==='gbu'){
+   const row=order.querySelector('.bc-stage-photo');
+   if(row){
+    const colors=controlPhotoSlotColors(card,stages.includes('photo'));
+    row.classList.add('bc-photo-split');
+    row.style.setProperty('--bc-photo-first',colors[0]);
+    row.style.setProperty('--bc-photo-second',colors[1]);
+   }
+  }
+  for(const stage of stages){
+   if(stage==='photo'&&card.source==='gbu')continue;
+   order.querySelector('.bc-stage-'+stage)?.classList.add('bc-needs-attention');
+  }
  }
 }
 </script></body>''', 1)
