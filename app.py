@@ -22131,9 +22131,27 @@ def _finance_bottom_navigation_html(html):
 """ + html[start:end].replace(
             "!busy&&(!dirty||confirm('Выйти без сохранения изменений?'))", 'canLeave()', 1
         ) + html[end:]
+    close_anchor = "qs('#modal').classList.add('hidden');qs('#modalBackdrop').classList.add('hidden')"
+    assert html.count(close_anchor) == 1
+    html = html.replace(close_anchor, """
+const restoreOwnerTab=state.bootstrap?.cabinet_kind==='owner'
+  && !qs('#modal').classList.contains('hidden')
+  && ['payroll','tables'].includes(roleNavigationActive);
+""" + close_anchor + """;
+if(restoreOwnerTab){
+  const tabs={readinessView:'ready',dispatchActionsView:'staff',ordersView:'staff',
+    ownerCabinetView:'own',ownerBrigadeControlView:'brigadeControl',ownerManagementView:'management'};
+  roleNavigationActive=tabs[currentViewId()]||'ready';
+  updateRoleNavigation();
+}""", 1)
     return html.replace('</body>', f'''<style>
-body:has(#modal:not(.hidden):has({screens})) #roleNavigation{{z-index:71}}
-body:has(#modal:not(.hidden):has({screens})) #modalBackdrop{{bottom:calc(64px + var(--safe-bottom))}}
+#roleNavigation button[aria-current="page"],.bottom-nav button.active{{
+ background:var(--panel2);box-shadow:inset 0 0 0 1px var(--gold2),inset 0 3px 0 var(--gold2);
+ border-radius:10px;color:var(--text);
+}}
+#roleNavigation button[aria-current="page"] small,.bottom-nav button.active small{{font-weight:800}}
+body:has(#modal:not(.hidden) :is({screens})) #roleNavigation{{z-index:71}}
+body:has(#modal:not(.hidden) :is({screens})) #modalBackdrop{{bottom:calc(64px + var(--safe-bottom))}}
 body.role-navigation-enabled #modal:not(.hidden):has({screens}){{
  top:8px;
  max-height:calc(100dvh - 80px - var(--safe-bottom));
