@@ -22457,28 +22457,81 @@ def _private_agent_management_html(html):
 """ + anchor, 1)
     return html.replace('</body>', r'''<style>
 #dispatchActionsView .dispatch-tools.dispatch-private-agent-toolbar{grid-template-columns:repeat(3,minmax(0,1fr))}
+#modal:has(#privateAgentManagement){display:flex;flex-direction:column;overflow:hidden}
+#modal:has(#privateAgentManagement)>.modal-head{position:static;flex:none;margin:0 0 8px;padding:0;gap:8px}
+#modal:has(#privateAgentManagement)>.modal-head::before{display:none}
+#modal:has(#privateAgentManagement)>.modal-head h3{margin:0}
+#privateAgentManagement{display:flex;flex-direction:column;min-height:0}
 #privateAgentManagement input{width:100%;font-size:16px}
-#privateAgentManagement article{display:grid;gap:6px;padding:9px;margin:7px 0;border:1px solid var(--line);border-radius:10px}
+#privateAgentManagement>.search{flex:none;margin:0 0 8px}
+#privateAgentManagement>.search[hidden]{display:none}
+#privateAgentManagement:not([data-editing])>[data-agent-list]{
+ display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;min-height:0;
+ overflow-y:auto;overscroll-behavior:contain;
+}
+#privateAgentManagement article{display:grid;gap:4px;padding:6px;min-width:0;border:1px solid var(--line);border-radius:10px}
+#privateAgentManagement:not([data-editing]) article{font-size:13px;line-height:1.25;overflow-wrap:anywhere;grid-template-rows:repeat(3,auto) 1fr auto}
 #privateAgentManagement article label{display:grid;gap:2px}
 #privateAgentManagement .private-agent-actions{display:flex;gap:6px;flex-wrap:wrap}
+#privateAgentManagement:not([data-editing]) .private-agent-actions{align-items:stretch;gap:3px}
+#privateAgentManagement:not([data-editing]) .private-agent-actions button{flex:1 0 auto;min-height:32px;padding:3px 5px;font-size:12px}
+</style><style>
+#modal:has(#privateAgentManagement[data-editing]){
+ top:var(--agent-editor-top,8px);bottom:auto;max-height:var(--agent-editor-height,calc(100dvh - 16px));
+ display:flex;flex-direction:column;overflow:hidden;padding:8px;
+}
+#modal:has(#privateAgentManagement[data-editing])>.modal-head{position:static;flex:none;margin:0 0 4px;padding:0;min-height:32px}
+#privateAgentManagement[data-editing],#privateAgentManagement[data-editing]>[data-agent-list]{display:flex;flex-direction:column;min-height:0}
+#privateAgentManagement[data-editing] article{display:flex;flex-direction:column;min-height:0;margin:0;padding:5px}
+#privateAgentManagement .private-agent-edit-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;min-height:0;overflow:auto;overscroll-behavior:contain}
+#privateAgentManagement .private-agent-edit-fields label{min-width:0;font-size:12px}
+#privateAgentManagement .private-agent-edit-fields input{box-sizing:border-box;min-width:0;height:34px;padding:3px 6px}
+#privateAgentManagement .private-agent-edit-fields label:last-child{grid-column:1/-1}
+#privateAgentManagement[data-editing] .private-agent-actions{flex:none;flex-wrap:nowrap;padding-top:4px}
+#privateAgentManagement[data-editing] [data-agent-edit]{flex:1;min-height:36px}
 </style><script>
 async function openPrivateAgentManagement(){
  showModal('Частные агенты','<section id="privateAgentManagement"><input class="search" type="search" aria-label="Поиск агента" placeholder="От кого, имя или номер"><div data-agent-list>Загрузка…</div></section>');
  const root=qs('#privateAgentManagement'),list=qs('[data-agent-list]',root),search=qs('input',root);
- const live=()=>root.isConnected&&!qs('#modal').classList.contains('hidden');
+ const modal=qs('#modal');
+ const live=()=>root.isConnected&&!modal.classList.contains('hidden');
+ let listTop=0;
+ const viewport=window.visualViewport;
+ const fitEditor=()=>{
+  modal.style.setProperty('--agent-editor-top',Math.round((viewport?.offsetTop||0)+6)+'px');
+  modal.style.setProperty('--agent-editor-height',Math.max(0,Math.floor((viewport?.height||window.innerHeight)-12))+'px');
+ };
+ const stopEditor=()=>{
+  if(root.contains(document.activeElement))document.activeElement.blur();
+  viewport?.removeEventListener('resize',fitEditor);
+  viewport?.removeEventListener('scroll',fitEditor);
+  window.removeEventListener('resize',fitEditor);
+  modal.style.removeProperty('--agent-editor-top');
+  modal.style.removeProperty('--agent-editor-height');
+  if(disposeDispatchEditorViewport===stopEditor)disposeDispatchEditorViewport=()=>{};
+ };
+ const finishEdit=()=>{
+  stopEditor();editing=null;root.removeAttribute('data-editing');search.hidden=false;
+  render();list.scrollTop=listTop;
+ };
  let items=[],editing=null;
  const render=()=>{
   const query=search.value.trim().toLowerCase().replaceAll('ё','е');
   list.replaceChildren();
   for(const item of items){
-   if(item.key!==editing&&![item.organization,item.agent_name,item.phone].join(' ').toLowerCase().replaceAll('ё','е').includes(query))continue;
+   if(editing&&item.key!==editing)continue;
+   if(!editing&&![item.organization,item.agent_name,item.phone].join(' ').toLowerCase().replaceAll('ё','е').includes(query))continue;
    const card=document.createElement('article');
    const fields=[['organization','От кого'],['agent_name','Имя агента'],['phone','Номер агента'],['comment','Пожелания по связи']];
    const edit=item.key===editing;
    card.innerHTML=fields.map(([key,label])=>edit
     ?`<label>${label}<input name="${key}" value="${esc(item[key])}" ${key==='phone'?'type="tel"':''}></label>`
     :`<div><b>${label}:</b> ${esc(item[key]||'—')}</div>`).join('')
-    +`<div class="private-agent-actions"><button type="button" data-agent-edit>${edit?'Сохранить':'Редактировать'}</button><button type="button" data-agent-remove>${edit?'Отмена':'Удалить'}</button></div>`;
+    +`<div class="private-agent-actions"><button type="button" data-agent-edit>${edit?'Сохранить':'Изменить'}</button><button type="button" data-agent-remove>${edit?'Отмена':'Удалить'}</button></div>`;
+   if(edit){
+    const fieldsPanel=document.createElement('div');fieldsPanel.className='private-agent-edit-fields';
+    fieldsPanel.append(...card.querySelectorAll('label'));card.prepend(fieldsPanel);
+   }
    const editButton=qs('[data-agent-edit]',card),remove=qs('[data-agent-remove]',card);
    const write=async(method,values)=>{
     editButton.disabled=remove.disabled=true;search.disabled=true;
@@ -22487,17 +22540,25 @@ async function openPrivateAgentManagement(){
      if(!live())return;
      if(values)Object.assign(item,values);
      else items=items.filter(contact=>contact.key!==item.key);
-     editing=null;render();toast(values?'Контакт сохранён':'Контакт удалён');
+     if(values)finishEdit();else render();toast(values?'Контакт сохранён':'Контакт удалён');
     }catch(error){if(live())toast(error.message)}
     finally{editButton.disabled=remove.disabled=false;search.disabled=false}
    };
    editButton.onclick=()=>{
-    if(!edit){editing=item.key;render();return}
+    if(!edit){
+     listTop=list.scrollTop;editing=item.key;root.setAttribute('data-editing','');search.hidden=true;
+     render();fitEditor();
+     viewport?.addEventListener('resize',fitEditor);
+     viewport?.addEventListener('scroll',fitEditor);
+     window.addEventListener('resize',fitEditor);
+     disposeDispatchEditorViewport=stopEditor;
+     return;
+    }
     const values=Object.fromEntries(fields.map(([key])=>[key,qs('[name="'+key+'"]',card).value.trim()]));
     write('PUT',values);
    };
    remove.onclick=()=>{
-    if(edit){editing=null;render();return}
+    if(edit){finishEdit();return}
     if(confirm('Удалить контакт из справочника? Старые заказы сохранятся.'))write('DELETE');
    };
    list.append(card);
