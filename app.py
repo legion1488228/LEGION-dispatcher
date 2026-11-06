@@ -21789,7 +21789,7 @@ def _private_agent_name_autofill_html(html):
    suggestions.className='dispatch-private-agent-suggestions';
    suggestions.setAttribute('aria-label','Подходящие агенты');
    suggestions.hidden=true;
-   directory.before(suggestions);
+   form.querySelector('.dispatch-editor-actions').before(suggestions);
    let suggestionGeneration=0;
    const hideSuggestions=()=>{suggestionGeneration++;suggestions.hidden=true;suggestions.replaceChildren()};
    const selectContact=item=>{
@@ -21805,9 +21805,18 @@ def _private_agent_name_autofill_html(html):
     hideSuggestions();
     const ticket=suggestionGeneration,query=normalize(organizationInput.value.trim());
     if((query.match(/\p{L}/gu)||[]).length<2||!panel.hidden)return;
-    try{await loadContacts()}catch(error){return}
-    if(!live()||ticket!==suggestionGeneration||!panel.hidden||document.activeElement!==organizationInput
-      ||query!==normalize(organizationInput.value.trim()))return;
+    const isCurrent=()=>live()&&ticket===suggestionGeneration&&panel.hidden
+     &&query===normalize(organizationInput.value.trim());
+    if(!contacts){
+     suggestions.textContent='Ищем агента…';
+     suggestions.hidden=false;
+     try{await loadContacts()}catch(error){
+      if(isCurrent())suggestions.textContent='Не удалось загрузить агентов. Продолжите ввод, чтобы повторить поиск.';
+      return;
+     }
+    }
+    if(!isCurrent())return;
+    suggestions.replaceChildren();
     const terms=query.split(/\s+/);
     const matches=contacts.filter(item=>{
      const label=normalize(item.organization+' '+item.agent_name);
@@ -21822,12 +21831,19 @@ def _private_agent_name_autofill_html(html):
      const details=document.createElement('span');
      details.textContent=[item.agent_name,item.phone].filter(Boolean).join(' · ');
      card.append(title,details);
-     card.onclick=()=>{selectContact(item);organizationInput.focus({preventScroll:true})};
+     card.onmousedown=event=>event.preventDefault();
+     card.onclick=()=>{selectContact(item);organizationInput.blur()};
      suggestions.append(card);
     }
-    suggestions.hidden=!suggestions.children.length;
+    if(!matches.length)suggestions.textContent='Подходящих агентов нет';
+    suggestions.hidden=false;
    };
    organizationInput.addEventListener('input',suggestContacts);
+   organizationInput.addEventListener('compositionend',suggestContacts);
+   organizationInput.addEventListener('focus',suggestContacts);
+   form.addEventListener('focusin',event=>{
+    if(event.target!==organizationInput&&!suggestions.contains(event.target))hideSuggestions();
+   });
    organizationInput.addEventListener('keydown',event=>{
     if(event.key==='Escape'&&!suggestions.hidden){event.preventDefault();event.stopPropagation();hideSuggestions()}
    });
@@ -22481,7 +22497,8 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '''<style>
 #dispatchEditor .dispatch-private-agents{grid-column:1/-1;min-width:0}
 #dispatchEditor .dispatch-private-agent-suggestions:not([hidden]){
- display:grid;grid-column:1/-1;gap:4px;max-height:170px;overflow:auto;overscroll-behavior:contain
+ display:grid;flex:none;gap:4px;max-height:110px;overflow:auto;overscroll-behavior:contain;
+ margin:3px 0;padding:4px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12px
 }
 #dispatchEditor .dispatch-private-agent-suggestions>button{
  display:grid;gap:2px;min-height:40px;padding:5px 8px;text-align:left;overflow-wrap:anywhere;font-size:13px
