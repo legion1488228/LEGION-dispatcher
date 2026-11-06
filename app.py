@@ -14417,6 +14417,61 @@ def private_agent_phone_lookup(db, name, exclude_order_id=None):
     return private_agent_unique_phone(private_agent_phone_candidates(db,name,exclude_order_id))
 
 
+class PrivateAgentComment(Base):
+    __tablename__ = 'private_agent_comments'
+    contact_key = Column(String(64), primary_key=True)
+    comment = Column(String(500), nullable=False)
+
+
+class PrivateAgentCommentInput(BaseModel):
+    comment: str = Field(max_length=500)
+
+
+@app.put('/api/dispatch-board/private-agents/{contact_key}/comment')
+def update_private_agent_comment(contact_key: str, data: PrivateAgentCommentInput,
+                                 db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    if not _is_owner(db, user.id):
+        raise HTTPException(403, 'Справочник частных агентов доступен владельцу')
+    if not re.fullmatch(r'[0-9a-f]{64}', contact_key):
+        raise HTTPException(422, 'Неверный ключ контакта')
+    comment = data.comment.strip()
+    db.execute(text('''
+        INSERT INTO private_agent_comments (contact_key, comment) VALUES (:key, :comment)
+        ON CONFLICT (contact_key) DO UPDATE SET comment = excluded.comment
+    '''), {'key': contact_key, 'comment': comment})
+    db.commit()
+    return {'comment': comment}
+
+
+@app.get('/api/dispatch-board/private-agents')
+def dispatch_private_agents(db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    if not _is_owner(db, user.id):
+        raise HTTPException(403, 'Справочник частных агентов доступен владельцу')
+    rows = db.execute(select(Order.organization, Order.agent_name, Order.agent_phone).where(
+        Order.source == 'private', Order.status != 'cancelled',
+        Order.organization != '', Order.agent_name != '', Order.agent_phone != '',
+    ).order_by(Order.work_date.desc(), Order.id.desc()))
+    contacts = {}
+    for organization, name, raw_phone in rows:
+        alias = ' '.join(organization.split())
+        name = ' '.join(name.split())
+        phone = private_agent_phone_number(raw_phone)
+        alias_key = private_agent_phone_key(alias)
+        name_key = private_agent_phone_key(name)
+        if not alias_key or not name_key or not phone:
+            continue
+        contacts.setdefault((alias_key, name_key, phone), {
+            'organization': alias, 'agent_name': name, 'phone': phone,
+        })
+    comments = dict(db.execute(select(PrivateAgentComment.contact_key, PrivateAgentComment.comment)).all())
+    items = []
+    for key in sorted(contacts):
+        contact_key = dispatch_hash(key)
+        items.append({**contacts[key], 'key': contact_key, 'comment': comments.get(contact_key, '')})
+    return JSONResponse({'items': items},
+                        headers={'Cache-Control': 'private, no-store'})
+
+
 @app.get('/api/dispatch-board/private-agent-phone')
 def private_agent_phone_endpoint(name: str, phone: str = '', db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
     dispatch_guard(db,user)
@@ -21604,6 +21659,79 @@ def _private_agent_name_autofill_html(html):
   const nameLabelText=Array.from(nameLabel?.childNodes||[]).find(node=>node.nodeType===3&&node.textContent.trim()==='Имя агента');
   const markAutoName=automatic=>{if(nameLabelText)nameLabelText.textContent=automatic?'Имя агента (авто!)':'Имя агента'};
   let lookupTimer;
+  if(state.bootstrap?.is_owner===true){
+   const directory=document.createElement('section');
+   directory.className='dispatch-private-agents';
+   directory.innerHTML='<button type="button" class="secondary" aria-expanded="false" aria-controls="dispatchPrivateAgentList">Частные агенты</button><div id="dispatchPrivateAgentList" hidden><input type="search" aria-label="Поиск агента" placeholder="От кого, имя или номер"><div class="dispatch-private-agent-results"></div></div>';
+   organizationInput.closest('label').after(directory);
+   const toggle=directory.querySelector('button'),panel=directory.querySelector('#dispatchPrivateAgentList');
+   const search=panel.querySelector('input'),results=panel.querySelector('.dispatch-private-agent-results');
+   const normalize=value=>value.toLowerCase().replaceAll('ё','е');
+   let contacts=null;
+   const commentDrafts=new Map();
+   const renderContacts=()=>{
+    if(!contacts)return;
+    const terms=normalize(search.value.trim()).split(/\s+/);
+    const matches=contacts.filter(item=>{
+     const text=normalize([item.organization,item.agent_name,item.phone,'+7'+item.phone.slice(1)].join(' '));
+     return terms.every(term=>text.includes(term));
+    });
+    results.replaceChildren();
+    if(!matches.length){results.textContent=contacts.length?'Агенты не найдены':'В частных заказах пока нет заполненных контактов';return}
+    for(const item of matches){
+     const card=document.createElement('button');card.type='button';card.className='secondary';
+     for(const [label,value] of [['От кого',item.organization],['Имя агента',item.agent_name],['Номер агента',item.phone]]){
+      const line=document.createElement('span');line.textContent=label+': '+value;card.append(line);
+     }
+     card.onclick=()=>{
+      generation++;clearTimeout(lookupTimer);phoneOptions.replaceChildren();
+      organizationInput.value=item.organization;
+      nameInput.value=filledName=item.agent_name;
+      phoneInput.value=filledPhone=item.phone;
+      markAutoName(false);markAutoPhone(false);
+      panel.hidden=true;toggle.setAttribute('aria-expanded','false');
+      toggle.focus({preventScroll:true});
+     };
+     const entry=document.createElement('article');
+     entry.className='dispatch-private-agent-entry';
+     const commentLabel=document.createElement('label');commentLabel.textContent='Комментарий';
+     const comment=document.createElement('input');comment.type='text';comment.maxLength=500;
+     comment.placeholder='Например: писать СМС';
+     comment.value=commentDrafts.get(item.key)??item.comment;
+     commentLabel.append(comment);
+     const save=document.createElement('button');save.type='button';save.className='secondary';
+     save.textContent='Сохранить';save.disabled=comment.value===item.comment;
+     comment.oninput=()=>{commentDrafts.set(item.key,comment.value);save.disabled=comment.value===item.comment};
+     comment.onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();save.click()}};
+     save.onclick=async()=>{
+      if(save.disabled)return;
+      save.disabled=true;comment.disabled=true;
+      try{
+       const saved=await api('/api/dispatch-board/private-agents/'+item.key+'/comment',{
+        method:'PUT',body:JSON.stringify({comment:comment.value})
+       });
+       item.comment=saved.comment;commentDrafts.delete(item.key);comment.value=item.comment;
+       if(live())toast('Комментарий сохранён');
+      }catch(error){if(live())toast(error.message)}
+      finally{comment.disabled=false;save.disabled=comment.value===item.comment}
+     };
+     entry.append(card,commentLabel,save);results.append(entry);
+    }
+   };
+   search.oninput=renderContacts;
+   toggle.onclick=async()=>{
+    panel.hidden=!panel.hidden;toggle.setAttribute('aria-expanded',String(!panel.hidden));
+    if(panel.hidden)return;
+    search.value=organizationInput.value.trim();
+    if(contacts){renderContacts();return}
+    results.textContent='Загрузка…';
+    try{
+     const response=await api('/api/dispatch-board/private-agents');
+     if(!live())return;
+     contacts=response.items;renderContacts();
+    }catch(error){if(live())results.textContent='Не удалось загрузить список. Закройте и откройте его снова.'}
+   };
+  }
   const lookupPrivateAgent=async()=>{
    clearTimeout(lookupTimer);
    const ticket=++generation,alias=organizationInput.value.trim()||nameInput.value.trim();
@@ -22189,3 +22317,17 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
  #dispatchCrew>.dispatch-leaders{grid-template-columns:repeat(4,minmax(0,1fr))}
 }
 </style></body>''', 1)
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '''<style>
+#dispatchEditor .dispatch-private-agents{grid-column:1/-1;min-width:0}
+#dispatchEditor .dispatch-private-agents>button{min-height:34px;padding:5px 10px}
+#dispatchEditor #dispatchPrivateAgentList{margin-top:4px}
+#dispatchEditor #dispatchPrivateAgentList>input{width:100%;font-size:16px}
+#dispatchEditor .dispatch-private-agent-results{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;max-height:220px;overflow:auto;overscroll-behavior:contain;margin-top:4px}
+#dispatchEditor .dispatch-private-agent-entry{display:grid;gap:4px;align-content:start;min-width:0;padding:5px;border:1px solid var(--line);border-radius:8px}
+#dispatchEditor .dispatch-private-agent-entry>button:first-child{text-align:left;padding:5px;font-size:11px;overflow-wrap:anywhere}
+#dispatchEditor .dispatch-private-agent-entry>label{min-width:0;font-size:11px}
+#dispatchEditor .dispatch-private-agent-entry>button:last-child{padding:4px;font-size:11px}
+#dispatchEditor .dispatch-private-agent-results span{display:block}
+</style></body>''',1)
