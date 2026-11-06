@@ -15631,7 +15631,7 @@ body:has(#modal:not(.hidden) #dispatchGbuImport){overflow:hidden}
 .dispatch-blank{border-style:dashed}.dispatch-blank .dispatch-card-main{grid-template-rows:16px 1fr;height:100%}.dispatch-blank p{align-self:center;color:var(--muted);font-size:11px}.dispatch-blank footer{justify-content:flex-end}.dispatch-blank [data-plan-delete-blank]{width:26px!important;border:1px solid var(--line);border-radius:6px;text-align:center;font-size:15px}
 .dispatch-send{width:100%;margin:8px 0;padding:10px}.dispatch-free{border:1px solid var(--line);border-radius:12px;padding:9px;font-size:12px}.dispatch-free details{padding:5px 0}.dispatch-free summary{cursor:pointer}.dispatch-free p{font-size:11px;margin:4px 0}
 .dispatch-form{display:grid;gap:8px}.dispatch-form label{display:grid;gap:3px;font-size:12px}.dispatch-form input,.dispatch-form select{width:100%;min-width:0;box-sizing:border-box;font-size:15px;padding:9px}.dispatch-times{display:grid;grid-template-columns:1fr 1fr;gap:7px}.dispatch-form small{font-size:11px;color:var(--muted)}
-body:has(#modal:not(.hidden) #dispatchEditor){overflow:hidden}
+body:has(#modal:not(.hidden) #dispatchEditor) #modalBackdrop{touch-action:none}
 #modal:has(#dispatchEditor){top:10px;top:max(10px,env(safe-area-inset-top));max-height:calc(100vh - 20px);max-height:calc(100dvh - max(10px,env(safe-area-inset-top)) - 10px);padding:10px 12px;box-sizing:border-box;overflow:auto;overscroll-behavior:contain}
 #modal:has(#dispatchEditor)>.modal-head{position:relative;top:auto;min-height:32px;margin:0 0 5px;gap:6px}
 #modal:has(#dispatchEditor)>.modal-head::before{display:none}
@@ -17465,7 +17465,10 @@ def private_intake_order_notice(db,order,notice,revision,action):
     # Manual app edits may notify the assigned leader, but never the order inbox chat.
     recipients=set()
     recipients.update(a.employee.tg_id for a in dispatch_assignments(db,order)
-        if a.role=='brigadier' and a.employee and a.employee.tg_id)
+        if a.role=='brigadier' and a.employee and a.employee.tg_id
+        and (action!='time' or dispatch_original_order_delivered(
+            db, order.id, order.work_date, a.employee.tg_id)))
+    if not recipients:return
     value=f"Частный №{number} · {order.work_date.strftime('%d.%m')} · {order.agent_name}\n{notice}"
     db.add(PrivateIntakeEvent(key=key,payload=json.dumps({'result':{'ok':True},'deliveries':[
         {'status':'pending','method':'sendMessage','data':{'chat_id':chat,'text':escape(value),'parse_mode':'HTML'}}
@@ -17694,6 +17697,8 @@ function installDispatchEditorViewport(form){
  update();
  disposeDispatchEditorViewport=()=>{
   disposed=true;cancelAnimationFrame(frame);
+  const focused=document.activeElement;
+  if(form.contains(focused))focused.blur();
   viewport?.removeEventListener('resize',schedule);
   window.removeEventListener('resize',schedule);form.removeEventListener('focusin',schedule);
   modal.classList.remove('order-editor-compact');
@@ -22095,3 +22100,74 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '''
  display:none!important;
 }
 </style></body>''',1)
+
+
+def _finance_bottom_navigation_html(html):
+    screens = (
+        '#personalMonth, #cashTableBody, #gbuPayrollMonth, '
+        '#privateCashBack, #kickbackBack, #gbuEarnBack'
+    )
+    anchor = "  roleNavigationActive=target;updateRoleNavigation();"
+    assert html.count(anchor) == 1
+    html = html.replace(anchor, f"""  const modal=qs('#modal');
+  if(modal.matches('#modal:not(.hidden):has({screens})')){{
+    if(modal.financeNavigationLeave&&!modal.financeNavigationLeave())return;
+    modal.returnToTable=null;
+    closeModal();
+  }}
+""" + anchor, 1)
+    anchor = "qs('#modal').returnToTable=null;"
+    start = html.index('function showModal(title, body) {')
+    end = html.index('\n', start)
+    section = html[start:end].replace(anchor, anchor + "qs('#modal').financeNavigationLeave=null;", 1)
+    assert section != html[start:end]
+    html = html[:start] + section + html[end:]
+    for button in ('privateCashBack', 'kickbackBack', 'gbuEarnBack'):
+        start = html.index(" qs('#" + button + "').onclick=()=>{if(!busy&&(!dirty||confirm(")
+        end = html.index('\n', start)
+        html = html[:start] + """
+ const canLeave=()=>!busy&&(!dirty||confirm('Выйти без сохранения изменений?'));
+ qs('#modal').financeNavigationLeave=canLeave;
+""" + html[start:end].replace(
+            "!busy&&(!dirty||confirm('Выйти без сохранения изменений?'))", 'canLeave()', 1
+        ) + html[end:]
+    return html.replace('</body>', f'''<style>
+body:has(#modal:not(.hidden):has({screens})) #roleNavigation{{z-index:71}}
+body:has(#modal:not(.hidden):has({screens})) #modalBackdrop{{bottom:calc(64px + var(--safe-bottom))}}
+body.role-navigation-enabled #modal:not(.hidden):has({screens}){{
+ top:8px;
+ max-height:calc(100dvh - 80px - var(--safe-bottom));
+}}
+</style></body>''', 1)
+
+
+INLINE_INDEX_HTML = _finance_bottom_navigation_html(INLINE_INDEX_HTML)
+
+
+# Keep the first step compact and the confirmation outside the candidate scroll area.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "step===1?'Далее: сотрудники ›':'Назначить состав'",
+    "step===1?'Подтвердить бригадира ›':'Назначить состав'",
+    1,
+).replace('</body>', '''
+<style>
+#modal:has(#dispatchCrew>.dispatch-leaders){display:flex;flex-direction:column;overflow:hidden}
+#modal:has(#dispatchCrew>.dispatch-leaders)>.modal-head{flex:none}
+#dispatchCrew:has(>.dispatch-leaders){display:flex;flex-direction:column;flex:1;min-height:0}
+#dispatchCrew:has(>.dispatch-leaders)>:not(.dispatch-leaders){flex:none}
+#dispatchCrew>.dispatch-leaders{
+ grid-template-columns:repeat(3,minmax(0,1fr));gap:3px;
+ min-height:0;overflow:auto;overscroll-behavior:contain;align-content:start;
+}
+#dispatchCrew>.dispatch-leaders .dispatch-choice{padding:3px;gap:1px}
+#dispatchCrew>.dispatch-leaders .dispatch-choice small{margin-top:0}
+#dispatchCrew>.dispatch-leaders .dispatch-choice>button{min-height:21px;margin:0;padding:1px}
+#dispatchCrew:has(>.dispatch-leaders)>.dispatch-copy-crew{gap:4px;margin:3px 0;padding:4px}
+#dispatchCrew:has(>.dispatch-leaders)>.dispatch-copy-crew label{min-width:0;gap:2px;font-size:10px}
+#dispatchCrew:has(>.dispatch-leaders)>.dispatch-copy-crew :is(select,button){min-height:28px;font-size:11px}
+#dispatchCrew:has(>.dispatch-leaders)>[data-plan-selected]{display:none}
+#dispatchCrew:has(>.dispatch-leaders)>[data-plan-next]{min-height:40px}
+@media(min-width:500px){
+ #dispatchCrew>.dispatch-leaders{grid-template-columns:repeat(4,minmax(0,1fr))}
+}
+</style></body>''', 1)
