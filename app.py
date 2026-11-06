@@ -13949,6 +13949,7 @@ class DispatchPlanInput(BaseModel):
     agent_name: StrictStr = Field(default='', max_length=200)
     agent_phone: StrictStr = Field(default='', max_length=50)
     agent_phone_auto: StrictBool = False
+    agent_contact_preference: StrictStr | None = Field(default=None, max_length=500)
     category: Literal['standard', 'vip', 'elite', 'carryout'] | None = None
     team_size: StrictInt | None = Field(default=None, ge=2, le=6)
     deceased_name: StrictStr = Field(default='', max_length=100)
@@ -14210,6 +14211,7 @@ def dispatch_order_data(db, order, number):
     data = _order_dict(order, db)
     plan = db.get(DispatchPlan, order.id)
     meta = json.loads(plan.payload) if plan else {}
+    data['agent_contact_preference'] = meta.get('agent_contact_preference', '') if order.source == 'private' else ''
     data['agent_phone_auto'] = bool(meta.get('agent_phone_auto') and brigadier_phone8(meta['agent_phone_auto'])==data['agent_phone'])
     data['source_messages'] = meta.get('source_messages',[]) if order.source=='private' else []
     data['is_draft'] = order.status == 'draft'
@@ -14400,13 +14402,19 @@ def private_agent_unique_phone(phones):
 def private_agent_phone_candidates(db, name, exclude_order_id=None):
     key=private_agent_phone_key(name)
     if not key or key in {'агент','гбу','частный','частные','без агента'}:return []
+    overrides = private_agent_overrides(db)
+    managed = {row.phone for row in overrides.values()
+               if not row.deleted and private_agent_phone_key(row.organization) == key}
+    if managed:
+        return sorted(managed)
+    suppressed = private_agent_suppressed_keys(overrides)
     phones=[]
     for full_name,phone in db.execute(select(Agent.full_name,Agent.phone).where(Agent.active.is_(True))):
         if private_agent_phone_key(full_name)==key:phones.append(phone)
     for oid,organization,agent_name,phone in db.execute(select(
             Order.id,Order.organization,Order.agent_name,Order.agent_phone).where(
                 Order.source=='private',Order.agent_phone!='',Order.status!='cancelled')):
-        if oid==exclude_order_id:continue
+        if oid==exclude_order_id or private_agent_contact_key(organization,agent_name,phone) in suppressed:continue
         # Prefer the operator's own alias rather than a common first name.
         if key in {private_agent_phone_key(organization),private_agent_phone_key(agent_name)}:
             phones.append(phone)
@@ -14415,6 +14423,76 @@ def private_agent_phone_candidates(db, name, exclude_order_id=None):
 
 def private_agent_phone_lookup(db, name, exclude_order_id=None):
     return private_agent_unique_phone(private_agent_phone_candidates(db,name,exclude_order_id))
+
+
+class PrivateAgentOverride(Base):
+    __tablename__ = 'private_agent_overrides'
+    contact_key = Column(String(64), primary_key=True)
+    organization = Column(String(200), nullable=False)
+    agent_name = Column(String(200), nullable=False)
+    phone = Column(String(11), nullable=False)
+    deleted = Column(Boolean, nullable=False)
+
+
+class PrivateAgentEditInput(BaseModel):
+    organization: str = Field(max_length=200)
+    agent_name: str = Field(max_length=200)
+    phone: str = Field(max_length=40)
+    comment: str = Field(max_length=500)
+
+
+def private_agent_contact_key(organization, name, phone):
+    return dispatch_hash((private_agent_phone_key(organization), private_agent_phone_key(name),
+                          private_agent_phone_number(phone)))
+
+
+def private_agent_overrides(db):
+    return {row.contact_key: row for row in db.scalars(select(PrivateAgentOverride))}
+
+
+def private_agent_suppressed_keys(overrides):
+    return set(overrides) | {private_agent_contact_key(row.organization, row.agent_name, row.phone)
+                             for row in overrides.values() if row.phone}
+
+
+
+@app.put('/api/dispatch-board/private-agents/{contact_key}')
+def edit_private_agent(contact_key: str, data: PrivateAgentEditInput,
+                       db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    if not _is_owner(db, user.id):
+        raise HTTPException(403, 'Справочник частных агентов доступен владельцу')
+    if not re.fullmatch(r'[0-9a-f]{64}', contact_key):
+        raise HTTPException(422, 'Неверный ключ контакта')
+    alias, name, phone = data.organization.strip(), data.agent_name.strip(), private_agent_phone_number(data.phone)
+    if not private_agent_phone_key(alias) or not private_agent_phone_key(name) or not phone:
+        raise HTTPException(422, 'Укажите «От кого», имя и номер агента')
+    save_private_agent_override(db, contact_key, alias, name, phone, False)
+    return update_private_agent_comment(contact_key, PrivateAgentCommentInput(comment=data.comment), db, user)
+
+
+@app.delete('/api/dispatch-board/private-agents/{contact_key}')
+def delete_private_agent(contact_key: str, db: Session = Depends(get_db),
+                         user: TelegramUser = Depends(require_app_user)):
+    if not _is_owner(db, user.id):
+        raise HTTPException(403, 'Справочник частных агентов доступен владельцу')
+    if not re.fullmatch(r'[0-9a-f]{64}', contact_key):
+        raise HTTPException(422, 'Неверный ключ контакта')
+    row = db.get(PrivateAgentOverride, contact_key)
+    if row:
+        row.deleted = True
+    else:
+        save_private_agent_override(db, contact_key, '', '', '', True)
+    db.commit()
+    return {'ok': True}
+
+
+def save_private_agent_override(db, key, alias, name, phone, deleted):
+    db.execute(text("""
+        INSERT INTO private_agent_overrides (contact_key, organization, agent_name, phone, deleted)
+        VALUES (:key, :alias, :name, :phone, :deleted)
+        ON CONFLICT (contact_key) DO UPDATE SET organization=excluded.organization,
+            agent_name=excluded.agent_name, phone=excluded.phone, deleted=excluded.deleted
+    """), dict(key=key, alias=alias, name=name, phone=phone, deleted=deleted))
 
 
 class PrivateAgentComment(Base):
@@ -14464,10 +14542,21 @@ def dispatch_private_agents(db: Session = Depends(get_db), user: TelegramUser = 
             'organization': alias, 'agent_name': name, 'phone': phone,
         })
     comments = dict(db.execute(select(PrivateAgentComment.contact_key, PrivateAgentComment.comment)).all())
-    items = []
-    for key in sorted(contacts):
-        contact_key = dispatch_hash(key)
-        items.append({**contacts[key], 'key': contact_key, 'comment': comments.get(contact_key, '')})
+    items = {dispatch_hash(key): contact for key, contact in contacts.items()}
+    overrides = private_agent_overrides(db)
+    for key in overrides:
+        items.pop(key, None)
+    suppressed = set(overrides)
+    for key, row in overrides.items():
+        if row.phone:
+            suppressed.add(private_agent_contact_key(row.organization, row.agent_name, row.phone))
+    for key in suppressed:
+        items.pop(key, None)
+    for key, row in overrides.items():
+        if not row.deleted:
+            items[key] = {'organization': row.organization, 'agent_name': row.agent_name, 'phone': row.phone}
+    items = [{**item, 'key': key, 'comment': comments.get(key, '')}
+             for key, item in sorted(items.items(), key=lambda pair: pair[1]['organization'].casefold())]
     return JSONResponse({'items': items},
                         headers={'Cache-Control': 'private, no-store'})
 
@@ -14548,6 +14637,7 @@ def dispatch_create(data: DispatchPlanInput, db: Session = Depends(get_db), user
     db.add(order); db.flush()
     db.add(DispatchPlan(order_id=order.id, request_key=data.request_key, payload=json.dumps({
         'agent_phone_auto':order.agent_phone if data.agent_phone_auto or not data.agent_phone.strip() else '',
+        'agent_contact_preference': (data.agent_contact_preference or '').strip() if data.source == 'private' else '',
         'creation_hash':dispatch_hash(data.model_dump(exclude={'revision'})),
         'slot_number':data.slot_number,
         'missing_fields':missing,
@@ -14684,6 +14774,8 @@ def dispatch_update(order_id: int, data: DispatchPlanInput, db: Session = Depend
         plan=DispatchPlan(order_id=order.id,request_key=secrets.token_hex(16),payload='{}');db.add(plan)
     meta=json.loads(plan.payload);meta['route_fields']=route_fields;meta['missing_fields']=missing
     meta['agent_phone_auto']=order.agent_phone if data.agent_phone_auto or not data.agent_phone.strip() else ''
+    if order.source == 'private' and data.agent_contact_preference is not None:
+        meta['agent_contact_preference'] = data.agent_contact_preference.strip()
     meta['church_required']=dispatch_church_required(data.church_required, data.church)
     meta['destination_type']=dispatch_destination_type(data.destination_type or meta.get('destination_type'), data.cemetery)
     plan.payload=json.dumps(meta,ensure_ascii=False)
@@ -14984,6 +15076,8 @@ def dispatch_message(order, number):
         f'Выдача: {order["issue_time"]}',
         f'Быть: {order["arrival_time"] or "—"}',
         '', 'Маршрут:']
+    if order.get('agent_contact_preference'):
+        lines.insert(3, 'Пожелания по связи: ' + escape(order['agent_contact_preference']))
     fields=order.get('route_fields') or {}
     destination_label='Кремация' if order.get('destination_type') == 'cremation' else 'Кладбище'
     for key,label in [('morgue','Морг'),('church','Храм'),('cemetery',destination_label)]:
@@ -17320,7 +17414,8 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
     edits=[]
     if data.action=='start':
         if not data.agent_name.strip():raise HTTPException(422,'Введите агента')
-        resolved_agent_phone=brigadier_phone8(data.agent_phone) or private_agent_phone_lookup(db,data.agent_name)
+        resolved_agent_name, resolved_agent_phone = dispatch_private_agent_contact(
+            db, data.agent_name, '', brigadier_phone8(data.agent_phone))
         day=datetime.now(MOSCOW).date()+timedelta(days=1);dispatch_day_lock(db,day)
         rows=list(db.scalars(select(Order).where(Order.work_date==day,Order.source=='private',Order.status!='cancelled').order_by(Order.id)))
         mapping,_=dispatch_slot_layout(db,day,rows)
@@ -17353,7 +17448,7 @@ async def private_intake(data:PrivateIntakeInput,db:Session=Depends(get_db)):
         else:
             order=Order(public_id=_public_id(),source='private',work_date=day,issue_time=time(0,0),arrival_time=None,
                 deceased_name='',route='',category='',team_size=0,organization=data.agent_name.strip(),notes='',kickback_rub=0,
-                agent_name=data.agent_name.strip(),agent_phone=resolved_agent_phone,other_agent_phone='',status='draft')
+                agent_name=resolved_agent_name,agent_phone=resolved_agent_phone,other_agent_phone='',status='draft')
             db.add(order);db.flush()
             db.add(DispatchPlan(order_id=order.id,request_key=dispatch_hash({'intake':key})[:32],payload=json.dumps({
                 'slot_number':slot_number,'chat_number':number,'private_intake':True,'source_messages':[],
@@ -17859,7 +17954,8 @@ def _dispatch_pair_caption_html(html):
     if html.count(old)!=1:raise ValueError('Dispatch pair button anchor missing')
     html=html.replace(old,new,1)
     return html.replace('</head>',r'''<style>
-#dispatchActionsView .dispatch-mini .dispatch-pair-corner.is-paired{height:50px;min-height:50px;flex-direction:column;gap:2px;padding:3px 0;white-space:nowrap}
+#dispatchActionsView .dispatch-mini .dispatch-pair-corner.is-paired{display:grid;grid-template-columns:auto auto;align-content:center;justify-content:center;gap:0 1px;padding:0;white-space:nowrap}
+#dispatchActionsView .dispatch-pair-source{grid-column:1/-1;text-align:center}
 #dispatchActionsView .dispatch-pair-plus{font-size:13px;line-height:12px}
 #dispatchActionsView .dispatch-pair-number{font-size:12px;line-height:13px}
 #dispatchActionsView .dispatch-pair-source{font-size:9px;line-height:11px}
@@ -21009,8 +21105,7 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<style id="dispatch
 #dispatchActionsView .dispatch-sticky-panel>.dispatch-status{font-size:11px;line-height:1.25;margin:3px 0;white-space:pre-line;max-height:64px;overflow:auto}
 #dispatchActionsView .dispatch-sticky-panel>.dispatch-status:empty{display:none}
 #dispatchActionsView .dispatch-detailed .dispatch-card-phone,#dispatchActionsView .dispatch-detailed .dispatch-card-meta,#dispatchActionsView .dispatch-detailed .dispatch-order-name{padding-right:38px;box-sizing:border-box}
-#dispatchActionsView .dispatch-detailed .dispatch-order-name{min-height:36px}
-#dispatchActionsView .dispatch-detailed:has(>.dispatch-pair-corner.is-paired) .dispatch-order-name{min-height:52px}
+#dispatchActionsView .dispatch-detailed .dispatch-order-name{min-height:0}
 #dispatchActionsView .dispatch-send-result:empty{display:none}
 #dispatchActionsView .dispatch-send-result{margin:0;font-size:10px;line-height:1.3;white-space:normal;overflow-wrap:anywhere}
 </style><script>
@@ -21049,6 +21144,7 @@ function dispatchOrderCopyText(fields,order,source,arrival){
  const noun=n%10===1&&n%100!==11?'человек':n%10>=2&&n%10<=4&&(n%100<12||n%100>14)?'человека':'человек';
  const people=[order?.brigadier,...(order?.members||[])].filter(Boolean);
  const lines=[`Агент: ${clean(fields.agent_name)||'—'}`,`Номер: ${phone}`,`Заказ:❗️${category}❗️ ${kind}`,`Ум: ${surname}`,`Выдача в ${issue}`,`Быть в ${being||'—'}`,route('Морг',fields.morgue),fields.church_required==='yes'?route('Храм',fields.church):'- Храм: нет',route(fields.destination_type==='cremation'?'Крематорий':'Кладбище',fields.cemetery),`${n||'—'} ${noun}`,'Едут:'];
+ if(clean(fields.agent_contact_preference))lines.splice(2,0,'Пожелания по связи: '+clean(fields.agent_contact_preference));
  lines.push(...people.map((person,i)=>`${i+1}. ${dispatchPerson(person)}${person.height_cm?' '+person.height_cm:''}`));
  if(Number(order?.external_member_count)>0)lines.push(`Сторонняя организация · ${Number(order.external_member_count)} чел.`);
  if(!people.length&&!Number(order?.external_member_count))lines.push('Состав не назначен');
@@ -21622,6 +21718,12 @@ def private_agent_history_name(db, alias, phone='', exclude_order_id=None):
     number=private_agent_phone_number(phone)
     if not key or key in {'агент','гбу','частный','частные','без агента'}:
         return ''
+    overrides = private_agent_overrides(db)
+    managed = {row.agent_name for row in overrides.values() if not row.deleted
+               and private_agent_phone_key(row.organization) == key and (not number or row.phone == number)}
+    if managed:
+        return next(iter(managed)) if len(managed) == 1 else ''
+    suppressed = private_agent_suppressed_keys(overrides)
     personal_alias = re.fullmatch(
         r'([а-яё][а-яё-]{1,39})\s+(?:\d+(?:\s+.+)?|мск)',
         ' '.join(str(alias or '').split()), re.IGNORECASE)
@@ -21629,7 +21731,8 @@ def private_agent_history_name(db, alias, phone='', exclude_order_id=None):
     has_saved_name=False
     for oid,organization,name,saved_phone in db.execute(select(Order.id,Order.organization,Order.agent_name,Order.agent_phone).where(
             Order.source=='private',Order.status!='cancelled',Order.agent_name!='')):
-        if oid==exclude_order_id or private_agent_phone_key(str(organization or '').strip() or name)!=key:
+        if (oid==exclude_order_id or private_agent_contact_key(organization,name,saved_phone) in suppressed
+                or private_agent_phone_key(str(organization or '').strip() or name)!=key):
             continue
         if personal_alias and private_agent_phone_key(name)==key:
             continue  # Older bot bookings sometimes stored the alias as the contact name.
@@ -21653,6 +21756,14 @@ def _private_agent_name_autofill_html(html):
     html=html[:start]+r''' if(source==='private'&&!order?.approved){
   let generation=0,filledPhone='',filledName='';
   const nameInput=form.elements.agent_name,organizationInput=form.elements.organization;
+  const preferenceLabel=document.createElement('label');
+  preferenceLabel.textContent='Пожелания по связи';
+  const preference=document.createElement('input');
+  preference.name='agent_contact_preference';preference.maxLength=500;
+  preference.value=order?.agent_contact_preference||'';
+  preference.placeholder='Например: писать в Telegram';
+  preferenceLabel.append(preference);
+  organizationInput.closest('label').after(preferenceLabel);
   const phoneOptions=document.createElement('datalist');
   phoneOptions.id='dispatch-private-agent-phones';phoneInput.setAttribute('list',phoneOptions.id);phoneInput.after(phoneOptions);
   const nameLabel=nameInput.closest('label');
@@ -21663,7 +21774,7 @@ def _private_agent_name_autofill_html(html):
    const directory=document.createElement('section');
    directory.className='dispatch-private-agents';
    directory.innerHTML='<button type="button" class="secondary" aria-expanded="false" aria-controls="dispatchPrivateAgentList">Частные агенты</button><div id="dispatchPrivateAgentList" hidden><input type="search" aria-label="Поиск агента" placeholder="От кого, имя или номер"><div class="dispatch-private-agent-results"></div></div>';
-   organizationInput.closest('label').after(directory);
+   preferenceLabel.after(directory);
    const toggle=directory.querySelector('button'),panel=directory.querySelector('#dispatchPrivateAgentList');
    const search=panel.querySelector('input'),results=panel.querySelector('.dispatch-private-agent-results');
    const normalize=value=>value.toLowerCase().replaceAll('ё','е');
@@ -21688,13 +21799,14 @@ def _private_agent_name_autofill_html(html):
       organizationInput.value=item.organization;
       nameInput.value=filledName=item.agent_name;
       phoneInput.value=filledPhone=item.phone;
+      preference.value=item.comment||'';
       markAutoName(false);markAutoPhone(false);
       panel.hidden=true;toggle.setAttribute('aria-expanded','false');
       toggle.focus({preventScroll:true});
      };
      const entry=document.createElement('article');
      entry.className='dispatch-private-agent-entry';
-     const commentLabel=document.createElement('label');commentLabel.textContent='Комментарий';
+     const commentLabel=document.createElement('label');commentLabel.textContent='Пожелания по связи';
      const comment=document.createElement('input');comment.type='text';comment.maxLength=500;
      comment.placeholder='Например: писать СМС';
      comment.value=commentDrafts.get(item.key)??item.comment;
@@ -22331,3 +22443,74 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '''<style>
 #dispatchEditor .dispatch-private-agent-entry>button:last-child{padding:4px;font-size:11px}
 #dispatchEditor .dispatch-private-agent-results span{display:block}
 </style></body>''',1)
+
+
+def _private_agent_management_html(html):
+    anchor = " qs('[data-plan-import]',root).onclick=()=>openDispatchGbuImport();"
+    assert html.count(anchor) == 1
+    html = html.replace(anchor, """ if(state.bootstrap?.is_owner===true){
+  const button=document.createElement('button');
+  button.type='button';button.textContent='Частные агенты';
+  button.onclick=openPrivateAgentManagement;
+  toolbar.prepend(button);toolbar.classList.add('dispatch-private-agent-toolbar');
+ }
+""" + anchor, 1)
+    return html.replace('</body>', r'''<style>
+#dispatchActionsView .dispatch-tools.dispatch-private-agent-toolbar{grid-template-columns:repeat(3,minmax(0,1fr))}
+#privateAgentManagement input{width:100%;font-size:16px}
+#privateAgentManagement article{display:grid;gap:6px;padding:9px;margin:7px 0;border:1px solid var(--line);border-radius:10px}
+#privateAgentManagement article label{display:grid;gap:2px}
+#privateAgentManagement .private-agent-actions{display:flex;gap:6px;flex-wrap:wrap}
+</style><script>
+async function openPrivateAgentManagement(){
+ showModal('Частные агенты','<section id="privateAgentManagement"><input class="search" type="search" aria-label="Поиск агента" placeholder="От кого, имя или номер"><div data-agent-list>Загрузка…</div></section>');
+ const root=qs('#privateAgentManagement'),list=qs('[data-agent-list]',root),search=qs('input',root);
+ const live=()=>root.isConnected&&!qs('#modal').classList.contains('hidden');
+ let items=[],editing=null;
+ const render=()=>{
+  const query=search.value.trim().toLowerCase().replaceAll('ё','е');
+  list.replaceChildren();
+  for(const item of items){
+   if(item.key!==editing&&![item.organization,item.agent_name,item.phone].join(' ').toLowerCase().replaceAll('ё','е').includes(query))continue;
+   const card=document.createElement('article');
+   const fields=[['organization','От кого'],['agent_name','Имя агента'],['phone','Номер агента'],['comment','Пожелания по связи']];
+   const edit=item.key===editing;
+   card.innerHTML=fields.map(([key,label])=>edit
+    ?`<label>${label}<input name="${key}" value="${esc(item[key])}" ${key==='phone'?'type="tel"':''}></label>`
+    :`<div><b>${label}:</b> ${esc(item[key]||'—')}</div>`).join('')
+    +`<div class="private-agent-actions"><button type="button" data-agent-edit>${edit?'Сохранить':'Редактировать'}</button><button type="button" data-agent-remove>${edit?'Отмена':'Удалить'}</button></div>`;
+   const editButton=qs('[data-agent-edit]',card),remove=qs('[data-agent-remove]',card);
+   const write=async(method,values)=>{
+    editButton.disabled=remove.disabled=true;search.disabled=true;
+    try{
+     await api('/api/dispatch-board/private-agents/'+item.key,{method,...(values?{body:JSON.stringify(values)}:{})});
+     if(!live())return;
+     if(values)Object.assign(item,values);
+     else items=items.filter(contact=>contact.key!==item.key);
+     editing=null;render();toast(values?'Контакт сохранён':'Контакт удалён');
+    }catch(error){if(live())toast(error.message)}
+    finally{editButton.disabled=remove.disabled=false;search.disabled=false}
+   };
+   editButton.onclick=()=>{
+    if(!edit){editing=item.key;render();return}
+    const values=Object.fromEntries(fields.map(([key])=>[key,qs('[name="'+key+'"]',card).value.trim()]));
+    write('PUT',values);
+   };
+   remove.onclick=()=>{
+    if(edit){editing=null;render();return}
+    if(confirm('Удалить контакт из справочника? Старые заказы сохранятся.'))write('DELETE');
+   };
+   list.append(card);
+  }
+  if(!list.children.length)list.textContent='Контакты не найдены';
+ };
+ search.oninput=()=>{if(!editing)render()};
+ try{
+  const data=await api('/api/dispatch-board/private-agents');
+  if(live()){items=data.items;render()}
+ }catch(error){if(live())list.textContent=error.message}
+}
+</script></body>''', 1)
+
+
+INLINE_INDEX_HTML = _private_agent_management_html(INLINE_INDEX_HTML)
