@@ -21778,7 +21778,59 @@ def _private_agent_name_autofill_html(html):
    const toggle=directory.querySelector('button'),panel=directory.querySelector('#dispatchPrivateAgentList');
    const search=panel.querySelector('input'),results=panel.querySelector('.dispatch-private-agent-results');
    const normalize=value=>value.toLowerCase().replaceAll('ё','е');
-   let contacts=null;
+   let contacts=null,contactsRequest;
+   const loadContacts=()=>{
+    contactsRequest??=api('/api/dispatch-board/private-agents')
+     .then(response=>contacts=response.items)
+     .catch(error=>{contactsRequest=null;throw error});
+    return contactsRequest;
+   };
+   const suggestions=document.createElement('div');
+   suggestions.className='dispatch-private-agent-suggestions';
+   suggestions.setAttribute('aria-label','Подходящие агенты');
+   suggestions.hidden=true;
+   directory.before(suggestions);
+   let suggestionGeneration=0;
+   const hideSuggestions=()=>{suggestionGeneration++;suggestions.hidden=true;suggestions.replaceChildren()};
+   const selectContact=item=>{
+    generation++;clearTimeout(lookupTimer);phoneOptions.replaceChildren();
+    organizationInput.value=item.organization;
+    nameInput.value=filledName=item.agent_name;
+    phoneInput.value=filledPhone=item.phone;
+    preference.value=item.comment||'';
+    markAutoName(false);markAutoPhone(false);
+    hideSuggestions();
+   };
+   const suggestContacts=async()=>{
+    hideSuggestions();
+    const ticket=suggestionGeneration,query=normalize(organizationInput.value.trim());
+    if((query.match(/\p{L}/gu)||[]).length<2||!panel.hidden)return;
+    try{await loadContacts()}catch(error){return}
+    if(!live()||ticket!==suggestionGeneration||!panel.hidden||document.activeElement!==organizationInput
+      ||query!==normalize(organizationInput.value.trim()))return;
+    const terms=query.split(/\s+/);
+    const matches=contacts.filter(item=>{
+     const label=normalize(item.organization+' '+item.agent_name);
+     const words=label.split(/[^\p{L}\p{N}]+/u);
+     return label.includes(query)||terms.every(term=>words.some(word=>word.startsWith(term)));
+    });
+    for(const item of matches.slice(0,6)){
+     const card=document.createElement('button');
+     card.type='button';card.className='secondary';
+     const title=document.createElement('strong');
+     title.textContent=item.organization;
+     const details=document.createElement('span');
+     details.textContent=[item.agent_name,item.phone].filter(Boolean).join(' · ');
+     card.append(title,details);
+     card.onclick=()=>{selectContact(item);organizationInput.focus({preventScroll:true})};
+     suggestions.append(card);
+    }
+    suggestions.hidden=!suggestions.children.length;
+   };
+   organizationInput.addEventListener('input',suggestContacts);
+   organizationInput.addEventListener('keydown',event=>{
+    if(event.key==='Escape'&&!suggestions.hidden){event.preventDefault();event.stopPropagation();hideSuggestions()}
+   });
    const commentDrafts=new Map();
    const renderContacts=()=>{
     if(!contacts)return;
@@ -21795,12 +21847,7 @@ def _private_agent_name_autofill_html(html):
       const line=document.createElement('span');line.textContent=label+': '+value;card.append(line);
      }
      card.onclick=()=>{
-      generation++;clearTimeout(lookupTimer);phoneOptions.replaceChildren();
-      organizationInput.value=item.organization;
-      nameInput.value=filledName=item.agent_name;
-      phoneInput.value=filledPhone=item.phone;
-      preference.value=item.comment||'';
-      markAutoName(false);markAutoPhone(false);
+      selectContact(item);
       panel.hidden=true;toggle.setAttribute('aria-expanded','false');
       toggle.focus({preventScroll:true});
      };
@@ -21834,13 +21881,13 @@ def _private_agent_name_autofill_html(html):
    toggle.onclick=async()=>{
     panel.hidden=!panel.hidden;toggle.setAttribute('aria-expanded',String(!panel.hidden));
     if(panel.hidden)return;
+    hideSuggestions();
     search.value=organizationInput.value.trim();
     if(contacts){renderContacts();return}
     results.textContent='Загрузка…';
     try{
-     const response=await api('/api/dispatch-board/private-agents');
-     if(!live())return;
-     contacts=response.items;renderContacts();
+     await loadContacts();
+     if(live())renderContacts();
     }catch(error){if(live())results.textContent='Не удалось загрузить список. Закройте и откройте его снова.'}
    };
   }
@@ -22433,6 +22480,14 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
 
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', '''<style>
 #dispatchEditor .dispatch-private-agents{grid-column:1/-1;min-width:0}
+#dispatchEditor .dispatch-private-agent-suggestions:not([hidden]){
+ display:grid;grid-column:1/-1;gap:4px;max-height:170px;overflow:auto;overscroll-behavior:contain
+}
+#dispatchEditor .dispatch-private-agent-suggestions>button{
+ display:grid;gap:2px;min-height:40px;padding:5px 8px;text-align:left;overflow-wrap:anywhere;font-size:13px
+}
+#dispatchEditor .dispatch-private-agent-suggestions>button span{font-size:12px}
+
 #dispatchEditor .dispatch-private-agents>button{min-height:34px;padding:5px 10px}
 #dispatchEditor #dispatchPrivateAgentList{margin-top:4px}
 #dispatchEditor #dispatchPrivateAgentList>input{width:100%;font-size:16px}
@@ -22471,6 +22526,11 @@ def _private_agent_management_html(html):
 }
 #privateAgentManagement article{display:grid;gap:4px;padding:6px;min-width:0;border:1px solid var(--line);border-radius:10px}
 #privateAgentManagement:not([data-editing]) article{font-size:13px;line-height:1.25;overflow-wrap:anywhere;grid-template-rows:repeat(3,auto) 1fr auto}
+@supports (grid-template-rows:subgrid){
+ #privateAgentManagement:not([data-editing]) article{
+  grid-row:span 5;grid-template-rows:subgrid;
+ }
+}
 #privateAgentManagement article label{display:grid;gap:2px}
 #privateAgentManagement .private-agent-actions{display:flex;gap:6px;flex-wrap:wrap}
 #privateAgentManagement:not([data-editing]) .private-agent-actions{align-items:stretch;gap:3px}
