@@ -3757,6 +3757,11 @@ def dispatch_elite_drafts(rows, work_date):
     return drafts
 
 
+def require_gbu_photo_owner(db, user):
+    if not _is_owner(db, user.id):
+        raise HTTPException(403, 'Импорт заказов ГБУ по фото доступен только владельцу')
+
+
 @app.post("/api/gbu/ocr")
 async def gbu_ocr(
     file: UploadFile = File(...),
@@ -3765,6 +3770,7 @@ async def gbu_ocr(
     user: TelegramUser = Depends(require_admin),
     import_category: str = Form('auto'),
 ):
+    require_gbu_photo_owner(db, user)
     try:
         datetime.strptime(work_date, "%Y-%m-%d")
     except ValueError as exc:
@@ -3825,6 +3831,7 @@ async def gbu_ocr(
 
 @app.post("/api/gbu/drafts")
 def create_gbu_drafts(items: list[GbuDraft], db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    require_gbu_photo_owner(db, user)
     created = []
     for item in items:
         order = _create_order(db, OrderCreate(source="gbu", **item.model_dump()))
@@ -14693,6 +14700,7 @@ def dispatch_import_route_fields(draft):
 
 @app.post('/api/dispatch-board/gbu-import')
 def dispatch_import_gbu(data: DispatchGbuImportInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    require_gbu_photo_owner(db, user)
     dispatch_guard(db, user)
     dispatch_day_lock(db, data.work_date)
     batch_hash=dispatch_hash(data.model_dump(exclude={'request_key'}))
@@ -22652,3 +22660,25 @@ async function openPrivateAgentManagement(){
 
 
 INLINE_INDEX_HTML = _private_agent_management_html(INLINE_INDEX_HTML)
+
+
+# Restrict photo import while retaining manual order entry for dispatchers.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    "toolbar.insertAdjacentHTML('beforeend','<button type=\"button\" data-plan-import>📷 Импорт ГБУ</button>');",
+    "if(state.bootstrap?.is_owner===true)toolbar.insertAdjacentHTML('beforeend','<button type=\"button\" data-plan-import>📷 Импорт ГБУ</button>');",
+    1,
+).replace(
+    " qs('[data-plan-import]',root).onclick=()=>openDispatchGbuImport();",
+    " const importButton=qs('[data-plan-import]',root);if(importButton)importButton.onclick=()=>openDispatchGbuImport();",
+    1,
+)
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    'async function openDispatchGbuImport(){',
+    "async function openDispatchGbuImport(){\n if(state.bootstrap?.is_owner!==true){toast('Импорт по фото доступен только владельцу');return}",
+    1,
+).replace(
+    'async function openGbuImport(){',
+    "async function openGbuImport(){\n if(state.bootstrap?.is_owner!==true){toast('Импорт по фото доступен только владельцу');return}",
+    1,
+)
