@@ -15173,7 +15173,7 @@ def dispatch_activate(data: DispatchActivationInput, db: Session = Depends(get_d
             or (item['revision']!=activation['revision'] and not crew_only_change)):
         raise HTTPException(409,'Заказ изменён. Требуется новое сообщение от диспетчера')
     values=intent['values']
-    if data.card is None:return {'ok':True,'values':values}
+    if data.card is None:return {'ok':True,'values':values,'photo_slot_requested':bool(plan_meta.get('photo_slot_requested'))}
     card=data.card
     if (card.tg_id!=data.tg_id or card.work_date!=order.work_date or card.source!=order.source
             or card.surname.strip().upper()!=values['surname']):
@@ -15385,6 +15385,14 @@ def dispatch_pending_order_valid(db,work_date,message):
 async def dispatch_deliver_messages(db, work_date, messages):
     # Each immutable target+text has a durable receipt, so changed/retried batches
     # never resend unaffected orders or group lists. Ambiguous delivery is not retried.
+    # Request group placeholders before delivering the private confirmations.
+    for message in messages:
+        if message.get('kind') == 'order':
+            plan = db.get(DispatchPlan, message['order_id'])
+            if plan:
+                meta = json.loads(plan.payload)
+                meta['photo_slot_requested'] = True
+                plan.payload = json.dumps(meta, ensure_ascii=False)
     receipts=[]
     for m in messages:
         key=dispatch_delivery_key(work_date,m)
