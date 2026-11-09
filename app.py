@@ -22754,6 +22754,8 @@ def dispatch_photo_slots(db: Session = Depends(get_db)):
         cancelled = order.status in {'cancelled', 'draft'}
         card = None
         linked_id = meta.get('number_card_id')
+        if type(linked_id) is not int and not cancelled:
+            card = dispatch_match_card(db, order)
         if type(linked_id) is int:
             card = db.get(NumberCardEvent, linked_id)
             if card and (card.work_date != order.work_date or card.source != order.source
@@ -22804,3 +22806,96 @@ def dispatch_recover_photo_slot_activations(db):
         job.lease_until = None
         db.flush()
         break
+
+
+@app.post('/api/owner/brigadier-cabinet/orders/{order_id}/activate')
+def cabinet_activate_assigned_order(order_id: int, db: Session = Depends(get_db),
+                                    user: TelegramUser = Depends(require_app_user)):
+    if not _can_use_owner_cabinet(db, user.id):
+        raise HTTPException(403, 'Кабинет недоступен')
+    order = db.get(Order, order_id)
+    if not order or order.status in {'cancelled', 'draft'}:
+        raise HTTPException(404, 'Заказ отменён или недоступен')
+    item = dispatch_order_data(db, order, 0)
+    if (item.get('brigadier') or {}).get('tg_id') != user.id:
+        raise HTTPException(403, 'Заказ назначен другому бригадиру')
+    if order.work_date < datetime.now(MOSCOW).date():
+        raise HTTPException(409, 'Дата заказа уже прошла')
+    card = dispatch_match_card(db, order)
+    if card:
+        return {'status': 'done', 'card_id': card.id}
+    # Use the original confirmation path: same access checks, revision and job id.
+    receipts = db.scalars(select(DispatchDelivery).where(
+        DispatchDelivery.work_date == order.work_date))
+    matches = []
+    for row in receipts:
+        saved = json.loads(row.payload or '{}')
+        if (saved.get('order_id') == order.id and saved.get('chat_id') == user.id
+                and saved.get('revision') == item['revision'] and saved.get('confirmable')
+                and saved.get('kind') in {'order', 'crew_change'} and saved.get('message_id')
+                and saved.get('status') in {'sent', 'sending', 'unknown'}):
+            matches.append((row, saved))
+    if not matches:
+        raise HTTPException(409, 'Заказ изменён. Диспетчер должен отправить актуальный заказ или замену состава')
+    plan = db.get(DispatchPlan, order.id)
+    notice_key = json.loads(plan.payload or '{}').get('crew_receipt', {}).get('notice_key') if plan else None
+    chosen = next(((row, saved) for row, saved in matches if row.fingerprint == notice_key), None)
+    row, saved = chosen or matches[-1]
+    job_id = dispatch_hash({'activation_order': item['id'], 'brigadier': user.id})
+    prior = db.get(CabinetCommand, job_id)
+    if prior and json.loads(prior.result or '{}').get('delivery_unknown'):
+        raise HTTPException(409, 'Результат публикации неизвестен. Диспетчер должен проверить карточку в группе')
+    dispatch_confirm_receipt(DispatchReceiptInput(receipt=row.fingerprint, tg_id=user.id,
+        message_id=saved['message_id']), db)
+    job = db.get(CabinetCommand, job_id)
+    if job.status in {'error', 'done'}:
+        raise HTTPException(409, 'Оформление требует проверки диспетчера: ' +
+            str(json.loads(job.result or '{}').get('error') or 'проверьте связь карточки с заказом'))
+    return {'id': job.id, 'status': job.status}
+
+
+# Pending assignments must open the same actionable workflow as published cards.
+def _cabinet_pending_workflow_html(html):
+    old = '<h3>ум: ${esc(order.deceased_name||\'Не указано\')}</h3><p>Выдача:'
+    new = '<button type="button" class="cabinet-order-open" data-cabinet-activate-order="${Number(order.id)}"><h3>ум: ${esc(order.deceased_name||\'Не указано\')}</h3></button><p>Выдача:'
+    if html.count(old) != 1:
+        raise RuntimeError('Pending cabinet title anchor missing')
+    html = html.replace(old, new, 1)
+    old = '<p>Заказ назначен вам. Оформление карточки ещё не завершено. Подтвердите получение в сообщении бота, если ещё не подтвердили.</p>'
+    new = '<button type="button" class="cabinet-primary" data-cabinet-activate-order="${Number(order.id)}">Открыть заказ и продолжить</button><p data-cabinet-activation-status="${Number(order.id)}" role="status"></p>'
+    if html.count(old) != 1:
+        raise RuntimeError('Pending cabinet action anchor missing')
+    html = html.replace(old, new, 1)
+    return html.replace('</body>', r'''<script>
+async function cabinetActivateAssignedOrder(button){
+ const orderId=Number(button.dataset.cabinetActivateOrder),uid=state.bootstrap?.user?.id;
+ const card=button.closest('.cabinet-order'),status=card.querySelector('[data-cabinet-activation-status]');
+ const buttons=card.querySelectorAll('[data-cabinet-activate-order]');
+ if(button.disabled)return;
+ buttons.forEach(b=>b.disabled=true);
+ status.textContent='Подтверждаем получение и открываем этапы заказа…';
+ try{
+  let result=await api('/api/owner/brigadier-cabinet/orders/'+orderId+'/activate',{method:'POST',body:'{}'});
+  for(let attempt=0;result.id&&['queued','running'].includes(result.status)&&attempt<30;attempt++){
+   await new Promise(resolve=>setTimeout(resolve,1000));
+   if(state.bootstrap?.user?.id!==uid)return;
+   result={...result,...await api('/api/owner/brigadier-cabinet/actions/'+result.id,{cache:'no-store'})};
+  }
+  if(state.bootstrap?.user?.id!==uid)return;
+  if(result.status==='error')throw Error(result.error||'Не удалось завершить оформление');
+  if(result.status!=='done')throw Error('Оформление продолжается. Нажмите ещё раз для проверки — новый заказ не отправится.');
+  ownerCabinetSignature='';await loadOwnerCabinet();
+  const current=(ownerCabinetData?.number_cards||[]).find(c=>Number(c.id)===Number(result.card_id)||c.report_key===result.report_key);
+  if(current){ownerCabinetSelectedCard=Number(current.id);renderOwnerCabinet(ownerCabinetData)}
+  else if(status.isConnected)status.textContent='Карточка сохраняется. Откройте кабинет ещё раз через несколько секунд.';
+ }catch(error){if(status.isConnected)status.textContent=error.message}
+ finally{buttons.forEach(b=>b.disabled=false)}
+}
+document.addEventListener('click',event=>{
+ const button=event.target.closest('[data-cabinet-activate-order]');
+ if(button)cabinetActivateAssignedOrder(button);
+});
+</script></body>''', 1)
+
+
+INLINE_INDEX_HTML = _cabinet_pending_workflow_html(INLINE_INDEX_HTML)
