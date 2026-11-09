@@ -8272,6 +8272,7 @@ def cabinet_command_status(request_id: str, db: Session = Depends(get_db), user:
 
 @app.post('/api/bot/cabinet/claim', dependencies=[Depends(_bot_key)])
 def cabinet_command_claim(db: Session = Depends(get_db)):
+    dispatch_recover_photo_slot_activations(db)
     now = datetime.utcnow()
     row = db.scalar(select(CabinetCommand).where(or_(CabinetCommand.status == 'queued',
         and_(CabinetCommand.status == 'running', CabinetCommand.lease_until < now)))
@@ -22761,3 +22762,39 @@ def dispatch_photo_slots(db: Session = Depends(get_db)):
                       'work_date': card.work_date.isoformat()} if card else None),
         })
     return {'items': items}
+
+
+def dispatch_recover_photo_slot_activations(db):
+    """Retry once only the known pre-publication failure after receipt was saved."""
+    today = datetime.now(MOSCOW).date()
+    candidates = db.scalars(select(CabinetCommand).where(
+        CabinetCommand.status == 'error',
+        CabinetCommand.result.contains('Не удалось загрузить карточки заказов')
+    ).order_by(CabinetCommand.created_at).with_for_update(skip_locked=True).limit(100))
+    for job in candidates:
+        payload = json.loads(job.payload or '{}')
+        result = json.loads(job.result or '{}')
+        activation = payload.get('dispatch_activation')
+        if (not activation or payload.get('photo_slots_recovery_attempted')
+                or result.get('delivery_unknown')
+                or not str(result.get('error', '')).startswith('Не удалось загрузить карточки заказов')):
+            continue
+        order = db.get(Order, activation.get('order_id'))
+        if not order or not today <= order.work_date <= today + timedelta(days=7) or order.status in {'cancelled', 'draft'}:
+            continue
+        item = dispatch_order_data(db, order, 0)
+        if (not item.get('composition_complete') or item.get('revision') != activation.get('revision')
+                or (item.get('brigadier') or {}).get('tg_id') != job.tg_id):
+            continue
+        receipt = dispatch_receipt_info(db, item)
+        if receipt.get('status') != 'confirmed':
+            continue
+        if not dispatch_original_order_delivered(db, order.id, item['work_date'], job.tg_id):
+            continue
+        payload['photo_slots_recovery_attempted'] = True
+        job.payload = json.dumps(payload, ensure_ascii=False)
+        job.status = 'queued'
+        job.result = '{}'
+        job.lease_until = None
+        db.flush()
+        break
