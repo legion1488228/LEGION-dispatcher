@@ -7150,7 +7150,7 @@ def _owner_cabinet_readiness(db: Session, employee, work_date: date):
     labels = {"ready": "Готов", "not_ready": "На основной", "day_off": "Выходной",
               "responded": "Отписался", "no_response": "Ещё не отмечена"}
     return {"work_date": work_date.isoformat(), "status": status,
-            "label": labels.get(status, "Ещё не отмечена"), "text": raw_text or ""}
+            "label": labels.get(status, "Ещё не отмечена"), "text": re.sub(r"</?(?:b|strong|i|em|u|s|code|pre)\b[^>]*>", "", raw_text or "", flags=re.I)}
 
 
 @app.get("/api/owner/brigadier-cabinet/employees")
@@ -7193,10 +7193,11 @@ def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends
         Employee.group_code == "brigadier").order_by(Employee.id).limit(1))
     profile = _employee_dict(employee) if employee else None
     avatar = db.get(CabinetProfilePhoto, user.id)
-    orders = [] if active_only else db.scalars(select(Order).join(Assignment, Assignment.order_id == Order.id).join(
+    orders = db.scalars(select(Order).join(Assignment, Assignment.order_id == Order.id).join(
         Employee, Employee.id == Assignment.employee_id).where(
         Employee.tg_id == user.id, Employee.active.is_(True), _visible_employee(),
-        Assignment.role == "brigadier", Order.work_date == selected,
+        Assignment.role == "brigadier",
+        Order.work_date >= today if active_only else Order.work_date == selected,
         Order.status.notin_(["closed", "cancelled"]) if active_only else Order.status != "cancelled").order_by(Order.work_date, Order.issue_time, Order.id)).unique().all()
     cards = db.scalars(select(NumberCardEvent).where(
         NumberCardEvent.tg_id == user.id, True if active_only else NumberCardEvent.work_date == selected,
@@ -7238,7 +7239,8 @@ def owner_brigadier_cabinet(work_date: date | None = None, db: Session = Depends
         "tomorrow": (today + timedelta(days=1)).isoformat(),
         "readiness": _owner_cabinet_readiness(db, employee, selected),
         "tomorrow_readiness": _owner_cabinet_readiness(db, employee, today + timedelta(days=1)),
-        "orders": [_cabinet_order_dict(order, db) for order in orders], "number_cards": items,
+        "orders": [_cabinet_order_dict(order, db) for order in orders
+                   if dispatch_original_order_delivered(db, order.id, order.work_date.isoformat(), user.id)], "number_cards": items,
         "actions": actions,
         "cabinet_kind": cabinet_kind(db, user.id), "can_record_cash": cabinet_can_cash(db, user.id),
     }, headers={"Cache-Control": "private, no-store, max-age=0", "Pragma": "no-cache"})
@@ -7251,6 +7253,8 @@ def _cabinet_order_dict(order, db):
             "deceased_name", "route", "category_label", "team_size", "status_label",
             "agent_name", "agent_phone", "other_agent_phone", "contact_time")
     result = {key: original.get(key) for key in keys}
+    card = dispatch_match_card(db, order)
+    result['number_card_id'] = card.id if card else None
     result["members"] = [{k: p.get(k) for k in ("display_name", "phone", "telegram_url")}
                          for p in original.get("members", [])]
     return result
@@ -7840,7 +7844,9 @@ function ownerCabinetCardsHtml(data){
     const photo=cabinetPhotoInfo(c),next=cabinetNextAction(c,data),done=photo.complete&&c.tea_received;
     return `<article class="cabinet-order"><div class="cabinet-order-top"><span class="cabinet-kind ${c.source==='gbu'?'gbu':''}">${c.source==='gbu'?'ГБУ':'Частный'}</span><small class="cabinet-card-date">${esc(fmtDate(c.work_date))}</small>${cabinetOrderTools(c)}</div><button type="button" class="cabinet-order-open" data-cabinet-detail="${Number(c.id)}"><h3>ум: ${esc(c.surname)}</h3></button><div class="cabinet-order-statuses"><span class="${(c.prepared??c.composition_closed)?'cabinet-done':''}">${cabinetIcon((c.prepared??c.composition_closed)?'check':'clock')}${(c.prepared??c.composition_closed)?'Закрытие подтверждено':'Оформление заказа'}</span><span>${esc(photo.label)} · ${photo.received}/${photo.total}</span></div>${done?'<p class="cabinet-done">✅ Заказ завершён</p>':next?cabinetButton(next.key,next.title,next.icon,c,true):'<p>Фото доступно в день заказа</p>'}<button type="button" class="cabinet-back" data-cabinet-detail="${Number(c.id)}">Все этапы заказа ${cabinetIcon('chevron')}</button></article>`;
   }).join('');
-  return `${cardRows}${!cards.length?'<div class="cabinet-empty">Активных заказов нет.</div>':''}`;
+  const pending=(data.orders||[]).filter(order=>!order.number_card_id);
+  const pendingRows=pending.map(order=>`<article class="cabinet-order"><div class="cabinet-order-top"><span class="cabinet-kind">${order.source==='gbu'?'ГБУ':'Частный'}</span><small>${esc(fmtDate(order.work_date))}</small></div><h3>ум: ${esc(order.deceased_name||'Не указано')}</h3><p>Выдача: ${esc(order.issue_time||'—')} · Быть: ${esc(order.arrival_time||'—')}</p><p>Агент: ${esc(order.agent_name||'—')} · ${esc(order.agent_phone||'')}</p><p>${esc(order.route||'')}</p><p>Заказ назначен вам. Оформление карточки ещё не завершено. Подтвердите получение в сообщении бота, если ещё не подтвердили.</p></article>`).join('');
+  return `${cardRows}${pendingRows}${!cards.length&&!pending.length?'<div class="cabinet-empty">Активных заказов нет.</div>':''}`;
 }
 function ownerCabinetDetailHtml(c,data){
   data={...data,work_date:c.work_date};
