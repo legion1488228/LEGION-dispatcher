@@ -22690,3 +22690,42 @@ INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
     "async function openGbuImport(){\n if(state.bootstrap?.is_owner!==true){toast('Импорт по фото доступен только владельцу');return}",
     1,
 )
+
+
+# Expand every free-staff category with one tap, including the top counter.
+def _dispatch_expand_all_free_html(html):
+    old = '<div class="dispatch-free"><b>Свободные · ${data.free.reduce((s,g)=>s+g.people.length,0)}</b>'
+    new = '<div class="dispatch-free"><button type="button" class="dispatch-free-all" data-free-show-all>Свободные · ${data.free.reduce((s,g)=>s+g.people.length,0)}</button>'
+    if html.count(old) != 1:
+        raise RuntimeError('Free staff heading anchor missing')
+    html = html.replace(old, new, 1)
+    return html.replace('</body>', r'''<style>
+.dispatch-free-all{display:block;width:100%;text-align:left;border:0;background:transparent;color:inherit;font:inherit;font-weight:700;padding:0 0 5px;cursor:pointer}
+.dispatch-summary-free{cursor:pointer}
+</style><script>
+function dispatchShowAllFree(trigger){
+ const root=trigger.closest('#dispatchActionsView')||document;
+ const free=root.querySelector('.dispatch-free');
+ if(!free)return;
+ free.querySelectorAll('details').forEach(group=>{group.open=true});
+ if(!trigger.closest('.dispatch-free'))free.scrollIntoView({block:'end',behavior:'auto'});
+}
+document.addEventListener('click',event=>{
+ const trigger=event.target.closest('[data-free-show-all],.dispatch-summary-free');
+ if(trigger)dispatchShowAllFree(trigger);
+});
+document.addEventListener('keydown',event=>{
+ if((event.key==='Enter'||event.key===' ')&&event.target.matches('.dispatch-summary-free')){
+  event.preventDefault();dispatchShowAllFree(event.target);
+ }
+});
+const freeCounterObserver=new MutationObserver(()=>{
+ document.querySelectorAll('.dispatch-summary-free:not([tabindex])').forEach(counter=>{
+  counter.tabIndex=0;counter.setAttribute('role','button');counter.setAttribute('aria-label','Показать всех свободных сотрудников');
+ });
+});
+freeCounterObserver.observe(document.body,{childList:true,subtree:true});
+</script></body>''', 1)
+
+
+INLINE_INDEX_HTML = _dispatch_expand_all_free_html(INLINE_INDEX_HTML)
