@@ -22729,3 +22729,35 @@ freeCounterObserver.observe(document.body,{childList:true,subtree:true});
 
 
 INLINE_INDEX_HTML = _dispatch_expand_all_free_html(INLINE_INDEX_HTML)
+
+
+@app.get('/api/bot/dispatch-board/photo-slots', dependencies=[Depends(_bot_key)])
+def dispatch_photo_slots(db: Session = Depends(get_db)):
+    """Return the complete current window, including cancellations for cleanup."""
+    today = datetime.now(MOSCOW).date()
+    rows = db.execute(select(Order, DispatchPlan).join(
+        DispatchPlan, DispatchPlan.order_id == Order.id).where(
+        Order.work_date >= today, Order.work_date <= today + timedelta(days=7)
+    ).order_by(Order.work_date, Order.source, Order.id)).all()
+    items = []
+    for order, plan in rows:
+        meta = json.loads(plan.payload or '{}')
+        if not meta.get('photo_slot_requested'):
+            continue
+        cancelled = order.status in {'cancelled', 'draft'}
+        card = None
+        linked_id = meta.get('number_card_id')
+        if type(linked_id) is int:
+            card = db.get(NumberCardEvent, linked_id)
+            if card and (card.work_date != order.work_date or card.source != order.source
+                         or db.get(NumberCardDeletion, card.id)):
+                card = None
+        items.append({
+            'order_id': order.id, 'work_date': order.work_date.isoformat(),
+            'source': order.source, 'cancelled': cancelled,
+            'surname': str(order.deceased_name or '').strip().split(' ')[0].upper(),
+            'card': ({'chat_id': card.chat_id, 'message_id': card.message_id,
+                      'surname': card.surname, 'sent_at': card.sent_at.isoformat(),
+                      'work_date': card.work_date.isoformat()} if card else None),
+        })
+    return {'items': items}
