@@ -22899,3 +22899,99 @@ document.addEventListener('click',event=>{
 
 
 INLINE_INDEX_HTML = _cabinet_pending_workflow_html(INLINE_INDEX_HTML)
+
+
+class OwnerBrigadierCashPatch(BaseModel):
+    version: StrictInt = Field(ge=1)
+    commission: StrictInt = Field(ge=0, le=10000000)
+    kickback: StrictInt = Field(ge=0, le=10000000)
+    reserve: StrictInt = Field(ge=0, le=6)
+
+
+@app.get('/api/owner/brigadier-cash-edit')
+def owner_brigadier_cash_edit_list(work_date: date, db: Session = Depends(get_db),
+                                  user: TelegramUser = Depends(require_admin)):
+    _require_cash_manager(db, user)
+    rows = db.scalars(select(CabinetOrderCash).where(CabinetOrderCash.work_date == work_date)).all()
+    return {'items': [dict(cabinet_cash_dict(row), tg_id=row.tg_id,
+        name=_cash_brigadier_label(db, row.tg_id)) for row in rows]}
+
+
+@app.patch('/api/owner/brigadier-cash-edit/{tg_id}/{event_id}')
+def owner_brigadier_cash_edit(tg_id: int, event_id: int, data: OwnerBrigadierCashPatch,
+                              db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
+    _require_cash_manager(db, user)
+    row = db.get(CabinetOrderCash, (event_id, tg_id))
+    if not row:
+        raise HTTPException(404, 'Запись кассы не найдена')
+    if data.reserve > row.team_size:
+        raise HTTPException(422, 'Резерв не может превышать состав')
+    changed = db.execute(update(CabinetOrderCash).where(
+        CabinetOrderCash.event_id == event_id, CabinetOrderCash.tg_id == tg_id,
+        CabinetOrderCash.version == data.version).values(
+        commission=data.commission, kickback=data.kickback, reserve=data.reserve,
+        version=data.version + 1, updated_at=datetime.utcnow()))
+    if changed.rowcount != 1:
+        db.rollback()
+        raise HTTPException(409, 'Касса уже изменена. Обновите список и проверьте суммы')
+    db.commit()
+    return {'ok': True, 'version': data.version + 1}
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r'''<script>
+function ensureOwnerCashEdit(){
+ return;
+ if(state.bootstrap?.is_owner!==true)return;
+ const root=document.querySelector('#cashTableBody')?.parentElement;
+ if(!root||root.querySelector('[data-owner-brigadier-cash]'))return;
+ const button=document.createElement('button');button.type='button';button.className='secondary';
+ button.dataset.ownerBrigadierCash='';button.textContent='Изменить кассу бригадира';
+ button.onclick=openOwnerBrigadierCashEdit;root.prepend(button);
+}
+async function openOwnerBrigadierCashEdit(selectedDay=state.selectedDate,selectedUid=null){
+ showModal('Касса бригадиров',`<label>Дата<input type="date" id="ownerCashEditDay" value="${esc(selectedDay)}"></label><div id="ownerCashEditRows"></div>`);
+ const root=qs('#ownerCashEditRows'),day=qs('#ownerCashEditDay');
+ const draw=async()=>{
+  root.textContent='Загрузка…';
+  try{const data=await api('/api/owner/brigadier-cash-edit?work_date='+day.value);if(!root.isConnected)return;
+   if(selectedUid!==null)data.items=data.items.filter(x=>String(x.tg_id)===String(selectedUid));
+   root.innerHTML=data.items.map((x,i)=>`<form data-owner-cash-row="${i}" class="cabinet-order"><b>${esc(x.name)}</b><p>ум: ${esc(x.surname)}</p><label>Комиссия<input name="commission" type="number" min="0" step="1" value="${x.commission}" required></label><label>Откат<input name="kickback" type="number" min="0" step="1" value="${x.kickback}" required></label><label>Резерв<input name="reserve" type="number" min="0" max="${x.team_size}" step="1" value="${x.reserve}" required></label><button type="submit" class="primary">Сохранить</button><p role="status"></p></form>`).join('')||'За эту дату записей кассы нет';
+   root.querySelectorAll('form').forEach(form=>form.onsubmit=async event=>{
+    event.preventDefault();const item=data.items[Number(form.dataset.ownerCashRow)],button=form.querySelector('button'),status=form.querySelector('[role=status]');button.disabled=true;
+    try{const values={version:item.version};['commission','kickback','reserve'].forEach(key=>values[key]=Number(form.elements[key].value));
+     const result=await api(`/api/owner/brigadier-cash-edit/${item.tg_id}/${item.event_id}`,{method:'PATCH',body:JSON.stringify(values)});item.version=result.version;
+     toast('Касса сохранена. Сообщение в чате обновится при синхронизации.');await openCashTable();
+    }catch(error){status.textContent=error.message}finally{button.disabled=false}
+   });
+  }catch(error){if(root.isConnected)root.textContent=error.message}
+ };day.onchange=draw;draw();
+}
+new MutationObserver(ensureOwnerCashEdit).observe(document.body,{childList:true,subtree:true});
+ensureOwnerCashEdit();
+</script></body>''',1)
+
+
+@app.get('/api/bot/cabinet/cash-versions', dependencies=[Depends(_bot_key)])
+def cabinet_cash_mirror_versions(db: Session = Depends(get_db)):
+    rows = db.execute(select(CabinetOrderCash.tg_id, CabinetOrderCash.version,
+        NumberCardEvent.chat_id, NumberCardEvent.message_id).join(NumberCardEvent,
+        NumberCardEvent.id == CabinetOrderCash.event_id).where(
+        NumberCardEvent.tg_id == CabinetOrderCash.tg_id)).all()
+    return {'items': [{'tg_id': uid, 'version': version, 'report_key': f'card:{chat}:{message}'}
+                      for uid, version, chat, message in rows]}
+
+
+# Place the owner cash editor directly in the selected day's detail popover.
+_cash_edit_anchor = "  if(!date)return;\n  try{const result=await api('/api/cash?work_date='+encodeURIComponent(date));"
+_cash_edit_replacement = """  if(date&&id&&state.bootstrap?.is_owner===true){
+   const edit=document.createElement('button');edit.type='button';edit.textContent='✍🏻';
+   edit.setAttribute('aria-label','Изменить кассу и откат');edit.title='Изменить кассу и откат';
+   edit.style.cssText='float:right;padding:6px 10px;min-width:40px;min-height:40px';
+   edit.onclick=()=>openOwnerBrigadierCashEdit(date,id);
+   host.querySelector('h4').prepend(edit);
+  }
+  if(!date)return;
+  try{const result=await api('/api/cash?work_date='+encodeURIComponent(date));"""
+if INLINE_INDEX_HTML.count(_cash_edit_anchor) != 1:
+    raise RuntimeError('Owner cash popover editor anchor missing')
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(_cash_edit_anchor, _cash_edit_replacement, 1)
