@@ -22987,8 +22987,10 @@ _cash_edit_replacement = """  if(date&&id&&state.bootstrap?.is_owner===true){
    const edit=document.createElement('button');edit.type='button';edit.textContent='✍🏻';
    edit.setAttribute('aria-label','Изменить кассу и откат');edit.title='Изменить кассу и откат';
    edit.style.cssText='float:right;padding:6px 10px;min-width:40px;min-height:40px';
-   edit.onclick=()=>openOwnerBrigadierCashEdit(date,id);
-   host.querySelector('h4').prepend(edit);
+   edit.onclick=()=>{globalThis.legionPopoverClose?.();openOwnerBrigadierCashEdit(date,id)};
+   const header=host.closest('.legion-small-popover')?.querySelector('header');
+   if(header)header.insertBefore(edit,header.querySelector('[data-legion-pop-close]'));
+   else host.prepend(edit);
   }
   if(!date)return;
   try{const result=await api('/api/cash?work_date='+encodeURIComponent(date));"""
