@@ -22949,7 +22949,18 @@ function ensureOwnerCashEdit(){
  button.onclick=openOwnerBrigadierCashEdit;root.prepend(button);
 }
 async function openOwnerBrigadierCashEdit(selectedDay=state.selectedDate,selectedUid=null){
- showModal('Касса бригадиров',`<label>Дата<input type="date" id="ownerCashEditDay" value="${esc(selectedDay)}"></label><div id="ownerCashEditRows"></div>`);
+ document.querySelector('.owner-cash-edit-dialog')?.close();
+ rememberCashTablePosition();
+ const dialog=document.createElement('dialog');dialog.className='owner-cash-edit-dialog';
+ dialog.innerHTML=`<header><button type="button" data-owner-cash-back>‹ Назад</button><h3>Касса бригадира</h3><button type="button" data-owner-cash-close aria-label="Закрыть">×</button></header><label>Дата<input type="date" id="ownerCashEditDay" value="${esc(selectedDay)}"></label><div id="ownerCashEditRows"></div>`;
+ let saving=false;
+ const dismiss=()=>{if(!saving)dialog.close()};
+ dialog.querySelector('[data-owner-cash-back]').onclick=dismiss;
+ dialog.querySelector('[data-owner-cash-close]').onclick=dismiss;
+ dialog.addEventListener('click',event=>{if(event.target!==dialog)return;const rect=dialog.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)dismiss()});
+ dialog.addEventListener('cancel',event=>{if(saving)event.preventDefault()});
+ dialog.addEventListener('close',()=>dialog.remove(),{once:true});
+ document.body.append(dialog);dialog.showModal();
  const root=qs('#ownerCashEditRows'),day=qs('#ownerCashEditDay');
  const draw=async()=>{
   root.textContent='Загрузка…';
@@ -22957,11 +22968,11 @@ async function openOwnerBrigadierCashEdit(selectedDay=state.selectedDate,selecte
    if(selectedUid!==null)data.items=data.items.filter(x=>String(x.tg_id)===String(selectedUid));
    root.innerHTML=data.items.map((x,i)=>`<form data-owner-cash-row="${i}" class="cabinet-order"><b>${esc(x.name)}</b><p>ум: ${esc(x.surname)}</p><label>Комиссия<input name="commission" type="number" min="0" step="1" value="${x.commission}" required></label><label>Откат<input name="kickback" type="number" min="0" step="1" value="${x.kickback}" required></label><label>Резерв<input name="reserve" type="number" min="0" max="${x.team_size}" step="1" value="${x.reserve}" required></label><button type="submit" class="primary">Сохранить</button><p role="status"></p></form>`).join('')||'За эту дату записей кассы нет';
    root.querySelectorAll('form').forEach(form=>form.onsubmit=async event=>{
-    event.preventDefault();const item=data.items[Number(form.dataset.ownerCashRow)],button=form.querySelector('button'),status=form.querySelector('[role=status]');button.disabled=true;
+    event.preventDefault();const item=data.items[Number(form.dataset.ownerCashRow)],button=form.querySelector('button'),status=form.querySelector('[role=status]');button.disabled=true;saving=true;
     try{const values={version:item.version};['commission','kickback','reserve'].forEach(key=>values[key]=Number(form.elements[key].value));
      const result=await api(`/api/owner/brigadier-cash-edit/${item.tg_id}/${item.event_id}`,{method:'PATCH',body:JSON.stringify(values)});item.version=result.version;
-     toast('Касса сохранена. Сообщение в чате обновится при синхронизации.');await openCashTable();
-    }catch(error){status.textContent=error.message}finally{button.disabled=false}
+     toast('Касса сохранена. Сообщение в чате обновится при синхронизации.');dialog.close();await openCashTable();
+    }catch(error){status.textContent=error.message}finally{button.disabled=false;saving=false}
    });
   }catch(error){if(root.isConnected)root.textContent=error.message}
  };day.onchange=draw;draw();
@@ -22997,3 +23008,33 @@ _cash_edit_replacement = """  if(date&&id&&state.bootstrap?.is_owner===true){
 if INLINE_INDEX_HTML.count(_cash_edit_anchor) != 1:
     raise RuntimeError('Owner cash popover editor anchor missing')
 INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(_cash_edit_anchor, _cash_edit_replacement, 1)
+
+
+# Compact aligned rows for the owner's per-order cash editor.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace(
+    '<label>Дата<input type="date" id="ownerCashEditDay"',
+    '<label class="owner-cash-edit-date">Дата<input type="date" id="ownerCashEditDay"', 1,
+).replace('</head>', r'''<style>
+#modal:has(#ownerCashEditRows)>.modal-head{position:static;margin:0 0 14px;padding:0;background:var(--panel)}
+#modal:has(#ownerCashEditRows)>.modal-head::before{display:none}
+#modal:has(#ownerCashEditRows){padding:16px!important}
+.owner-cash-edit-date{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 12px;font-size:14px}
+#ownerCashEditDay{display:block;box-sizing:border-box;min-width:0;width:170px;max-width:65%;height:40px;margin:0;padding:6px 10px;font-size:16px;border:1px solid var(--line);border-radius:10px;background:var(--panel2);color:var(--text)}
+#ownerCashEditRows [data-owner-cash-row]{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;margin:0 0 10px;padding:12px;border:1px solid var(--line);border-radius:12px}
+#ownerCashEditRows [data-owner-cash-row]>b{font-size:16px;line-height:1.25;overflow-wrap:anywhere}
+#ownerCashEditRows [data-owner-cash-row]>p{margin:0;font-size:13px}
+#ownerCashEditRows [data-owner-cash-row]>label{display:grid;grid-template-columns:minmax(0,1fr) minmax(90px,130px);align-items:center;gap:12px;margin:0;font-size:14px}
+#ownerCashEditRows [data-owner-cash-row]>label>input{display:block;box-sizing:border-box;width:100%;min-width:0;max-width:130px;height:40px;margin:0;padding:6px 10px;font-size:16px;text-align:right;border:1px solid var(--line);border-radius:9px;background:var(--panel2);color:var(--text)}
+#ownerCashEditRows [data-owner-cash-row]>button{width:100%;min-height:42px;margin:2px 0 0;padding:8px;font-size:15px}
+#ownerCashEditRows [role=status]:empty{display:none}
+</style></head>''',1)
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</head>', r'''<style>
+.owner-cash-edit-dialog{box-sizing:border-box;width:min(420px,calc(100vw - 24px));max-height:calc(100dvh - 32px);overflow:auto;padding:14px;border:1px solid var(--gold2);border-radius:16px;background:var(--panel);color:var(--text);overscroll-behavior:contain}
+.owner-cash-edit-dialog::backdrop{background:#0004}
+.owner-cash-edit-dialog>header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:14px}
+.owner-cash-edit-dialog>header h3{font-size:16px;margin:0;flex:1;text-align:center}
+.owner-cash-edit-dialog>header button{min-height:38px;padding:6px 10px;border:1px solid var(--line);border-radius:9px;background:var(--panel2);color:var(--text);font-size:14px}
+.owner-cash-edit-dialog>header [data-owner-cash-close]{font-size:23px;min-width:38px}
+</style></head>''',1)
