@@ -23053,42 +23053,88 @@ def _owner_cash_toolbar_layout_html(html):
     section=section.replace(anchor,anchor+r"""
   if(compactCash){
     const head=qs('#modal .modal-head'),back=qs('#ownerCashBack');
-    if(head&&back)head.prepend(back);
+    if(head&&back){head.prepend(back);const reminder=qs('#cashReminder');if(reminder)head.insertBefore(reminder,head.querySelector('.close-btn'));}
   }
 """,1)
     anchor="      const reminder=qs('#cashReminder');"
     assert anchor in section
-    section=section.replace(anchor,r"""      if(compactCash){
-        const head=qs('#modal .modal-head');
-        if(head){
-          const next=qs('#cashReminder',body);
-          if(next){
-            const old=qs('#cashReminder',head);
-            if(old)old.remove();
-            head.insertBefore(next,head.querySelector('.close-btn'));
-          }
-        }
-      }
-"""+anchor,1)
     section=section.replace('<span>Суммы в ₽ · точка — откат</span>','',1)
+    section=re.sub(r'body.innerHTML=compactCash\?`<div class="owner-cash-period">.*?</div>\$\{matrix\}', 'body.innerHTML=compactCash?`${matrix}', section, count=1)
     html=html[:start]+section+html[end:]
     pattern=r'function ownerCashControls\(month\)\{.*?\n\}'
     replacement=r"""function ownerCashControls(month){
- return `<button id="ownerCashBack" type="button" class="secondary" onclick="rememberCashTablePosition();openPersonalTables(earningsReturnState)" aria-label="Назад к заработку">←</button><input id="cashMonth" type="hidden" value="${esc(month)}"><div class="owner-cash-ranges"><button type="button" class="primary" data-cash-range="month">Месяц</button><button type="button" class="secondary" data-cash-range="first">1–15</button><button type="button" class="secondary" data-cash-range="second">16–конец месяца</button></div><div id="cashMonthTools"><div id="cashMonthTabs"></div></div><div id="cashTableBody">Загрузка…</div>`;
+ return `<button id="ownerCashBack" type="button" class="secondary" onclick="rememberCashTablePosition();openPersonalTables(earningsReturnState)" aria-label="Назад к заработку">←</button><button id="cashReminder" type="button" class="secondary">🔔 Сверка</button><input id="cashMonth" type="hidden" value="${esc(month)}"><div id="cashMonthTools"><div id="cashMonthTabs"></div></div><div class="owner-cash-ranges"><button type="button" class="primary" data-cash-range="month">Месяц</button><button type="button" class="secondary" data-cash-range="first">1–15</button><button type="button" class="secondary" data-cash-range="second">16–31</button></div><div id="cashTableBody">Загрузка…</div>`;
 }"""
     html,count=re.subn(pattern,lambda m:replacement,html,count=1,flags=re.S)
     assert count==1
-    return html.replace('</head>',r'''<style>
-#modal.owner-cash-modal .modal-head{display:flex;align-items:center;gap:8px;margin:4px 0 10px}
+    return html.replace('</body>',r'''<style>
+#modal.owner-cash-modal>.modal-head{position:relative!important;top:auto!important;display:flex!important;align-items:center;gap:8px;margin:4px 0 10px!important;min-height:38px}
+#modal.owner-cash-modal>.modal-head::before{display:none!important}
 #modal.owner-cash-modal .modal-head h3{flex:1;min-width:0;margin:0;font-size:20px}
 #modal.owner-cash-modal #ownerCashBack{flex:none;min-width:36px;min-height:36px;padding:4px;border-radius:9px;font-size:22px}
 #modal.owner-cash-modal .modal-head #cashReminder{flex:none;min-height:36px;padding:6px 10px;font-size:14px;white-space:nowrap;border-radius:9px;margin:0}
 #modal.owner-cash-modal .modal-head .close-btn{flex:none;width:36px;height:36px;min-height:36px}
-#modal.owner-cash-modal .owner-cash-ranges{display:grid;grid-template-columns:1fr 1fr 1.4fr;gap:5px;margin:0 0 6px}
+#modal.owner-cash-modal .owner-cash-ranges{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;margin:0 0 10px!important}
 #modal.owner-cash-modal .owner-cash-ranges button{width:100%;min-width:0;min-height:34px;padding:5px 3px;font-size:12px}
-#modal.owner-cash-modal #cashMonthTabs{display:grid;grid-auto-flow:column;grid-auto-columns:calc((100% - 10px)/3);gap:5px;overflow-x:auto;margin:0 0 10px;scrollbar-width:none}
+#modal.owner-cash-modal #cashMonthTabs{display:grid;grid-auto-flow:column;grid-auto-columns:calc((100% - 10px)/3);gap:5px;overflow-x:auto;margin:0 0 6px!important;scrollbar-width:none}
 #modal.owner-cash-modal #cashMonthTabs button{width:100%;min-width:0;min-height:34px;padding:5px 3px;font-size:11px;overflow:hidden;text-overflow:ellipsis}
 #modal.owner-cash-modal .owner-cash-period{display:none}
-</style></head>''',1)
+</style></body>''',1)
 
 INLINE_INDEX_HTML = _owner_cash_toolbar_layout_html(INLINE_INDEX_HTML)
+
+
+# Enforce the final cash layout after opening and after every table refresh.
+def _cash_toolbar_final_layout(html):
+    start=html.index('async function openCashTable(){')
+    end=html.index('let ownerCabinetRequest=',start)
+    block=html[start:end]
+    anchor="  const cashSession=cashModalGeneration;"
+    assert anchor in block
+    block=block.replace(anchor,"  if(compactCash){legionArrangeCashToolbar();qs('#modal').scrollTop=0;}\n"+anchor,1)
+    anchor="      const reminder=qs('#cashReminder');"
+    assert anchor in block
+    block=block.replace(anchor,"      if(compactCash)legionArrangeCashToolbar();\n"+anchor,1)
+    html=html[:start]+block+html[end:]
+    return html.replace('</body>',r'''<script>
+function legionArrangeCashToolbar(){
+ const modal=document.querySelector('#modal.owner-cash-modal');
+ if(!modal)return;
+ const head=modal.querySelector(':scope > .modal-head');
+ const months=modal.querySelector('#cashMonthTools');
+ const ranges=modal.querySelector('.owner-cash-ranges');
+ const body=modal.querySelector('#cashTableBody');
+ if(!head||!months||!ranges||!body)return;
+ modal.dataset.cashToolbarVersion='20261111';
+ // Both rows are siblings below the title, outside the refreshed ledger.
+ body.before(months,ranges);
+ const back=modal.querySelector('#ownerCashBack');
+ if(back)head.prepend(back);
+ const reminders=[...modal.querySelectorAll('#cashReminder')];
+ const reminder=reminders.find(button=>button.parentElement===head)||reminders[0];
+ if(reminder){
+   for(const other of reminders)if(other!==reminder)other.remove();
+   head.insertBefore(reminder,head.querySelector('.close-btn'));
+ }
+ head.style.setProperty('position','static','important');
+ head.style.setProperty('margin','0 0 10px','important');
+ head.style.setProperty('display','flex','important');
+ const buttons=[...ranges.querySelectorAll('button')];
+ for(const button of buttons){
+   if(button.dataset.cashRange==='month')button.textContent='Месяц';
+   if(button.dataset.cashRange==='first')button.textContent='1–15';
+   if(button.dataset.cashRange==='second')button.textContent='16–31';
+ }
+}
+</script><style id="cash-toolbar-final-layout">
+#modal.owner-cash-modal[data-cash-toolbar-version]>.modal-head{position:static!important;inset:auto!important;display:flex!important;flex-wrap:nowrap!important;align-items:center!important;gap:6px!important;min-height:38px!important;margin:0 0 10px!important;padding:0!important}
+#modal.owner-cash-modal[data-cash-toolbar-version]>.modal-head::before{display:none!important}
+#modal.owner-cash-modal[data-cash-toolbar-version]>.modal-head h3{flex:1!important;margin:0!important;min-width:0;font-size:20px!important}
+#modal.owner-cash-modal[data-cash-toolbar-version]>.modal-head #cashReminder{position:static!important;flex:0 0 auto!important;min-height:36px!important;padding:5px 8px!important;font-size:13px!important;white-space:nowrap!important;margin:0!important}
+#modal.owner-cash-modal[data-cash-toolbar-version] #cashMonthTools{display:block!important;width:100%!important;margin:0 0 6px!important}
+#modal.owner-cash-modal[data-cash-toolbar-version] #cashMonthTabs{display:grid!important;grid-auto-flow:column!important;grid-auto-columns:calc((100% - 10px)/3)!important;gap:5px!important;width:100%!important;overflow-x:auto!important;margin:0!important}
+#modal.owner-cash-modal[data-cash-toolbar-version] .owner-cash-ranges{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:5px!important;width:100%!important;margin:0 0 10px!important}
+#modal.owner-cash-modal[data-cash-toolbar-version] #cashMonthTabs button,#modal.owner-cash-modal[data-cash-toolbar-version] .owner-cash-ranges button{box-sizing:border-box!important;display:flex!important;align-items:center!important;justify-content:center!important;min-width:0!important;width:100%!important;height:34px!important;min-height:34px!important;max-height:34px!important;padding:4px!important;line-height:1.2!important;font-size:11px!important;white-space:nowrap!important;border-radius:8px!important}
+</style></body>''',1)
+
+INLINE_INDEX_HTML = _cash_toolbar_final_layout(INLINE_INDEX_HTML)
