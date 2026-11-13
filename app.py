@@ -23138,3 +23138,55 @@ function legionArrangeCashToolbar(){
 </style></body>''',1)
 
 INLINE_INDEX_HTML = _cash_toolbar_final_layout(INLINE_INDEX_HTML)
+
+
+# Natural cash scrolling: no forced page snapping or redraw during a gesture.
+def _cash_scroll_stability_html(html):
+    start=html.index('async function openCashTable(){');end=html.index('let ownerCabinetRequest=',start)
+    block=html[start:end]
+    anchor="      body.innerHTML=compactCash?`${matrix}"
+    assert anchor in block
+    block=block.replace(anchor,"      if(compactCash&&legionCashGestureBusy())return;\n"+anchor,1)
+    block=block.replace("cashRefreshTimer=setInterval(()=>{if(cashActive()) drawCash()},10000)","cashRefreshTimer=setInterval(()=>{if(cashActive()&&!legionCashGestureBusy()) drawCash()},10000)",1)
+    html=html[:start]+block+html[end:]
+    return html.replace('</body>',r'''<style>
+#modal.owner-cash-modal #cashMatrixScroller{scroll-snap-type:none!important;scroll-behavior:auto!important;overscroll-behavior:contain;overflow-anchor:none;touch-action:pan-y pinch-zoom}
+#modal.owner-cash-modal .period-table-page{scroll-snap-align:none!important;scroll-snap-stop:normal!important}
+#modal.owner-cash-modal{scroll-snap-type:none!important;overflow-anchor:none;overscroll-behavior:contain}
+</style><script>
+let legionCashTouch=null,legionCashLastMove=0,legionCashSuppressClickUntil=0;
+function legionCashGestureBusy(){return !!legionCashTouch||Date.now()-legionCashLastMove<1600}
+document.addEventListener('touchstart',event=>{
+ const scroller=event.target.closest?.('#cashMatrixScroller');
+ if(!scroller||!scroller.closest('.owner-cash-modal')||event.touches.length!==1)return;
+ const point=event.touches[0];
+ legionCashTouch={scroller,x:point.clientX,y:point.clientY,left:scroller.scrollLeft,top:scroller.scrollTop,axis:null,moved:false};
+},{passive:true});
+document.addEventListener('touchmove',event=>{
+ const touch=legionCashTouch;if(!touch)return;
+ if(event.touches.length!==1){legionCashTouch=null;return}
+ const point=event.touches[0],dx=point.clientX-touch.x,dy=point.clientY-touch.y;
+ if(!touch.axis){if(Math.max(Math.abs(dx),Math.abs(dy))<8)return;touch.axis=Math.abs(dx)>Math.abs(dy)?'x':'y'}
+ touch.moved=true;legionCashLastMove=Date.now();
+ if(touch.axis==='x'){
+  if(event.cancelable)event.preventDefault();
+  touch.scroller.scrollLeft=touch.left-dx;
+  touch.scroller.scrollTop=touch.top;
+ }
+},{passive:false});
+function legionCashEndGesture(){
+ if(!legionCashTouch)return;
+ if(legionCashTouch.moved)legionCashSuppressClickUntil=Date.now()+400;
+ legionCashLastMove=Date.now();legionCashTouch=null;
+}
+document.addEventListener('touchend',legionCashEndGesture,{passive:true});
+document.addEventListener('touchcancel',legionCashEndGesture,{passive:true});
+document.addEventListener('scroll',event=>{
+ if(event.target.matches?.('#cashMatrixScroller,#modal.owner-cash-modal'))legionCashLastMove=Date.now();
+}, {capture:true,passive:true});
+document.addEventListener('click',event=>{
+ if(Date.now()<legionCashSuppressClickUntil&&event.target.closest?.('#cashMatrixScroller')){event.preventDefault();event.stopImmediatePropagation()}
+},true);
+</script></body>''',1)
+
+INLINE_INDEX_HTML = _cash_scroll_stability_html(INLINE_INDEX_HTML)
