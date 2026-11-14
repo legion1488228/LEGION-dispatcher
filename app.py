@@ -14764,6 +14764,9 @@ def dispatch_update(order_id: int, data: DispatchPlanInput, db: Session = Depend
     if data.work_date != order.work_date or data.source != order.source:
         raise HTTPException(409, 'Тип и дата сохранённого заказа не меняются')
     old_issue_time=order.issue_time.strftime('%H:%M')
+    # Resolve against the OLD surname before changing the order's fields.
+    old_deceased_name = str(order.deceased_name or '')
+    surname_card = dispatch_match_card(db, order) if old_deceased_name != str(data.deceased_name or '').strip() else None
     missing = dispatch_validate_plan(data)
     if dispatch_pair_partner(db, order) and (missing or data.team_size != order.team_size or data.category == 'carryout'):
         raise HTTPException(409, 'Сначала разъедините заказы перед изменением количества или сохранением черновика')
@@ -14796,6 +14799,14 @@ def dispatch_update(order_id: int, data: DispatchPlanInput, db: Session = Depend
     plan.payload=json.dumps(meta,ensure_ascii=False)
     if order.source=='private' and meta.get('private_intake') and old_issue_time!=order.issue_time.strftime('%H:%M'):
         private_intake_order_notice(db,order,f"Время выдачи изменено: {old_issue_time} → {order.issue_time.strftime('%H:%M')}",data.revision,'time')
+    if surname_card is not None and str(order.deceased_name or '').strip():
+        surname = dispatch_number_surname(order.deceased_name)
+        if surname != surname_card.surname:
+            # Reuse the authenticated, version-checked surname workflow. It
+            # commits this order change and the durable bot command together.
+            control_surname_save(surname_card.id, ControlSurnameInput(
+                request_id=secrets.token_hex(16), expected_surname=surname_card.surname,
+                surname=surname), db, user)
     db.commit();return {'ok':True}
 
 
