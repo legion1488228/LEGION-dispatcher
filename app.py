@@ -75,7 +75,7 @@ def _visible_employee():
         )).exists(),
     )
 
-app = FastAPI(title="ЛЕГИОН — Диспетчерская", version="1.0.1")
+app = FastAPI(title="ЛЕГИОН — Диспетчерская", version="1.0.2-crew-history-photo-diagnostics")
 
 
 async def require_app_user(db: Session = Depends(get_db),
@@ -5228,6 +5228,84 @@ def save_order_report_media(data: OrderReportMediaInput, db: Session = Depends(g
     return {'ok': True}
 
 
+def report_photo_diagnostic(card_id, stage, fingerprint, phase, reason, **fields):
+    """Bounded structured events; never log credentials, URLs or image data."""
+    import logging
+    event_id = secrets.token_hex(6)
+    event = dict(event='report_photo_failure', diagnostic_id=event_id,
+        card_id=card_id, photo_stage=stage, fingerprint=str(fingerprint or '')[:64],
+        phase=phase, reason=reason, **fields)
+    logging.getLogger('legion.photo').warning(json.dumps(event, ensure_ascii=False))
+    return event_id
+
+
+async def download_report_photo(media, token, card_id, stage, fingerprint):
+    import httpx
+    import time as photo_clock
+    started = photo_clock.monotonic()
+    phase, reason, upstream_status, telegram_code, retry_after = 'get_file', 'unknown', None, None, None
+    description = ''
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
+            info = await client.get(f'https://api.telegram.org/bot{token}/getFile', params={'file_id': media})
+            upstream_status = info.status_code
+            # Telegram's JSON explains invalid file IDs, revoked tokens and limits.
+            # Parse error bodies too, before raise_for_status discards that context.
+            try:
+                result = info.json()
+            except ValueError:
+                reason = 'invalid_telegram_response'
+                raise ValueError(reason)
+            if not isinstance(result, dict):
+                reason = 'invalid_telegram_response'
+                raise ValueError(reason)
+            telegram_code = result.get('error_code')
+            telegram_code = telegram_code if isinstance(telegram_code, int) else None
+            parameters = result.get('parameters') or {}
+            retry_after = parameters.get('retry_after') if isinstance(parameters, dict) else None
+            retry_after = retry_after if isinstance(retry_after, int) else None
+            description = str(result.get('description') or '')
+            if not info.is_success or not result.get('ok'):
+                reason = 'telegram_rejected_file'
+                raise ValueError(reason)
+            file_info = result.get('result') or {}
+            path = file_info.get('file_path', '') if isinstance(file_info, dict) else ''
+            if not isinstance(path, str) or not re.fullmatch(r'[A-Za-z0-9_./-]+', path) or '..' in path or path.startswith('/'):
+                reason = 'invalid_file_path'
+                raise ValueError(reason)
+            phase, reason, upstream_status = 'download_file', 'unknown', None
+            chunks, size = [], 0
+            async with client.stream('GET', f'https://api.telegram.org/file/bot{token}/{path}') as response:
+                upstream_status = response.status_code
+                if not response.is_success:
+                    reason = 'download_http_error'
+                    response.raise_for_status()
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > 8 * 1024 * 1024:
+                        reason = 'file_too_large'
+                        raise ValueError(reason)
+                    chunks.append(chunk)
+            raw = b''.join(chunks)
+            if not raw.startswith(b'\xff\xd8\xff'):
+                reason = 'invalid_jpeg'
+                raise ValueError(reason)
+            return raw
+    except (httpx.HTTPError, ValueError) as exc:
+        if isinstance(exc, httpx.TimeoutException): reason = 'telegram_timeout'
+        elif isinstance(exc, httpx.RequestError): reason = 'telegram_connection_error'
+        # Never stringify HTTP exceptions: they contain bot-token URLs.
+        description = description.replace(token, '[redacted]').replace(media, '[redacted]')
+        description = re.sub(r'https?://\S+', '[url]', description)
+        description = re.sub(r'\d{5,}:[A-Za-z0-9_-]+', '[redacted]', description)
+        description = re.sub(r'[\r\n\t]', ' ', description)[:240]
+        event_id = report_photo_diagnostic(card_id, stage, fingerprint, phase, reason,
+            upstream_status=upstream_status, telegram_code=telegram_code,
+            retry_after=retry_after, description=description, exception_type=type(exc).__name__,
+            elapsed_ms=round((photo_clock.monotonic()-started)*1000))
+        raise HTTPException(502, f'Не удалось загрузить фото. Попробуйте ещё раз. Код диагностики: {event_id}') from None
+
+
 @app.get('/api/owner/order-report-media/{card_id}/{stage}')
 async def read_order_report_media(card_id: int, stage: int,
         db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
@@ -5242,35 +5320,19 @@ async def read_order_report_media(card_id: int, stage: int,
         raise HTTPException(404, 'Фото не найдено')
     row = db.get(OrderReportMedia, (f'card:{card.chat_id}:{card.message_id}', stage))
     if not row:
+        report_photo_diagnostic(card_id, stage, None, 'lookup', 'media_not_synced')
         raise HTTPException(404, 'Фото ещё не синхронизировано')
-    raw = _report_media_bytes(row.media)
+    try:
+        raw = _report_media_bytes(row.media)
+    except HTTPException:
+        report_photo_diagnostic(card_id, stage, row.fingerprint, 'decode', 'invalid_stored_jpeg')
+        raise
     if raw is None:
-        import httpx
         token = os.getenv('BOT_TOKEN', '').strip()
         if not token:
+            report_photo_diagnostic(card_id, stage, row.fingerprint, 'configuration', 'bot_token_missing')
             raise HTTPException(503, 'Просмотр фото временно недоступен')
-        try:
-            async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
-                info = await client.get(f'https://api.telegram.org/bot{token}/getFile',
-                    params={'file_id': row.media})
-                info.raise_for_status()
-                result = info.json()
-                path = (result.get('result') or {}).get('file_path', '')
-                if not result.get('ok') or not re.fullmatch(r'[A-Za-z0-9_./-]+', path) or '..' in path or path.startswith('/'):
-                    raise ValueError('file unavailable')
-                chunks, size = [], 0
-                async with client.stream('GET', f'https://api.telegram.org/file/bot{token}/{path}') as response:
-                    response.raise_for_status()
-                    async for chunk in response.aiter_bytes():
-                        size += len(chunk)
-                        if size > 8 * 1024 * 1024:
-                            raise ValueError('file too large')
-                        chunks.append(chunk)
-                raw = b''.join(chunks)
-                if not raw.startswith(b'\xff\xd8\xff'):
-                    raise ValueError('not a photo')
-        except (httpx.HTTPError, ValueError, KeyError):
-            raise HTTPException(502, 'Не удалось загрузить фото. Попробуйте ещё раз') from None
+        raw = await download_report_photo(row.media, token, card_id, stage, row.fingerprint)
     import base64
     return JSONResponse({'image': 'data:image/jpeg;base64,' + base64.b64encode(raw).decode(),
         'fingerprint': row.fingerprint}, headers={'Cache-Control': 'private, no-store'})
@@ -15069,7 +15131,10 @@ def dispatch_approve(order_id: int, data: DispatchRevision, db: Session = Depend
     assignments=dispatch_assignments(db,order)
     locked=list(db.scalars(select(Employee).where(Employee.id.in_([a.employee_id for a in assignments])).order_by(Employee.id).with_for_update()))
     external_member_count=detail['external_member_count']
-    if len(locked)+external_member_count!=order.team_size or any(not p.active or p.tg_id in HIDDEN_TG_IDS for p in locked):
+    # These employees are already assigned to this order. Leaving the group or
+    # being archived later must not invalidate their recorded work/payroll.
+    # New crew additions are checked separately in _dispatch_set_crew.
+    if len(locked)+external_member_count!=order.team_size or any(p.tg_id in HIDDEN_TG_IDS for p in locked):
         raise HTTPException(409,'Список сотрудников изменился')
     for a in sorted(assignments,key=lambda a:a.role!='brigadier'):
         p=a.employee
