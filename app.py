@@ -23348,3 +23348,63 @@ function bindGbuPayrollReconciliationCopy(body,data,month,period){
 
 
 INLINE_INDEX_HTML = _gbu_payroll_reconciliation_copy_html(INLINE_INDEX_HTML)
+
+
+def _gbu_payroll_month_year_buttons_html(html):
+    start = html.index('<div class="gbu-payroll-month-field">')
+    end = html.index('<div class="gbu-payroll-periods"', start)
+    html = html[:start] + '''<div class="gbu-payroll-month-buttons"><button type="button" class="secondary" id="gbuPayrollMonthButton" aria-expanded="false" aria-controls="gbuPayrollDatePicker">${esc(new Intl.DateTimeFormat('ru-RU',{month:'long',timeZone:'UTC'}).format(new Date(month+'-01T12:00:00Z')))} ▾</button><input id="gbuPayrollMonth" type="hidden" value="${esc(month)}"></div><div id="gbuPayrollDatePicker" class="gbu-payroll-date-picker" hidden></div>''' + html[end:]
+    old = " qs('#gbuPayrollMonth').onchange=event=>{if(event.target.value)openGbuPayroll(event.target.value,period)};"
+    if html.count(old) != 1:
+        raise RuntimeError('Payroll month picker binding anchor missing')
+    html = html.replace(old, ' bindGbuPayrollDateButtons(body,month,period);', 1)
+    return html.replace('</body>', r'''<style>
+.gbu-payroll-month-buttons{display:flex;align-items:center;margin:0 0 8px}
+#gbuPayrollMonthButton,#gbuPayrollYearButton{min-height:40px;padding:8px 13px;font-size:14px;white-space:nowrap;color:var(--text)}
+#modal:has(#gbuPayrollBody)>.modal-head{display:flex;align-items:center;gap:8px}
+#modal:has(#gbuPayrollBody)>.modal-head h3{flex:1;min-width:0;margin-right:0}
+#gbuPayrollYearButton{flex-shrink:0;margin-left:auto}
+.gbu-payroll-date-picker{display:grid;width:100%;box-sizing:border-box;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;padding:10px;margin:0 0 10px;border:1px solid var(--gold2);border-radius:12px;background:var(--panel2)}
+.gbu-payroll-date-picker[hidden]{display:none!important}
+.gbu-payroll-date-picker[data-mode="month"]{display:flex;flex-wrap:nowrap;overflow-x:auto;overscroll-behavior-x:contain;touch-action:pan-x;scroll-behavior:auto}
+.gbu-payroll-date-picker[data-mode="month"]>button{flex:0 0 auto;white-space:nowrap;padding:8px 13px}
+.gbu-payroll-date-picker button{min-width:0;min-height:42px;padding:8px 3px;border-radius:9px;font-size:13px}
+.gbu-payroll-date-picker .gbu-year-range{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px}
+</style><script>
+let gbuPayrollDatePickerAbort=null;
+function bindGbuPayrollDateButtons(body,month,period){
+ gbuPayrollDatePickerAbort?.abort();gbuPayrollDatePickerAbort=new AbortController();
+ const signal=gbuPayrollDatePickerAbort.signal,modal=qs('#modal'),picker=qs('#gbuPayrollDatePicker'),monthButton=qs('#gbuPayrollMonthButton');
+ const yearButton=document.createElement('button');yearButton.id='gbuPayrollYearButton';yearButton.type='button';yearButton.className='secondary';yearButton.textContent=month.slice(0,4)+' ▾';yearButton.setAttribute('aria-label','Выбрать год зарплаты ГБУ');yearButton.setAttribute('aria-expanded','false');yearButton.setAttribute('aria-controls',picker.id);
+ qs('#closeModal').before(yearButton);
+ const names=['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
+ let mode=null,yearBase=Number(month.slice(0,4))-4;
+ const active=()=>body.isConnected&&qs('#gbuPayrollBody')===body&&!modal.classList.contains('hidden');
+ function hide(){mode=null;picker.hidden=true;monthButton.setAttribute('aria-expanded','false');yearButton.setAttribute('aria-expanded','false')}
+ function draw(){
+  picker.dataset.mode=mode;
+  picker.hidden=false;monthButton.setAttribute('aria-expanded',String(mode==='month'));yearButton.setAttribute('aria-expanded',String(mode==='year'));
+  if(mode==='month'){
+   picker.innerHTML=names.map((name,i)=>`<button type="button" class="${i+1===Number(month.slice(5,7))?'primary':'secondary'}" data-month-choice="${i+1}" aria-pressed="${i+1===Number(month.slice(5,7))}">${name}</button>`).join('');
+   const selected=picker.querySelector('[aria-pressed="true"]');
+   if(selected)picker.scrollLeft=Math.max(0,selected.offsetLeft-picker.offsetLeft-(picker.clientWidth-selected.offsetWidth)/2);
+  }else{
+   yearBase=Math.max(1,Math.min(9991,yearBase));
+   picker.innerHTML=`<div class="gbu-year-range"><button type="button" class="secondary" data-year-page="-9" aria-label="Предыдущие годы" ${yearBase===1?'disabled':''}>‹</button><b>${yearBase}–${yearBase+8}</b><button type="button" class="secondary" data-year-page="9" aria-label="Следующие годы" ${yearBase===9991?'disabled':''}>›</button></div>`+Array.from({length:9},(_,i)=>yearBase+i).map(year=>`<button type="button" class="${year===Number(month.slice(0,4))?'primary':'secondary'}" data-year-choice="${year}" aria-pressed="${year===Number(month.slice(0,4))}">${year}</button>`).join('');
+  }
+ }
+ monthButton.onclick=()=>{if(mode==='month'){hide();return}mode='month';draw()};
+ yearButton.onclick=()=>{if(mode==='year'){hide();return}mode='year';draw()};
+ picker.onclick=event=>{
+  const choice=event.target.closest('button');if(!choice||!active())return;
+  if(choice.dataset.yearPage){yearBase+=Number(choice.dataset.yearPage);draw();return}
+  const next=choice.dataset.monthChoice?month.slice(0,4)+'-'+String(choice.dataset.monthChoice).padStart(2,'0'):choice.dataset.yearChoice?String(choice.dataset.yearChoice).padStart(4,'0')+'-'+month.slice(5,7):null;
+  if(next){hide();if(next!==month)openGbuPayroll(next,period)}
+ };
+ document.addEventListener('click',event=>{if(active()&&mode&&!picker.contains(event.target)&&!monthButton.contains(event.target)&&!yearButton.contains(event.target))hide()},{signal});
+ modal.addEventListener('keydown',event=>{if(active()&&mode&&event.key==='Escape'){const button=mode==='month'?monthButton:yearButton;event.preventDefault();event.stopImmediatePropagation();hide();button.focus({preventScroll:true})}},{signal,capture:true});
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML = _gbu_payroll_month_year_buttons_html(INLINE_INDEX_HTML)
