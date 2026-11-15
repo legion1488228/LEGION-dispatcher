@@ -19708,8 +19708,8 @@ def build_gbu_cash_allocation(people, cashiers):
         pools.append(pool)
     # Every cashier has reserved their own salary before any other payouts.
     # Leader deficits and main staff above 184 cm remain with the owner.
-    # Height is a preference, never a reason to leave a cashier's money idle.
-    # For each small salary, use matching pools first, then any remaining pool.
+    # Pay other employees only within +/-2 cm of the cashier's height.
+    # Unmatched employees and unknown heights stay with the owner.
     for person in sorted(due.values(), key=lambda p: (not p.get('is_brigadier', False), p['remaining'], p['id'])):
         if person['id'] <= 0 or owner_priority(person) < 2:
             continue
@@ -19719,8 +19719,10 @@ def build_gbu_cash_allocation(people, cashiers):
             if not available:
                 break
             matching = [pool for pool in available if person_height is not None and
-                height_cm(pool.get('height_cm')) is not None and abs(pool['height_cm']-person_height) <= 3]
-            candidates = matching or available
+                height_cm(pool.get('height_cm')) is not None and abs(pool['height_cm']-person_height) <= 2]
+            if not matching:
+                break
+            candidates = matching
             def height_gap(pool):
                 pool_height = height_cm(pool.get('height_cm'))
                 return abs(pool_height-person_height) if pool_height is not None and person_height is not None else 1000
@@ -19736,7 +19738,7 @@ def build_gbu_cash_allocation(people, cashiers):
     owner_payments = [{'employee_id': p['id'], 'name': p['name'], 'phone': p.get('phone', ''), 'telegram_url': p.get('telegram_url', ''),
                        'is_brigadier': bool(p.get('is_brigadier')),
                        'owner_priority': owner_priority(p), 'group_code': p.get('group_code'), 'height_cm': p.get('height_cm'),
-                       'amount': p['remaining']} for p in sorted(due.values(), key=lambda p: (not p.get('is_brigadier', False), -p['remaining'], p['id']))
+                       'amount': p['remaining']} for p in sorted(due.values(), key=lambda p: (-p['remaining'], p['id']))
                       if p['remaining'] > 0]
     salary_total = sum(int(p['amount']) for p in people)
     owner_due = sum(p['amount'] for p in owner_payments)
@@ -19847,11 +19849,11 @@ def gbu_allocation_source(db, user, month, half):
         profile = own_ids[0] if own_ids else None
         cashiers.append(dict(entry, employee_id=profile.id if profile else None,
                              height_cm=profile.height_cm if profile else None))
-    source = {'contact_format': 1, 'split_payment_format': 1, 'split_payment_layout': 2, 'employee_notice_format': 1, 'allocation_rule': 'cashier_self_first_owner_deficits_main185_v6', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
+    source = {'contact_format': 1, 'split_payment_format': 1, 'split_payment_layout': 2, 'employee_notice_format': 1, 'allocation_rule': 'cashier_self_first_owner_main185_height2_strict_v7', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
               'cashiers': sorted(cashiers, key=lambda p:p['tg_id']), 'missing': missing}
     digest = hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     plan = dict(build_gbu_cash_allocation(people, cashiers), **periods, snapshot=digest,
-                allocation_rule='cashier_self_first_owner_deficits_main185_v6', height_tolerance_cm=3, contact_format=1, split_payment_format=1, split_payment_layout=2, employee_notice_format=1,
+                allocation_rule='cashier_self_first_owner_main185_height2_strict_v7', height_tolerance_cm=2, contact_format=1, split_payment_format=1, split_payment_layout=2, employee_notice_format=1,
                 missing_count=len(missing), unverified=[c['name'] for c in cashiers
                     if c['total'] and not c['received'] and not c['checked']])
     return gbu_allocation_split_payment_view(plan)
@@ -19871,7 +19873,7 @@ def gbu_allocation_view(db, row):
         height = payment.get('height_cm') or (profile.height_cm if profile else None)
         payment['owner_priority'] = 0 if payment['is_brigadier'] else 1 if (
             group == 'main' and type(height) is int and height > 184) else 2
-    plan['owner_payments'].sort(key=lambda p: (not p['is_brigadier'], -int(p['amount']), int(p['employee_id'])))
+    plan['owner_payments'].sort(key=lambda p: (-int(p['amount']), int(p['employee_id'])))
     deliveries = list(db.scalars(select(GbuCashAllocationDelivery).where(
         GbuCashAllocationDelivery.plan_id == row.plan_id)))
     plan.update(plan_id=row.plan_id, locked=bool(row.locked),
