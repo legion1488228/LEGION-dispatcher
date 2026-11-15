@@ -19673,13 +19673,19 @@ def gbu_allocation_periods(month, half):
 
 
 def build_gbu_cash_allocation(people, cashiers):
-    """Reserve own salary, then brigadiers before members; prefer heights within 3 cm.
+    """Owner pays brigadiers and main staff above 184 cm before other staff.
 
     Submitted cash stays with the owner. Outside-worker earnings also stay in
     the owner's list. This produces instructions, never payment receipts.
     """
     def height_cm(value):
         return value if isinstance(value, int) and not isinstance(value, bool) and 100 <= value <= 250 else None
+
+    def owner_priority(person):
+        if person.get('is_brigadier'):
+            return 0
+        height = height_cm(person.get('height_cm'))
+        return 1 if person.get('group_code') == 'main' and height is not None and height > 184 else 2
 
     due = {int(p['id']): dict(p, remaining=int(p['amount'])) for p in people if p['amount'] > 0}
     pools, owner_cash = [], 0
@@ -19694,18 +19700,17 @@ def build_gbu_cash_allocation(people, cashiers):
             continue
         pool = dict(cashier, total=amount, remaining=amount, own_salary=0, payments=[])
         own = due.get(cashier.get('employee_id'))
-        if own:
+        if own and owner_priority(own) == 2:
             keep = min(pool['remaining'], own['remaining'])
             pool['own_salary'] = keep
             pool['remaining'] -= keep
             own['remaining'] -= keep
         pools.append(pool)
-    # Brigadiers are paid first; smaller salaries go first within each role.
-    # Own salary was reserved for every cashier.
+    # Reserve the owner's recipients in full. Cashier pools only pay the rest.
     # Height is a preference, never a reason to leave a cashier's money idle.
     # For each small salary, use matching pools first, then any remaining pool.
     for person in sorted(due.values(), key=lambda p: (not p.get('is_brigadier', False), p['remaining'], p['id'])):
-        if person['id'] <= 0:  # external workers are collected by the owner
+        if person['id'] <= 0 or owner_priority(person) < 2:
             continue
         while person['remaining']:
             person_height = height_cm(person.get('height_cm'))
@@ -19729,7 +19734,8 @@ def build_gbu_cash_allocation(people, cashiers):
             pool['remaining'] -= amount
     owner_payments = [{'employee_id': p['id'], 'name': p['name'], 'phone': p.get('phone', ''), 'telegram_url': p.get('telegram_url', ''),
                        'is_brigadier': bool(p.get('is_brigadier')),
-                       'amount': p['remaining']} for p in sorted(due.values(), key=lambda p: (not p.get('is_brigadier', False), -p['remaining'], p['id']))
+                       'owner_priority': owner_priority(p), 'group_code': p.get('group_code'), 'height_cm': p.get('height_cm'),
+                       'amount': p['remaining']} for p in sorted(due.values(), key=lambda p: (owner_priority(p), -p['remaining'], p['id']))
                       if p['remaining'] > 0]
     salary_total = sum(int(p['amount']) for p in people)
     owner_due = sum(p['amount'] for p in owner_payments)
@@ -19819,6 +19825,7 @@ def gbu_allocation_source(db, user, month, half):
                        profile.metro if profile else '', profile.height_cm if profile else '') if x)
         people.append({'id': person['id'], 'name': name, 'amount': amount,
                        'is_brigadier': person.get('payroll_card_role') == 'brigadier' or bool(profile and profile.group_code == 'brigadier'),
+                       'group_code': profile.group_code if profile else None,
                        'height_cm': profile.height_cm if profile else None,
                        'phone': brigadier_phone8(profile.phone) if profile else '',
                        'telegram_url': gbu_allocation_telegram_url(profile)})
@@ -19839,11 +19846,11 @@ def gbu_allocation_source(db, user, month, half):
         profile = own_ids[0] if own_ids else None
         cashiers.append(dict(entry, employee_id=profile.id if profile else None,
                              height_cm=profile.height_cm if profile else None))
-    source = {'contact_format': 1, 'split_payment_format': 1, 'split_payment_layout': 2, 'employee_notice_format': 1, 'allocation_rule': 'brigadiers_first_height3_v4', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
+    source = {'contact_format': 1, 'split_payment_format': 1, 'split_payment_layout': 2, 'employee_notice_format': 1, 'allocation_rule': 'owner_brigadiers_main_over184_v5', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
               'cashiers': sorted(cashiers, key=lambda p:p['tg_id']), 'missing': missing}
     digest = hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     plan = dict(build_gbu_cash_allocation(people, cashiers), **periods, snapshot=digest,
-                allocation_rule='brigadiers_first_height3_v4', height_tolerance_cm=3, contact_format=1, split_payment_format=1, split_payment_layout=2, employee_notice_format=1,
+                allocation_rule='owner_brigadiers_main_over184_v5', height_tolerance_cm=3, contact_format=1, split_payment_format=1, split_payment_layout=2, employee_notice_format=1,
                 missing_count=len(missing), unverified=[c['name'] for c in cashiers
                     if c['total'] and not c['received'] and not c['checked']])
     return gbu_allocation_split_payment_view(plan)
@@ -19854,11 +19861,16 @@ def gbu_allocation_view(db, row):
     # Saved plans keep every payer, amount and payment mark. Only the owner's
     # display order changes, including plans created before role metadata existed.
     owner_ids = [int(p['employee_id']) for p in plan['owner_payments']]
-    leaders = set(db.scalars(select(Employee.id).where(
-        Employee.id.in_(owner_ids), Employee.group_code == 'brigadier'))) if owner_ids else set()
+    profiles = {p.id: p for p in db.scalars(select(Employee).where(
+        Employee.id.in_(owner_ids)))} if owner_ids else {}
     for payment in plan['owner_payments']:
-        payment['is_brigadier'] = bool(payment.get('is_brigadier') or int(payment['employee_id']) in leaders)
-    plan['owner_payments'].sort(key=lambda p: (not p['is_brigadier'], -int(p['amount']), int(p['employee_id'])))
+        profile = profiles.get(int(payment['employee_id']))
+        payment['is_brigadier'] = bool(payment.get('is_brigadier') or profile and profile.group_code == 'brigadier')
+        group = payment.get('group_code') or (profile.group_code if profile else None)
+        height = payment.get('height_cm') or (profile.height_cm if profile else None)
+        payment['owner_priority'] = 0 if payment['is_brigadier'] else 1 if (
+            group == 'main' and type(height) is int and height > 184) else 2
+    plan['owner_payments'].sort(key=lambda p: (p['owner_priority'], -int(p['amount']), int(p['employee_id'])))
     deliveries = list(db.scalars(select(GbuCashAllocationDelivery).where(
         GbuCashAllocationDelivery.plan_id == row.plan_id)))
     plan.update(plan_id=row.plan_id, locked=bool(row.locked),
