@@ -19672,7 +19672,7 @@ def gbu_allocation_periods(month, half):
             'cash_start': cash_start.isoformat(), 'cash_end': cash_end.isoformat()}
 
 
-def build_gbu_cash_allocation(people, cashiers):
+def build_gbu_cash_allocation(people, cashiers, cowork_counts=None):
     """Self salary, owner reservation, height matching, then random tail payouts.
 
     Submitted cash stays with the owner. Outside-worker earnings also stay in
@@ -19680,6 +19680,11 @@ def build_gbu_cash_allocation(people, cashiers):
     """
     def height_cm(value):
         return value if isinstance(value, int) and not isinstance(value, bool) and 100 <= value <= 250 else None
+
+    cowork_counts = cowork_counts or {}
+
+    def shared_orders(pool, person):
+        return int(cowork_counts.get(f"{pool.get('employee_id')}:{person['id']}", 0))
 
     def owner_priority(person):
         if person.get('is_brigadier'):
@@ -19707,9 +19712,12 @@ def build_gbu_cash_allocation(people, cashiers):
             own['remaining'] -= keep
         pools.append(pool)
     # Every cashier has reserved their own salary before any other payouts.
-    # In the first pass, reserve leader deficits and main staff above 184 cm.
-    # Pay others within +/-2 cm; unmatched salaries enter the later tail pass.
-    for person in sorted(due.values(), key=lambda p: (not p.get('is_brigadier', False), p['remaining'], p['id'])):
+    # Reserve owner recipients, then prioritize the strongest actual coworking
+    # relationships before spending pools on people with no joint history.
+    def history_priority(person):
+        score = max((shared_orders(pool, person) for pool in pools if pool['remaining'] > 0), default=0)
+        return (-score, person['remaining'], person['id'])
+    for person in sorted(due.values(), key=history_priority):
         if person['id'] <= 0 or owner_priority(person) < 2:
             continue
         while person['remaining']:
@@ -19717,21 +19725,30 @@ def build_gbu_cash_allocation(people, cashiers):
             available = [pool for pool in pools if pool['remaining'] > 0]
             if not available:
                 break
+            familiar = [pool for pool in available if shared_orders(pool, person) > 0]
             matching = [pool for pool in available if person_height is not None and
                 height_cm(pool.get('height_cm')) is not None and abs(pool['height_cm']-person_height) <= 2]
-            if not matching:
+            if familiar:
+                best = max(shared_orders(pool, person) for pool in familiar)
+                candidates = [pool for pool in familiar if shared_orders(pool, person) == best]
+            elif matching:
+                candidates = matching
+            else:
                 break
-            candidates = matching
             def height_gap(pool):
                 pool_height = height_cm(pool.get('height_cm'))
                 return abs(pool_height-person_height) if pool_height is not None and person_height is not None else 1000
+            near = [pool for pool in candidates if height_gap(pool) <= 2]
+            if near:
+                candidates = near
             fitting = [pool for pool in candidates if pool['remaining'] >= person['remaining']]
             pool = min(fitting, key=lambda p: (height_gap(p), p['remaining'], p['tg_id'])) if fitting else min(
                 candidates, key=lambda p: (-p['remaining'], height_gap(p), p['tg_id']))
             amount = min(person['remaining'], pool['remaining'])
             pool['payments'].append({'employee_id': person['id'], 'name': person['name'],
                                      'phone': person.get('phone', ''), 'telegram_url': person.get('telegram_url', ''),
-                                     'is_brigadier': bool(person.get('is_brigadier')), 'amount': amount})
+                                     'is_brigadier': bool(person.get('is_brigadier')),
+                                     'shared_orders': shared_orders(pool, person), 'amount': amount})
             person['remaining'] -= amount
             pool['remaining'] -= amount
     # Spend leftover pools on the tail of the owner's descending-amount list.
@@ -19744,7 +19761,8 @@ def build_gbu_cash_allocation(people, cashiers):
         'people': [{key: p.get(key) for key in ('id', 'amount', 'height_cm', 'group_code', 'is_brigadier')}
                    for p in sorted(people, key=lambda p: int(p['id']))],
         'cashiers': [{key: c.get(key) for key in ('tg_id', 'employee_id', 'cash', 'kickback', 'received', 'height_cm')}
-                     for c in sorted(cashiers, key=lambda c: int(c['tg_id']))]
+                     for c in sorted(cashiers, key=lambda c: int(c['tg_id']))],
+        'cowork_counts': cowork_counts
     }, sort_keys=True, ensure_ascii=False, default=str).encode()).digest()
     random_payer = random.Random(seed)
     tail = sorted((p for p in due.values() if p['id'] > 0 and p['remaining'] > 0),
@@ -19841,6 +19859,121 @@ def gbu_allocation_split_payment_view(plan):
     return plan
 
 
+def gbu_allocation_cowork_history(db, cashier_employee_ids, recipient_ids, as_of):
+    """Count actual confirmed rosters from both sources once per order.
+
+    No active/deletion filter on employees: leaving the company must not erase
+    historical trips. No names, phone numbers or message-text matching.
+    """
+    cashier_ids, recipient_ids = set(cashier_employee_ids), set(recipient_ids)
+    pairs, seen, covered_orders = defaultdict(int), set(), set()
+    stats = {'orders': 0, 'private_orders': 0, 'gbu_orders': 0}
+    if not cashier_ids or not recipient_ids:
+        return {'pairs': {}, **stats}
+
+    def payload(value):
+        try:
+            decoded = json.loads(value or '{}')
+            return decoded if isinstance(decoded, dict) else {}
+        except (TypeError, ValueError):
+            return {}
+
+    orders = {o.id: o for o in db.scalars(select(Order).where(
+        Order.work_date <= as_of, Order.source.in_(('private', 'gbu'))))}
+    plans = {p.order_id: p for p in db.scalars(select(DispatchPlan).where(
+        DispatchPlan.order_id.in_(list(orders))))} if orders else {}
+    metas = {oid: payload(plan.payload) for oid, plan in plans.items()}
+    cards = {c.id: f'card:{c.chat_id}:{c.message_id}' for c in db.scalars(
+        select(NumberCardEvent).where(NumberCardEvent.work_date <= as_of))}
+    order_keys, key_orders = {}, {}
+    for oid, plan in plans.items():
+        card_id = plan.approved_card_id or metas[oid].get('number_card_id')
+        if card_id in cards:
+            order_keys[oid] = cards[card_id]
+            key_orders[cards[card_id]] = oid
+    profiles = {p.id: p for p in db.scalars(select(Employee))}
+    valid_ids = {pid for pid, p in profiles.items() if p.tg_id not in HIDDEN_TG_IDS}
+
+    def record(key, source, crew, order_id=None):
+        if key in seen or (order_id is not None and order_id in covered_orders) or not crew or len({pid for pid, role in crew}) != len(crew):
+            return False
+        leaders = [pid for pid, role in crew if role == 'brigadier']
+        ids = {pid for pid, role in crew}
+        if len(leaders) != 1 or not ids <= valid_ids or any(role not in {'brigadier', 'member'} for pid, role in crew):
+            return False
+        seen.add(key)
+        if order_id is not None:
+            covered_orders.add(order_id)
+        stats['orders'] += 1
+        stats[source + '_orders'] += 1
+        for payer in sorted(ids & cashier_ids):
+            for person in sorted((ids & recipient_ids) - {payer}):
+                pairs[f'{payer}:{person}'] += 1
+        return True
+
+    # Payroll confirmation is the authoritative GBU roster, including old
+    # orders which predate native dispatch Order records.
+    rosters = list(db.scalars(select(GbuPayrollRoster).where(GbuPayrollRoster.work_date <= as_of)))
+    rosters.sort(key=lambda r: (r.report_key not in key_orders, r.work_date, r.report_key))
+    for roster in rosters:
+        data = payload(roster.payload)
+        oid = data.get('dispatch_order_id') or key_orders.get(roster.report_key)
+        order = orders.get(oid)
+        if order and (order.status in {'draft', 'cancelled'} or order.source != 'gbu' or order.work_date != roster.work_date):
+            continue
+        crew = data.get('crew')
+        if not isinstance(crew, list) or not all(isinstance(m, dict) and type(m.get('id')) is int for m in crew):
+            continue
+        external = data.get('external_member_count', 0)
+        if type(external) is not int or external < 0:
+            continue
+        total = len(crew) + external
+        if (order and total != order.team_size) or (not order and total not in {4, 6}):
+            continue
+        if record(roster.report_key, 'gbu', [(m['id'], m.get('role')) for m in crew], oid):
+            if oid is not None:
+                order_keys[oid] = roster.report_key
+
+    assignments = defaultdict(list)
+    if orders:
+        for row in db.scalars(select(Assignment).where(Assignment.order_id.in_(list(orders)))):
+            assignments[row.order_id].append(row)
+    history_by_day, receipts_by_order = defaultdict(list), defaultdict(list)
+    for delivery in db.scalars(select(DispatchDelivery).where(DispatchDelivery.work_date <= as_of)):
+        data = payload(delivery.payload)
+        history_by_day[delivery.work_date].append(data)
+        if data.get('confirmed_at') and data.get('confirmable') and data.get('kind') in {'order', 'crew_change'}:
+            receipts_by_order[data.get('order_id')].append(data)
+    for oid, order in sorted(orders.items()):
+        if oid in covered_orders or order.status in {'draft', 'cancelled'}:
+            continue
+        crew = assignments.get(oid, [])
+        meta = metas.get(oid, {})
+        external = meta.get('external_member_count', 0)
+        if type(external) is not int or external < 0 or len(crew) + external != order.team_size:
+            continue
+        leaders = [a.employee_id for a in crew if a.role == 'brigadier']
+        if len(leaders) != 1 or leaders[0] not in valid_ids:
+            continue
+        leader_tg = profiles[leaders[0]].tg_id
+        carried = meta.get('crew_receipt') or {}
+        if not isinstance(carried, dict):
+            continue
+        # Never let an earlier acknowledgement confirm an outstanding change.
+        if carried.get('notice_key') and not (carried.get('confirmed_at') and carried.get('tg_id') == leader_tg):
+            continue
+        confirmed = bool(getattr(order, 'finalized_at', None) or order.status in {'brigadier_confirmed', 'closed'}
+                         or plans.get(oid) and plans[oid].approved_card_id)
+        if not confirmed and any(r.get('chat_id') == leader_tg for r in receipts_by_order.get(oid, [])):
+            # Revision-aware receipt validation protects unconfirmed replacements.
+            item = dispatch_order_data(db, order, 0)
+            confirmed = dispatch_receipt_info(db, item, history_by_day[order.work_date]).get('status') == 'confirmed'
+        if confirmed:
+            record(order_keys.get(oid, f'order:{oid}'), order.source,
+                   [(a.employee_id, a.role) for a in crew], oid)
+    return {'pairs': dict(sorted(pairs.items())), **stats}
+
+
 def gbu_allocation_source(db, user, month, half):
     _require_gbu_payroll_owner(db, user)
     periods = gbu_allocation_periods(month, half)
@@ -19880,13 +20013,17 @@ def gbu_allocation_source(db, user, month, half):
         profile = own_ids[0] if own_ids else None
         cashiers.append(dict(entry, employee_id=profile.id if profile else None,
                              height_cm=profile.height_cm if profile else None))
-    source = {'contact_format': 1, 'split_payment_format': 1, 'split_payment_layout': 2, 'employee_notice_format': 1, 'allocation_rule': 'self_first_height2_owner_tail_random_v8', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
-              'cashiers': sorted(cashiers, key=lambda p:p['tg_id']), 'missing': missing}
+    history = gbu_allocation_cowork_history(db,
+        {c['employee_id'] for c in cashiers if c['employee_id']},
+        {p['id'] for p in people if p['id'] > 0}, datetime.now(MOSCOW).date())
+    source = {'contact_format': 1, 'split_payment_format': 1, 'split_payment_layout': 2, 'employee_notice_format': 1, 'allocation_rule': 'self_first_confirmed_cowork_all_history_v9', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
+              'cashiers': sorted(cashiers, key=lambda p:p['tg_id']), 'missing': missing, 'cowork_history': history}
     digest = hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-    plan = dict(build_gbu_cash_allocation(people, cashiers), **periods, snapshot=digest,
-                allocation_rule='self_first_height2_owner_tail_random_v8', height_tolerance_cm=2, contact_format=1, split_payment_format=1, split_payment_layout=2, employee_notice_format=1,
+    plan = dict(build_gbu_cash_allocation(people, cashiers, history['pairs']), **periods, snapshot=digest,
+                allocation_rule='self_first_confirmed_cowork_all_history_v9', height_tolerance_cm=2, contact_format=1, split_payment_format=1, split_payment_layout=2, employee_notice_format=1,
                 missing_count=len(missing), unverified=[c['name'] for c in cashiers
                     if c['total'] and not c['received'] and not c['checked']])
+    plan['cowork_history'] = {key: value for key, value in history.items() if key != 'pairs'}
     return gbu_allocation_split_payment_view(plan)
 
 
@@ -20228,6 +20365,7 @@ async function openGbuCashAllocation(month,period){
   const sortedCashiers=[...plan.cashiers].sort((a,b)=>Number(paidCashierIds.has(Number(b.tg_id)))-Number(paidCashierIds.has(Number(a.tg_id))));
   root.innerHTML=`<div data-allocation-overview ${selectedCashier!==null?'hidden':''}><div class="allocation-toolbar"><button type="button" class="secondary" data-allocation-back>← К зарплате</button><p class="allocation-periods"><span title="${esc(gbuAllocationPeriod(plan.salary_start,plan.salary_end))}">Зарплата: ${esc(gbuAllocationShortPeriod(plan.salary_start,plan.salary_end))}</span><span title="${esc(gbuAllocationPeriod(plan.cash_start,plan.cash_end))}">Касса: ${esc(gbuAllocationShortPeriod(plan.cash_start,plan.cash_end))}</span></p></div>
   <div class="allocation-summary">${summary('Начислено',plan.salary_total)}${summary('Касса с откатами',plan.cash_total)}<div><small>У меня на руках${plan.owner_cash_manual?' · вручную':''}</small><b>${gbuAllocationMoney(plan.owner_cash)}</b><button type="button" class="secondary" data-owner-cash-edit>Изменить</button></div>${summary('Бригадиры выплатят, включая себе',plan.cashier_payouts)}${summary('Выплатить через тебя',plan.owner_due)}${summary('Добавить своих денег',plan.owner_topup)}<div class="allocation-owner-remaining" role="status"><small>Мне осталось выплатить</small><b>${gbuAllocationMoney(gbuAllocationOwnerRemaining(plan))}</b><small>Выплачено: ${gbuAllocationMoney(plan.owner_payments.filter(p=>p.paid===true).reduce((sum,p)=>sum+Number(p.amount),0))}</small></div></div>
+  ${plan.cowork_history?`<p class="allocation-info">Подбор по совместным выездам: ${Number(plan.cowork_history.orders)} подтверждённых заказов · частные ${Number(plan.cowork_history.private_orders)}, ГБУ ${Number(plan.cowork_history.gbu_orders)}.</p>`:''}
   ${plan.missing_count?`<p class="allocation-warn">Не заполнен состав: ${plan.missing_count}. Сначала завершите начисления.</p>`:''}
   ${plan.unverified?.length?`<p class="allocation-warn">Ещё не подтвердили сверку: ${esc(plan.unverified.join(', '))}. Проверь суммы перед отправкой.</p>`:''}
   <section><h4>Мой список выплат · ${gbuAllocationMoney(gbuAllocationOwnerRemaining(plan))}</h4>${gbuAllocationOwnerProgressHtml(plan)}${gbuOwnerMembersSummaryHtml(ownerMembers)}<div class="allocation-owner-grid">${plan.owner_payments.map((p,index)=>gbuAllocationOwnerRecipientHtml(p,index+1,ownerMembers?.items?.find(m=>Number(m.employee_id)===Number(p.employee_id)))).join('')||'<p>Доплат сотрудникам нет.</p>'}</div>${gbuAllocationCardCommentHtml(comments,0,commentDrafts)}${plan.owner_due?gbuAllocationPayoutStatus(plan,0):''}</section>
