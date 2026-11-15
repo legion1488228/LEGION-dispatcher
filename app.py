@@ -19736,7 +19736,7 @@ def build_gbu_cash_allocation(people, cashiers):
     owner_payments = [{'employee_id': p['id'], 'name': p['name'], 'phone': p.get('phone', ''), 'telegram_url': p.get('telegram_url', ''),
                        'is_brigadier': bool(p.get('is_brigadier')),
                        'owner_priority': owner_priority(p), 'group_code': p.get('group_code'), 'height_cm': p.get('height_cm'),
-                       'amount': p['remaining']} for p in sorted(due.values(), key=lambda p: (owner_priority(p), -p['remaining'], p['id']))
+                       'amount': p['remaining']} for p in sorted(due.values(), key=lambda p: (not p.get('is_brigadier', False), -p['remaining'], p['id']))
                       if p['remaining'] > 0]
     salary_total = sum(int(p['amount']) for p in people)
     owner_due = sum(p['amount'] for p in owner_payments)
@@ -19871,7 +19871,7 @@ def gbu_allocation_view(db, row):
         height = payment.get('height_cm') or (profile.height_cm if profile else None)
         payment['owner_priority'] = 0 if payment['is_brigadier'] else 1 if (
             group == 'main' and type(height) is int and height > 184) else 2
-    plan['owner_payments'].sort(key=lambda p: (p['owner_priority'], -int(p['amount']), int(p['employee_id'])))
+    plan['owner_payments'].sort(key=lambda p: (not p['is_brigadier'], -int(p['amount']), int(p['employee_id'])))
     deliveries = list(db.scalars(select(GbuCashAllocationDelivery).where(
         GbuCashAllocationDelivery.plan_id == row.plan_id)))
     plan.update(plan_id=row.plan_id, locked=bool(row.locked),
