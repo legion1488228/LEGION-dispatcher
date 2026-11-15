@@ -19648,7 +19648,7 @@ def gbu_allocation_periods(month, half):
 
 
 def build_gbu_cash_allocation(people, cashiers):
-    """Reserve own salary, then small payouts; prefer heights within 3 cm.
+    """Reserve own salary, then brigadiers before members; prefer heights within 3 cm.
 
     Submitted cash stays with the owner. Outside-worker earnings also stay in
     the owner's list. This produces instructions, never payment receipts.
@@ -19675,11 +19675,11 @@ def build_gbu_cash_allocation(people, cashiers):
             pool['remaining'] -= keep
             own['remaining'] -= keep
         pools.append(pool)
-    # Amount is the primary ordering: small salaries are assigned before large
-    # ones, across all height groups. Own salary was reserved for every cashier.
+    # Brigadiers are paid first; smaller salaries go first within each role.
+    # Own salary was reserved for every cashier.
     # Height is a preference, never a reason to leave a cashier's money idle.
     # For each small salary, use matching pools first, then any remaining pool.
-    for person in sorted(due.values(), key=lambda p: (p['remaining'], p['id'])):
+    for person in sorted(due.values(), key=lambda p: (not p.get('is_brigadier', False), p['remaining'], p['id'])):
         if person['id'] <= 0:  # external workers are collected by the owner
             continue
         while person['remaining']:
@@ -19698,11 +19698,13 @@ def build_gbu_cash_allocation(people, cashiers):
                 candidates, key=lambda p: (-p['remaining'], height_gap(p), p['tg_id']))
             amount = min(person['remaining'], pool['remaining'])
             pool['payments'].append({'employee_id': person['id'], 'name': person['name'],
-                                     'phone': person.get('phone', ''), 'telegram_url': person.get('telegram_url', ''), 'amount': amount})
+                                     'phone': person.get('phone', ''), 'telegram_url': person.get('telegram_url', ''),
+                                     'is_brigadier': bool(person.get('is_brigadier')), 'amount': amount})
             person['remaining'] -= amount
             pool['remaining'] -= amount
     owner_payments = [{'employee_id': p['id'], 'name': p['name'], 'phone': p.get('phone', ''), 'telegram_url': p.get('telegram_url', ''),
-                       'amount': p['remaining']} for p in sorted(due.values(), key=lambda p: (-p['remaining'], p['id']))
+                       'is_brigadier': bool(p.get('is_brigadier')),
+                       'amount': p['remaining']} for p in sorted(due.values(), key=lambda p: (not p.get('is_brigadier', False), -p['remaining'], p['id']))
                       if p['remaining'] > 0]
     salary_total = sum(int(p['amount']) for p in people)
     owner_due = sum(p['amount'] for p in owner_payments)
@@ -19791,6 +19793,7 @@ def gbu_allocation_source(db, user, month, half):
         name = ' '.join(str(x) for x in (str(profile.full_name or '').split()[0] if profile else person['name'],
                        profile.metro if profile else '', profile.height_cm if profile else '') if x)
         people.append({'id': person['id'], 'name': name, 'amount': amount,
+                       'is_brigadier': person.get('payroll_card_role') == 'brigadier' or bool(profile and profile.group_code == 'brigadier'),
                        'height_cm': profile.height_cm if profile else None,
                        'phone': brigadier_phone8(profile.phone) if profile else '',
                        'telegram_url': gbu_allocation_telegram_url(profile)})
@@ -19811,11 +19814,11 @@ def gbu_allocation_source(db, user, month, half):
         profile = own_ids[0] if own_ids else None
         cashiers.append(dict(entry, employee_id=profile.id if profile else None,
                              height_cm=profile.height_cm if profile else None))
-    source = {'contact_format': 1, 'split_payment_format': 1, 'split_payment_layout': 2, 'employee_notice_format': 1, 'allocation_rule': 'smallest_first_height3_fallback_v3', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
+    source = {'contact_format': 1, 'split_payment_format': 1, 'split_payment_layout': 2, 'employee_notice_format': 1, 'allocation_rule': 'brigadiers_first_height3_v4', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
               'cashiers': sorted(cashiers, key=lambda p:p['tg_id']), 'missing': missing}
     digest = hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     plan = dict(build_gbu_cash_allocation(people, cashiers), **periods, snapshot=digest,
-                allocation_rule='smallest_first_height3_fallback_v3', height_tolerance_cm=3, contact_format=1, split_payment_format=1, split_payment_layout=2, employee_notice_format=1,
+                allocation_rule='brigadiers_first_height3_v4', height_tolerance_cm=3, contact_format=1, split_payment_format=1, split_payment_layout=2, employee_notice_format=1,
                 missing_count=len(missing), unverified=[c['name'] for c in cashiers
                     if c['total'] and not c['received'] and not c['checked']])
     return gbu_allocation_split_payment_view(plan)
@@ -19823,6 +19826,14 @@ def gbu_allocation_source(db, user, month, half):
 
 def gbu_allocation_view(db, row):
     plan = json.loads(row.payload)
+    # Saved plans keep every payer, amount and payment mark. Only the owner's
+    # display order changes, including plans created before role metadata existed.
+    owner_ids = [int(p['employee_id']) for p in plan['owner_payments']]
+    leaders = set(db.scalars(select(Employee.id).where(
+        Employee.id.in_(owner_ids), Employee.group_code == 'brigadier'))) if owner_ids else set()
+    for payment in plan['owner_payments']:
+        payment['is_brigadier'] = bool(payment.get('is_brigadier') or int(payment['employee_id']) in leaders)
+    plan['owner_payments'].sort(key=lambda p: (not p['is_brigadier'], -int(p['amount']), int(p['employee_id'])))
     deliveries = list(db.scalars(select(GbuCashAllocationDelivery).where(
         GbuCashAllocationDelivery.plan_id == row.plan_id)))
     plan.update(plan_id=row.plan_id, locked=bool(row.locked),
@@ -23272,3 +23283,31 @@ document.addEventListener('click',event=>{
 </script></body>''',1)
 
 INLINE_INDEX_HTML = _cash_scroll_stability_html(INLINE_INDEX_HTML)
+
+
+def _gbu_payroll_reconciliation_copy_html(html):
+    old = '  wireGbuPayrollPeople(body,data,month,period);'
+    if html.count(old) != 1:
+        raise RuntimeError('Payroll reconciliation copy anchor missing')
+    html = html.replace(old, '  bindGbuPayrollReconciliationCopy(body,data,month,period);\n' + old, 1)
+    return html.replace('</body>', r'''<script>
+function gbuPayrollReconciliationCopyText(data,month,period){
+ const result=gbuPaidOrderCounts(data.orders),counts={};
+ result.groups.forEach(group=>{counts[group.category+':'+group.size]=group.count});
+ const values={sources:{gbu:{total:result.total,counts,unallocated:0}}};
+ const days=new Date(Number(month.slice(0,4)),Number(month.slice(5,7)),0).getDate();
+ return orderReconciliationText(values,{month,period,source:'gbu',days});
+}
+function bindGbuPayrollReconciliationCopy(body,data,month,period){
+ const button=body.querySelector('.gbu-paid-orders>summary');if(!button)return;
+ button.setAttribute('aria-label','Скопировать сверку заказов ГБУ за выбранный период');
+ button.title='Скопировать сверку заказов';
+ button.onclick=event=>{
+  event.preventDefault();
+  copyOrderReconciliation(gbuPayrollReconciliationCopyText(data,month,period),button);
+ };
+}
+</script></body>''',1)
+
+
+INLINE_INDEX_HTML = _gbu_payroll_reconciliation_copy_html(INLINE_INDEX_HTML)
