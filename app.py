@@ -19673,7 +19673,7 @@ def gbu_allocation_periods(month, half):
 
 
 def build_gbu_cash_allocation(people, cashiers):
-    """Cashiers retain own salary first; owner pays leader deficits and main 185+.
+    """Self salary, owner reservation, height matching, then random tail payouts.
 
     Submitted cash stays with the owner. Outside-worker earnings also stay in
     the owner's list. This produces instructions, never payment receipts.
@@ -19707,9 +19707,8 @@ def build_gbu_cash_allocation(people, cashiers):
             own['remaining'] -= keep
         pools.append(pool)
     # Every cashier has reserved their own salary before any other payouts.
-    # Leader deficits and main staff above 184 cm remain with the owner.
-    # Pay other employees only within +/-2 cm of the cashier's height.
-    # Unmatched employees and unknown heights stay with the owner.
+    # In the first pass, reserve leader deficits and main staff above 184 cm.
+    # Pay others within +/-2 cm; unmatched salaries enter the later tail pass.
     for person in sorted(due.values(), key=lambda p: (not p.get('is_brigadier', False), p['remaining'], p['id'])):
         if person['id'] <= 0 or owner_priority(person) < 2:
             continue
@@ -19733,6 +19732,38 @@ def build_gbu_cash_allocation(people, cashiers):
             pool['payments'].append({'employee_id': person['id'], 'name': person['name'],
                                      'phone': person.get('phone', ''), 'telegram_url': person.get('telegram_url', ''),
                                      'is_brigadier': bool(person.get('is_brigadier')), 'amount': amount})
+            person['remaining'] -= amount
+            pool['remaining'] -= amount
+    # Spend leftover pools on the tail of the owner's descending-amount list.
+    # Randomize the payer, not the employee order. A source-derived seed keeps
+    # preview, save and reload identical until the financial inputs change.
+    import random
+    import hashlib as allocation_hash
+    import json as allocation_json
+    seed = allocation_hash.sha256(allocation_json.dumps({
+        'people': [{key: p.get(key) for key in ('id', 'amount', 'height_cm', 'group_code', 'is_brigadier')}
+                   for p in sorted(people, key=lambda p: int(p['id']))],
+        'cashiers': [{key: c.get(key) for key in ('tg_id', 'employee_id', 'cash', 'kickback', 'received', 'height_cm')}
+                     for c in sorted(cashiers, key=lambda c: int(c['tg_id']))]
+    }, sort_keys=True, ensure_ascii=False, default=str).encode()).digest()
+    random_payer = random.Random(seed)
+    tail = sorted((p for p in due.values() if p['id'] > 0 and p['remaining'] > 0),
+                  key=lambda p: (p['remaining'], -p['id']))
+    for person in tail:
+        while person['remaining'] > 0:
+            available = [pool for pool in pools if pool['remaining'] > 0]
+            if not available:
+                break
+            fitting = [pool for pool in available if pool['remaining'] >= person['remaining']]
+            pool = random_payer.choice(fitting or available)
+            amount = min(person['remaining'], pool['remaining'])
+            payment = next((p for p in pool['payments'] if p['employee_id'] == person['id']), None)
+            if payment:
+                payment['amount'] += amount
+            else:
+                pool['payments'].append({'employee_id': person['id'], 'name': person['name'],
+                    'phone': person.get('phone', ''), 'telegram_url': person.get('telegram_url', ''),
+                    'is_brigadier': bool(person.get('is_brigadier')), 'amount': amount})
             person['remaining'] -= amount
             pool['remaining'] -= amount
     owner_payments = [{'employee_id': p['id'], 'name': p['name'], 'phone': p.get('phone', ''), 'telegram_url': p.get('telegram_url', ''),
@@ -19849,11 +19880,11 @@ def gbu_allocation_source(db, user, month, half):
         profile = own_ids[0] if own_ids else None
         cashiers.append(dict(entry, employee_id=profile.id if profile else None,
                              height_cm=profile.height_cm if profile else None))
-    source = {'contact_format': 1, 'split_payment_format': 1, 'split_payment_layout': 2, 'employee_notice_format': 1, 'allocation_rule': 'cashier_self_first_owner_main185_height2_strict_v7', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
+    source = {'contact_format': 1, 'split_payment_format': 1, 'split_payment_layout': 2, 'employee_notice_format': 1, 'allocation_rule': 'self_first_height2_owner_tail_random_v8', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
               'cashiers': sorted(cashiers, key=lambda p:p['tg_id']), 'missing': missing}
     digest = hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     plan = dict(build_gbu_cash_allocation(people, cashiers), **periods, snapshot=digest,
-                allocation_rule='cashier_self_first_owner_main185_height2_strict_v7', height_tolerance_cm=2, contact_format=1, split_payment_format=1, split_payment_layout=2, employee_notice_format=1,
+                allocation_rule='self_first_height2_owner_tail_random_v8', height_tolerance_cm=2, contact_format=1, split_payment_format=1, split_payment_layout=2, employee_notice_format=1,
                 missing_count=len(missing), unverified=[c['name'] for c in cashiers
                     if c['total'] and not c['received'] and not c['checked']])
     return gbu_allocation_split_payment_view(plan)
