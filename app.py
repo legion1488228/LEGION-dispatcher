@@ -4277,7 +4277,13 @@ async def send_readiness_chat_action(kind: Literal["summary", "reminders", "rosh
         missing = required - configured
         if missing:
             raise HTTPException(409, "Не подключены группы: " + ", ".join(GROUP_LABELS[c] for c in sorted(missing)))
-        broadcast_text = (f"На {day.strftime('%d.%m.%Y')} ❗️АВРАЛ❗️ОТПИСЫВАЕМСЯ О ГОТОВНОСТИ"
+        weekdays = ('понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье')
+        months = ('января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+                  'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря')
+        today = datetime.now(ZoneInfo('Europe/Moscow')).date()
+        prefix = 'На завтра' if day == today + timedelta(days=1) else 'На сегодня' if day == today else 'На'
+        date_heading = f'{prefix} ({weekdays[day.weekday()]}) {day.day} {months[day.month-1]}'
+        broadcast_text = (f"<b><u>{date_heading}</u></b>\n❗️АВРАЛ❗️ОТПИСЫВАЕМСЯ О ГОТОВНОСТИ"
                           if kind == "avral" else "❗️Кто не получил заказ-выходной❗️")
         messages = [(chat_id, [broadcast_text])
                     for chat_id in sorted({int(g["chat_id"]) for g in settings["groups"]
@@ -4418,10 +4424,10 @@ async def send_cash_reminder(month: str | None = None, half: int = 0,
         try:
             periods = ', '.join(recipients[chat_id])
             delivered = await send_telegram_message(chat_id,
-                f'🔔 Напоминание о сверке кассы\nПериод: {periods}\n\n'
+                f'🔔 Напоминание о сверке кассы\nПериод: <b><u>{escape(periods)}</u></b>\n\n'
                 'Вы ещё не подтвердили сверку за этот период. '
-                'Если вы ещё не выставили кассу за сегодня, сначала выставите её, '
-                'а затем нажимайте кнопку сверки.\n\n'
+                '<b><u>Если вы ещё не выставили кассу за сегодня, сначала выставите её, '
+                'а затем нажимайте кнопку сверки.</u></b>\n\n'
                 'Кнопка сверки кассы находится в разделе «Касса» в личном кабинете.')
             outcome = 'sent' if delivered else 'failed'
         except Exception as exc:
