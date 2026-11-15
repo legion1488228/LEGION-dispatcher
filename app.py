@@ -11035,11 +11035,32 @@ def cash_reconciliation_period(month, half):
         day=15 if half == 1 else calendar.monthrange(first.year, first.month)[1])
 
 
-def cash_reconciliation_cashiers(db):
-    return [employee for employee in db.scalars(select(Employee).where(
+def cash_reconciliation_cashiers(db, start=None, end=None, ledger_rows=None):
+    employees = [employee for employee in db.scalars(select(Employee).where(
         Employee.active.is_(True), Employee.group_code == 'brigadier',
         Employee.is_cashier.is_(True), _visible_employee()))
         if employee.tg_id and not _cashier_excluded(db, employee)]
+    if start is None or end is None:
+        return employees
+    # Employment/access state is not a financial filter. Preserve accounts
+    # which have real entries in this period, even after deletion or dismissal.
+    from types import SimpleNamespace
+    rows = ledger_rows if ledger_rows is not None else _all_cash_rows(db, start, end)
+    historical = {int(row.brigadier_tg_id): row for row in rows
+                  if row.brigadier_tg_id and int(row.brigadier_tg_id) not in HIDDEN_TG_IDS}
+    people = {int(e.tg_id): e for e in employees}
+    if historical:
+        for employee in db.scalars(select(Employee).where(Employee.tg_id.in_(historical)).order_by(Employee.id)):
+            uid = int(employee.tg_id)
+            if uid not in people and not _cashier_excluded(db, employee):
+                people[uid] = employee
+    for uid, row in historical.items():
+        if uid not in people:
+            archived = SimpleNamespace(tg_id=uid, full_name=str(row.brigadier_name or uid),
+                metro='', active=False, group_code='brigadier', is_cashier=False)
+            if not _cashier_excluded(db, archived):
+                people[uid] = archived
+    return list(people.values())
 
 
 def record_cash_period_reconciliation(db, command, intent):
@@ -11062,10 +11083,11 @@ def cash_reconciliation(month: str, half: int, db: Session = Depends(get_db),
         user: TelegramUser = Depends(require_admin)):
     _require_cash_manager(db, user)
     start, end = cash_reconciliation_period(month, half)
-    employees = cash_reconciliation_cashiers(db)
+    ledger_rows = _all_cash_rows(db, start, end)
+    employees = cash_reconciliation_cashiers(db, start, end, ledger_rows)
     people = {int(e.tg_id): e for e in employees}
     sums = defaultdict(lambda: {'cash':0, 'kickback':0, 'orders':0})
-    for entry in _all_cash_rows(db, start, end):
+    for entry in ledger_rows:
         uid = int(entry.brigadier_tg_id)
         if uid in people:
             sums[uid]['cash'] += int(entry.commission_rub or 0)
@@ -11113,9 +11135,9 @@ def cash_reconciliation_mark(tg_id: int, month: str, half: int, change: CashReco
         db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
     if not _is_cabinet_owner(db,user.id):
         raise HTTPException(403, 'Ручная отметка доступна только владельцу')
-    start, _ = cash_reconciliation_period(month, half)
+    start, end = cash_reconciliation_period(month, half)
     db.scalar(select(Employee).where(Employee.tg_id == tg_id).with_for_update().limit(1))
-    if tg_id not in {int(e.tg_id) for e in cash_reconciliation_cashiers(db)}:
+    if tg_id not in {int(e.tg_id) for e in cash_reconciliation_cashiers(db, start, end)}:
         raise HTTPException(404, 'Кассовый бригадир не найден')
     mark = db.get(CashPeriodReconciliation,(start,tg_id))
     if (mark.version if mark else 0) != change.version:
@@ -11136,10 +11158,10 @@ def cash_receipt_update(tg_id: int, month: str, half: int, change: CashReceiptCh
         db: Session = Depends(get_db), user: TelegramUser = Depends(require_admin)):
     if not _is_cabinet_owner(db, user.id):
         raise HTTPException(403, 'Отметка сдачи и комментарий доступны только владельцу')
-    start, _ = cash_reconciliation_period(month, half)
+    start, end = cash_reconciliation_period(month, half)
     # Serialize first creation as well as edits across workers on PostgreSQL.
     db.scalar(select(Employee).where(Employee.tg_id == tg_id).with_for_update().limit(1))
-    if tg_id not in {int(e.tg_id) for e in cash_reconciliation_cashiers(db)}:
+    if tg_id not in {int(e.tg_id) for e in cash_reconciliation_cashiers(db, start, end)}:
         raise HTTPException(404, 'Кассовый бригадир не найден')
     receipt = db.get(CashPeriodReceipt, (start, tg_id))
     if (receipt.version if receipt else 0) != change.version:
@@ -11196,7 +11218,7 @@ async def send_cash_notes(month: str, half: int, change: CashNotesSendInput,
     receipts = {row.tg_id: row for row in db.scalars(select(CashPeriodReceipt).where(
         CashPeriodReceipt.period_start == start))}
     items = []
-    for employee in cash_reconciliation_cashiers(db):
+    for employee in cash_reconciliation_cashiers(db, start, end):
         uid = int(employee.tg_id)
         receipt = receipts.get(uid)
         parts = str(employee.full_name or '').split()
@@ -19602,6 +19624,9 @@ def gbu_allocation_owner_cash_view(db, plan):
     plan['owner_cash_version'] = setting.version if setting else 0
     if plan['owner_cash_manual']:
         plan['owner_cash'] = int(setting.amount)
+    # The owner's actual cash replaces the automatic received-cash amount.
+    # Unreceived cashier pools are counted once, including locked plans.
+    plan['cash_total'] = int(plan['owner_cash']) + sum(int(c['total']) for c in plan['cashiers'])
     available = int(plan['owner_cash']) + int(plan['unspent_cash'])
     plan['owner_topup'] = max(0, int(plan['owner_due']) - available)
     plan['owner_surplus'] = max(0, available - int(plan['owner_due']))
@@ -20156,7 +20181,7 @@ async function openGbuCashAllocation(month,period){
   const paidCashierIds=new Set((plan.payout_confirmations||[]).map(p=>Number(p.tg_id)));
   const sortedCashiers=[...plan.cashiers].sort((a,b)=>Number(paidCashierIds.has(Number(b.tg_id)))-Number(paidCashierIds.has(Number(a.tg_id))));
   root.innerHTML=`<div data-allocation-overview ${selectedCashier!==null?'hidden':''}><div class="allocation-toolbar"><button type="button" class="secondary" data-allocation-back>← К зарплате</button><p class="allocation-periods"><span title="${esc(gbuAllocationPeriod(plan.salary_start,plan.salary_end))}">Зарплата: ${esc(gbuAllocationShortPeriod(plan.salary_start,plan.salary_end))}</span><span title="${esc(gbuAllocationPeriod(plan.cash_start,plan.cash_end))}">Касса: ${esc(gbuAllocationShortPeriod(plan.cash_start,plan.cash_end))}</span></p></div>
-  <div class="allocation-summary">${summary('Начислено',plan.salary_total)}${summary('Касса с откатами',plan.cash_total)}<div><small>Из кассы уже у тебя${plan.owner_cash_manual?' · вручную':''}</small><b>${gbuAllocationMoney(plan.owner_cash)}</b><button type="button" class="secondary" data-owner-cash-edit>Изменить</button></div>${summary('Бригадиры выплатят, включая себе',plan.cashier_payouts)}${summary('Выплатить через тебя',plan.owner_due)}${summary('Добавить своих денег',plan.owner_topup)}<div class="allocation-owner-remaining" role="status"><small>Мне осталось выплатить</small><b>${gbuAllocationMoney(gbuAllocationOwnerRemaining(plan))}</b><small>Выплачено: ${gbuAllocationMoney(plan.owner_payments.filter(p=>p.paid===true).reduce((sum,p)=>sum+Number(p.amount),0))}</small></div></div>
+  <div class="allocation-summary">${summary('Начислено',plan.salary_total)}${summary('Касса с откатами',plan.cash_total)}<div><small>У меня на руках${plan.owner_cash_manual?' · вручную':''}</small><b>${gbuAllocationMoney(plan.owner_cash)}</b><button type="button" class="secondary" data-owner-cash-edit>Изменить</button></div>${summary('Бригадиры выплатят, включая себе',plan.cashier_payouts)}${summary('Выплатить через тебя',plan.owner_due)}${summary('Добавить своих денег',plan.owner_topup)}<div class="allocation-owner-remaining" role="status"><small>Мне осталось выплатить</small><b>${gbuAllocationMoney(gbuAllocationOwnerRemaining(plan))}</b><small>Выплачено: ${gbuAllocationMoney(plan.owner_payments.filter(p=>p.paid===true).reduce((sum,p)=>sum+Number(p.amount),0))}</small></div></div>
   ${plan.missing_count?`<p class="allocation-warn">Не заполнен состав: ${plan.missing_count}. Сначала завершите начисления.</p>`:''}
   ${plan.unverified?.length?`<p class="allocation-warn">Ещё не подтвердили сверку: ${esc(plan.unverified.join(', '))}. Проверь суммы перед отправкой.</p>`:''}
   <section><h4>Мой список выплат · ${gbuAllocationMoney(gbuAllocationOwnerRemaining(plan))}</h4>${gbuAllocationOwnerProgressHtml(plan)}${gbuOwnerMembersSummaryHtml(ownerMembers)}<div class="allocation-owner-grid">${plan.owner_payments.map((p,index)=>gbuAllocationOwnerRecipientHtml(p,index+1,ownerMembers?.items?.find(m=>Number(m.employee_id)===Number(p.employee_id)))).join('')||'<p>Доплат сотрудникам нет.</p>'}</div>${gbuAllocationCardCommentHtml(comments,0,commentDrafts)}${plan.owner_due?gbuAllocationPayoutStatus(plan,0):''}</section>
@@ -20171,7 +20196,7 @@ async function openGbuCashAllocation(month,period){
   qs('[data-owner-cash-edit]',root).onclick=()=>{
    if(busy)return;busy=true;
    const panel=document.createElement('div');panel.className='allocation-group-settings';
-   panel.innerHTML=`<form><h4>Из кассы уже у тебя</h4><label>Фактически получено, ₽<input data-cash-amount type="text" inputmode="numeric" autocomplete="off" value="${Number(plan.owner_cash)}" required></label><p class="allocation-info">Сумма учитывается в расчёте своих денег. Назначенные выплаты бригадиров сохраняются.</p><p data-cash-error role="status"></p><div class="allocation-group-actions"><button type="submit" class="primary">Сохранить</button><button type="button" class="secondary" data-cash-auto>По учёту кассы</button><button type="button" class="secondary" data-cash-cancel>Отмена</button></div></form>`;
+   panel.innerHTML=`<form><h4>У меня на руках</h4><label>У меня на руках, ₽<input data-cash-amount type="text" inputmode="numeric" autocomplete="off" value="${Number(plan.owner_cash)}" required></label><p class="allocation-info">Введите только деньги, которые уже у вас. Суммы, оставшиеся у бригадиров, считаются отдельно. Общая касса и доплата пересчитаются после сохранения.</p><p data-cash-error role="status"></p><div class="allocation-group-actions"><button type="submit" class="primary">Сохранить</button><button type="button" class="secondary" data-cash-auto>Вернуть автоматический расчёт</button><button type="button" class="secondary" data-cash-cancel>Отмена</button></div></form>`;
    qs('.allocation-summary',root).after(panel);
    let saving=false;
    qs('[data-cash-cancel]',panel).onclick=()=>{if(!saving){panel.remove();busy=false}};
