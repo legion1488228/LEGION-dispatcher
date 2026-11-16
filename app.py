@@ -23936,3 +23936,55 @@ function installPrivateCashKeyboard(body){
 
 
 INLINE_INDEX_HTML = _private_cash_keyboard_html(INLINE_INDEX_HTML)
+
+
+# Identify everyone in the saved crew by employee ID, including archived staff.
+def _payroll_photo_crew_identity_html(html):
+    old='openGbuPayrollReportPhotos({...order,crew:saved?.crew||[],category:saved?.category||order.category},button,report);'
+    new="openGbuPayrollReportPhotos({...order,crew:payrollPhotoCrewProfiles(saved?.crew||[],data.employees||[]),selected_employee_id:employee.id,category:saved?.category||order.category},button,report);"
+    if html.count(old)!=1:raise RuntimeError('Payroll crew profile binding missing')
+    html=html.replace(old,new,1)
+    old='<small>${esc(order.date)}</small><h2>ум:'
+    if html.count(old)!=1:raise RuntimeError('Payroll photo weekday anchor missing')
+    html=html.replace(old,'<small>${esc(payrollPhotoWorkDay(order.date))}</small><h2>ум:',1)
+    old="${crew.map(person=>`<li>${esc(person.name||'Сотрудник')}${person.role==='brigadier'?' — бригадир':''}</li>`).join('')}"
+    new="${crew.map(person=>{const name=esc(payrollPhotoCrewIdentity(person)),selected=Number(person.id)===Number(order.selected_employee_id);return `<li>${selected?`<strong><u>${name}</u></strong>`:name}${person.role==='brigadier'?' — бригадир':''}</li>`}).join('')}"
+    if html.count(old)!=1:raise RuntimeError('Payroll selected crew member anchor missing')
+    html=html.replace(old,new,1)
+    return html.replace('</body>',r"""<style>
+.payroll-photo-crew-list strong{font-weight:750}
+.payroll-photo-crew-list u{text-decoration:underline;text-underline-offset:3px}
+</style><script>
+function payrollPhotoCrewProfiles(crew,employees){
+ const byId=new Map(employees.map(employee=>[Number(employee.id),employee]));
+ return crew.map(member=>{
+  const profile=byId.get(Number(member.id));
+  return {...member,first_name:profile?.first_name||member.first_name||'',
+   metro:profile?.metro||member.metro||'',height_cm:profile?.height_cm||member.height_cm||null};
+ });
+}
+function payrollPhotoCrewIdentity(person){
+ if(Number(person.id)<0)return person.name||'Сторонний сотрудник';
+ const raw=String(person.name||'Сотрудник').trim();
+ const heightMatch=raw.match(/\s+([12]\d{2})(?:\s*см)?$/iu);
+ const withoutHeight=heightMatch?raw.slice(0,heightMatch.index).trim():raw;
+ const parts=withoutHeight.split(/\s+/);
+ const snapshotName=parts.shift();
+ const name=person.first_name||snapshotName||'Сотрудник';
+ // Old roster snapshots sometimes contain only a first name. Profile data
+ // comes from the existing payroll response by ID, never a name match.
+ const metro=person.metro||parts.join(' ')||'метро не указано';
+ const height=person.height_cm||heightMatch?.[1];
+ return [name,metro,height?String(height)+' см':'рост не указан'].join(' · ');
+}
+function payrollPhotoWorkDay(day){
+ if(!/^\d{4}-\d{2}-\d{2}$/.test(String(day||'')))return '—';
+ const date=new Date(day+'T12:00:00Z');
+ if(!Number.isFinite(date.getTime())||date.toISOString().slice(0,10)!==day)return '—';
+ const label=new Intl.DateTimeFormat('ru-RU',{weekday:'short',day:'numeric',month:'long',timeZone:'UTC'}).format(date);
+ return label.charAt(0).toUpperCase()+label.slice(1);
+}
+</script></body>""",1)
+
+
+INLINE_INDEX_HTML = _payroll_photo_crew_identity_html(INLINE_INDEX_HTML)
