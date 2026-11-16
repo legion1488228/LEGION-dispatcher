@@ -23869,3 +23869,70 @@ function openDispatchManualNumber(order,day){
 
 
 INLINE_INDEX_HTML = _dispatch_manual_number_html(INLINE_INDEX_HTML)
+
+
+# Keep the cash-day save button inside the visible iOS keyboard viewport.
+def _private_cash_keyboard_html(html):
+    anchor="  function values(){\n   const out={amounts:{},checked:{},own:0,legacy:0,version:data.version};"
+    if html.count(anchor)!=1:raise RuntimeError('Private cash keyboard install anchor missing')
+    html=html.replace(anchor,"  installPrivateCashKeyboard(body);\n"+anchor,1)
+    for anchor in ('function showModal(title, body) {','function closeModal(){'):
+        if html.count(anchor)!=1:raise RuntimeError('Private cash keyboard cleanup anchor missing')
+        html=html.replace(anchor,anchor+'disposePrivateCashKeyboard();',1)
+    return html.replace('</body>',r"""<style>
+#modal:has(#privateCashForm){top:var(--private-cash-top,8px);height:var(--private-cash-height,calc(100dvh - 16px));max-height:var(--private-cash-height,calc(100dvh - 16px));bottom:auto;box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;padding:10px 12px}
+#modal:has(#privateCashForm)>.modal-head{position:static;flex:none;gap:8px;margin-bottom:6px}
+#modal:has(#privateCashForm)>.modal-head::before{display:none}
+#modal:has(#privateCashForm)>.modal-head h3{font-size:18px;margin:0;line-height:1.25}
+#modal:has(#privateCashForm)>#privateCashBack{align-self:flex-start;flex:none;min-height:34px;margin:0 0 6px;padding:5px 10px;font-size:12px}
+#privateCashBody:has(#privateCashForm),#privateCashForm{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+#privateCashForm .private-cash-fields{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:2px 2px 8px;scroll-padding:8px;-webkit-overflow-scrolling:touch}
+#privateCashForm .private-cash-actions{flex:none;display:grid;gap:4px;padding:6px 0 0;background:var(--panel);border-top:1px solid var(--line)}
+#privateCashForm .private-cash-actions #privateCashStatus{margin:0;font-size:12px;line-height:1.3}
+#privateCashForm .private-cash-actions button{width:100%;min-height:44px;margin:0;padding:8px 12px;touch-action:manipulation}
+#privateCashForm [data-private-cash]{font-size:16px}
+</style><script>
+let disposePrivateCashKeyboard=()=>{};
+function installPrivateCashKeyboard(body){
+ disposePrivateCashKeyboard();
+ const modal=qs('#modal'),form=body.querySelector('#privateCashForm');if(!form)return;
+ const fields=document.createElement('div'),actions=document.createElement('footer');
+ fields.className='private-cash-fields';actions.className='private-cash-actions';
+ const summary=body.querySelector('.attention');if(summary)fields.append(summary);
+ for(const child of [...form.children]){
+  (child.matches('#privateCashStatus,button[type=submit]')?actions:fields).append(child);
+ }
+ form.append(fields,actions);
+ const viewport=window.visualViewport;let frame=0,disposed=false;
+ const active=()=>!disposed&&body.isConnected&&qs('#privateCashBody')===body&&!modal.classList.contains('hidden');
+ const update=()=>{
+  frame=0;if(!active())return;
+  const height=viewport?.height||window.innerHeight,top=viewport?.offsetTop||0;
+  modal.style.setProperty('--private-cash-top',Math.round(top+8)+'px');
+  modal.style.setProperty('--private-cash-height',Math.max(0,Math.floor(height-16))+'px');
+  const focused=document.activeElement;
+  if(fields.contains(focused)&&focused.matches('input')){
+   const rect=focused.getBoundingClientRect(),area=fields.getBoundingClientRect();
+   if(rect.bottom>area.bottom-8)fields.scrollTop+=rect.bottom-area.bottom+8;
+   else if(rect.top<area.top+8)fields.scrollTop+=rect.top-area.top-8;
+  }
+ };
+ const schedule=()=>{if(!frame&&!disposed)frame=requestAnimationFrame(update)};
+ const keepFocus=event=>{if(event.button===0&&!event.currentTarget.disabled)event.preventDefault()};
+ const save=actions.querySelector('button[type=submit]');save?.addEventListener('pointerdown',keepFocus);
+ viewport?.addEventListener('resize',schedule);viewport?.addEventListener('scroll',schedule);
+ window.addEventListener('resize',schedule);form.addEventListener('focusin',schedule);
+ update();
+ disposePrivateCashKeyboard=()=>{
+  disposed=true;if(frame)cancelAnimationFrame(frame);
+  viewport?.removeEventListener('resize',schedule);viewport?.removeEventListener('scroll',schedule);
+  window.removeEventListener('resize',schedule);form.removeEventListener('focusin',schedule);
+  save?.removeEventListener('pointerdown',keepFocus);
+  modal.style.removeProperty('--private-cash-top');modal.style.removeProperty('--private-cash-height');
+  disposePrivateCashKeyboard=()=>{};
+ };
+}
+</script></body>""",1)
+
+
+INLINE_INDEX_HTML = _private_cash_keyboard_html(INLINE_INDEX_HTML)
