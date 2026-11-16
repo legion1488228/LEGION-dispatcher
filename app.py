@@ -8459,7 +8459,7 @@ def cabinet_command_finish(data: CabinetCommandResult, db: Session = Depends(get
             db.commit()
             return {'ok':True, 'retry_pending':True}
         row.status=data.status;row.result=json.dumps(result,ensure_ascii=False)
-        row.payload=json.dumps(intent,ensure_ascii=False) if intent.get('action') in {'cash_summary', 'dispatcher_surname_edit'} else '{}'
+        row.payload=json.dumps(intent,ensure_ascii=False) if (intent.get('dispatch_activation') or intent.get('action') in {'cash_summary', 'dispatcher_surname_edit'}) else '{}'
         db.commit()
     return {'ok':True}
 
@@ -15233,6 +15233,7 @@ class DispatchActivationInput(BaseModel):
     job_id: StrictStr = Field(pattern=r'^[a-f0-9]{64}$')
     tg_id: StrictInt
     card: NumberCardInput | None = None
+    check_only: bool = False
 
 
 def dispatch_queue_activation(db,item):
@@ -15292,6 +15293,14 @@ def dispatch_activate(data: DispatchActivationInput, db: Session = Depends(get_d
         raise HTTPException(409,'Карточка не соответствует подтверждённому заказу')
     existing=db.scalar(select(NumberCardEvent).where(NumberCardEvent.chat_id==card.chat_id,
         NumberCardEvent.message_id==card.message_id))
+    if data.check_only:
+        conflict=bool(existing and (existing.tg_id!=card.tg_id or existing.work_date!=card.work_date
+            or existing.source!=card.source or existing.surname.strip().upper()!=card.surname.strip().upper()
+            or db.get(NumberCardDeletion,existing.id)))
+        if existing and not conflict:
+            conflict=any(json.loads(other.payload or '{}').get('number_card_id')==existing.id
+                for other in db.scalars(select(DispatchPlan).where(DispatchPlan.order_id!=order.id)))
+        return {'ok':True,'registration_conflict':conflict}
     if existing and (existing.tg_id!=card.tg_id or existing.work_date!=card.work_date
             or existing.source!=card.source or existing.surname.strip().upper()!=card.surname.strip().upper()):
         raise HTTPException(409,'Номер уже принадлежит другому заказу')
@@ -23804,7 +23813,10 @@ def dispatch_manual_number_status(request_id: str, db: Session=Depends(get_db),
                                   user: TelegramUser=Depends(require_app_user)):
     dispatch_guard(db,user)
     job=db.get(CabinetCommand,request_id)
-    if not job or not json.loads(job.payload or '{}').get('dispatch_activation'):
+    if not job:raise HTTPException(404,'Действие не найдено')
+    activation=json.loads(job.payload or '{}').get('dispatch_activation')
+    if not activation and not any(dispatch_hash({'activation_order':oid,'brigadier':job.tg_id})==job.id
+            for oid in db.scalars(select(Order.id))):
         raise HTTPException(404,'Действие не найдено')
     return JSONResponse({'id':job.id,'status':job.status,**json.loads(job.result or '{}')},headers={'Cache-Control':'no-store'})
 
