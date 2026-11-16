@@ -15284,7 +15284,8 @@ def dispatch_activate(data: DispatchActivationInput, db: Session = Depends(get_d
             or (item['revision']!=activation['revision'] and not crew_only_change)):
         raise HTTPException(409,'Заказ изменён. Требуется новое сообщение от диспетчера')
     values=intent['values']
-    if data.card is None:return {'ok':True,'values':values,'photo_slot_requested':bool(plan_meta.get('photo_slot_requested'))}
+    if data.card is None:return {'ok':True,'values':values,'photo_slot_requested':bool(plan_meta.get('photo_slot_requested')),
+        'manual_number_phone':intent.get('manual_number_phone','')}
     card=data.card
     if (card.tg_id!=data.tg_id or card.work_date!=order.work_date or card.source!=order.source
             or card.surname.strip().upper()!=values['surname']):
@@ -20016,11 +20017,11 @@ def gbu_allocation_source(db, user, month, half):
     history = gbu_allocation_cowork_history(db,
         {c['employee_id'] for c in cashiers if c['employee_id']},
         {p['id'] for p in people if p['id'] > 0}, datetime.now(MOSCOW).date())
-    source = {'contact_format': 1, 'split_payment_format': 1, 'split_payment_layout': 2, 'employee_notice_format': 1, 'allocation_rule': 'self_first_confirmed_cowork_all_history_v9', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
+    source = {'contact_format': 1, 'split_payment_format': 1, 'split_payment_layout': 3, 'employee_notice_format': 1, 'allocation_rule': 'self_first_confirmed_cowork_all_history_v9', 'periods': periods, 'people': sorted(people, key=lambda p:p['id']),
               'cashiers': sorted(cashiers, key=lambda p:p['tg_id']), 'missing': missing, 'cowork_history': history}
     digest = hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     plan = dict(build_gbu_cash_allocation(people, cashiers, history['pairs']), **periods, snapshot=digest,
-                allocation_rule='self_first_confirmed_cowork_all_history_v9', height_tolerance_cm=2, contact_format=1, split_payment_format=1, split_payment_layout=2, employee_notice_format=1,
+                allocation_rule='self_first_confirmed_cowork_all_history_v9', height_tolerance_cm=2, contact_format=1, split_payment_format=1, split_payment_layout=3, employee_notice_format=1,
                 missing_count=len(missing), unverified=[c['name'] for c in cashiers
                     if c['total'] and not c['received'] and not c['checked']])
     plan['cowork_history'] = {key: value for key, value in history.items() if key != 'pairs'}
@@ -20122,7 +20123,8 @@ def gbu_allocation_messages(plan, cashier):
     # Locked legacy plans retain the exact message parts used by delivery and
     # confirmation records. New plans explicitly opt into the expanded text.
     compact_notes = plan.get('split_payment_layout') == 2
-    if plan.get('split_payment_format') == 1:
+    separate_notes = plan.get('split_payment_layout') == 3
+    if plan.get('split_payment_format') == 1 and not separate_notes:
         own_note = gbu_allocation_split_note(plan, cashier.get('employee_id'), cashier['tg_id'], compact=compact_notes)
         if own_note and cashier['own_salary']:
             header = header.replace('\n\nКому выплатить:\n', '\n' + escape(own_note) + '\n\nКому выплатить:\n', 1)
@@ -20148,11 +20150,28 @@ def gbu_allocation_messages(plan, cashier):
             'Укажите имя, метро и рост другого бригадира из пояснения в скобках рядом с сотрудником. '
             'Так сотрудник заранее будет понимать, от кого и когда ждать деньги.\n\n'
         )
-        header = header.replace('Кому выплатить:\n', notice + 'Кому выплатить:\n', 1)
+        if separate_notes:
+            notice = ('📩 Предупредите сотрудников в личных сообщениях: сколько и когда вы выплатите. '
+                      'Доплаты от других плательщиков перечислены отдельным блоком внизу.\n\n')
+        header = header.replace('Кому выплатить:\n', notice + '<b>Кому вы выплачиваете:</b>\n' if separate_notes else notice + 'Кому выплатить:\n', 1)
     if compact_notes:
         header = header.replace('пояснения в скобках', 'пояснения об остатке').replace('из пояснения в скобках', 'из списка остатка')
     if not lines:
         lines = ['Другим сотрудникам выплаты не назначены.']
+    if separate_notes and plan.get('split_payment_format') == 1:
+        supplements = []
+        if cashier['own_salary']:
+            own_note = gbu_allocation_split_note(plan, cashier.get('employee_id'), cashier['tg_id'], compact=True)
+            if own_note:
+                supplements.append('<b>Ваша оставшаяся зарплата</b>\n' + escape(own_note))
+        for person in cashier['payments']:
+            note = gbu_allocation_split_note(plan, person['employee_id'], cashier['tg_id'], compact=True)
+            if note:
+                supplements.append(f"<b>{escape(person['name'])}</b>\n" + escape(note))
+        if supplements:
+            lines += ['\n📌 <b>КТО ВЫПЛАТИТ ОСТАЛЬНУЮ ЗАРПЛАТУ</b>\n'
+                      'Это доплаты сотрудникам, а не деньги к сдаче владельцу.\n']
+            lines += [block + '\n' for block in supplements]
     lines += [f"\nОстаток кассы к сдаче владельцу: <b>{money(cashier['remaining'])}</b>",
               'Это поручение на выплату. Сообщение не является подтверждением получения денег.']
     messages, current = [], header
@@ -20357,13 +20376,13 @@ async function openGbuCashAllocation(month,period){
  if(state.bootstrap?.is_owner!==true){toast('Доступно только владельцу');return}
  showModal('Распределение кассы','<div id="gbuAllocation">Загрузка…</div>');
  const root=qs('#gbuAllocation'),active=()=>qs('#gbuAllocation')===root&&!qs('#modal').classList.contains('hidden');
- const half=period==='first'?1:2;let plan,busy=false,comments=[],ownerMembers=null,membersLoading=false;const commentDrafts=new Map();let selectedCashier=null;let overviewScroll=[];
+ const half=period==='first'?1:2;let plan,busy=false,comments=[],ownerMembers=null,membersLoading=false;const commentDrafts=new Map();let selectedCashier=null;
  const line=(name,amount)=>`<div class="allocation-line"><span>${esc(name)}</span><b>${gbuAllocationMoney(amount)}</b></div>`;
  const summary=(label,amount)=>`<div><small>${label}</small><b>${gbuAllocationMoney(amount)}</b></div>`;
  function draw(){
   const paidCashierIds=new Set((plan.payout_confirmations||[]).map(p=>Number(p.tg_id)));
   const sortedCashiers=[...plan.cashiers].sort((a,b)=>Number(paidCashierIds.has(Number(b.tg_id)))-Number(paidCashierIds.has(Number(a.tg_id))));
-  root.innerHTML=`<div data-allocation-overview ${selectedCashier!==null?'hidden':''}><div class="allocation-toolbar"><button type="button" class="secondary" data-allocation-back>← К зарплате</button><p class="allocation-periods"><span title="${esc(gbuAllocationPeriod(plan.salary_start,plan.salary_end))}">Зарплата: ${esc(gbuAllocationShortPeriod(plan.salary_start,plan.salary_end))}</span><span title="${esc(gbuAllocationPeriod(plan.cash_start,plan.cash_end))}">Касса: ${esc(gbuAllocationShortPeriod(plan.cash_start,plan.cash_end))}</span></p></div>
+  root.innerHTML=`<div data-allocation-overview><div class="allocation-toolbar"><button type="button" class="secondary" data-allocation-back>← К зарплате</button><p class="allocation-periods"><span title="${esc(gbuAllocationPeriod(plan.salary_start,plan.salary_end))}">Зарплата: ${esc(gbuAllocationShortPeriod(plan.salary_start,plan.salary_end))}</span><span title="${esc(gbuAllocationPeriod(plan.cash_start,plan.cash_end))}">Касса: ${esc(gbuAllocationShortPeriod(plan.cash_start,plan.cash_end))}</span></p></div>
   <div class="allocation-summary">${summary('Начислено',plan.salary_total)}${summary('Касса с откатами',plan.cash_total)}<div><small>У меня на руках${plan.owner_cash_manual?' · вручную':''}</small><b>${gbuAllocationMoney(plan.owner_cash)}</b><button type="button" class="secondary" data-owner-cash-edit>Изменить</button></div>${summary('Бригадиры выплатят, включая себе',plan.cashier_payouts)}${summary('Выплатить через тебя',plan.owner_due)}${summary('Добавить своих денег',plan.owner_topup)}<div class="allocation-owner-remaining" role="status"><small>Мне осталось выплатить</small><b>${gbuAllocationMoney(gbuAllocationOwnerRemaining(plan))}</b><small>Выплачено: ${gbuAllocationMoney(plan.owner_payments.filter(p=>p.paid===true).reduce((sum,p)=>sum+Number(p.amount),0))}</small></div></div>
   ${plan.cowork_history?`<p class="allocation-info">Подбор по совместным выездам: ${Number(plan.cowork_history.orders)} подтверждённых заказов · частные ${Number(plan.cowork_history.private_orders)}, ГБУ ${Number(plan.cowork_history.gbu_orders)}.</p>`:''}
   ${plan.missing_count?`<p class="allocation-warn">Не заполнен состав: ${plan.missing_count}. Сначала завершите начисления.</p>`:''}
@@ -20374,7 +20393,7 @@ async function openGbuCashAllocation(month,period){
   ${plan.unspent_cash?`<p class="allocation-info">Не распределено у бригадиров: ${gbuAllocationMoney(plan.unspent_cash)}. Эти деньги нужно передать тебе.</p>`:''}
   ${plan.owner_surplus?`<p class="allocation-info">Останется после зарплаты: ${gbuAllocationMoney(plan.owner_surplus)}.</p>`:''}
   <p class="allocation-payout-total ${plan.all_payouts_confirmed?'paid':'unpaid'}" role="status">${plan.locked?(plan.all_payouts_confirmed?'Все выплаты подтверждены':'Есть неподтверждённые выплаты'):'План ещё не подтверждён'}</p><button type="button" class="primary" data-allocation-send>${plan.locked?'Отправить неотправленные поручения':'Подтвердить план и отправить бригадирам'}</button></div>
-  ${plan.cashiers.map(c=>`<section class="allocation-cashier-card" data-allocation-cashier-panel="${Number(c.tg_id)}" ${Number(c.tg_id)!==selectedCashier?'hidden':''}><button type="button" class="secondary" data-allocation-cashier-back>← Все бригадиры</button><h4>${esc(c.name)}${c.height_cm?' · '+esc(c.height_cm):''}</h4>${line('Касса + откат',c.total)}${line('Оставить себе',c.own_salary)}${c.own_salary&&c.own_salary_split_note?`<small class="allocation-split-note">${esc(c.own_salary_split_note)}</small>`:''}<div class="allocation-cashier-grid">${c.payments.map(p=>gbuAllocationRecipientHtml(p)).join('')||'<p class="allocation-info">Выплаты другим не назначены.</p>'}</div>${line('Остаток к сдаче тебе',c.remaining)}<p class="allocation-info">${esc(gbuAllocationDeliveryLabel(plan,c.tg_id))}</p>${gbuAllocationResendHtml(plan,c)}${gbuAllocationCardCommentHtml(comments,c.tg_id,commentDrafts)}${gbuAllocationCommentSendHtml(plan,comments,c.tg_id)}${gbuAllocationPayoutStatus(plan,c.tg_id)}</section>`).join('')}
+  ${plan.cashiers.map(c=>`<section class="allocation-cashier-card" data-allocation-cashier-panel="${Number(c.tg_id)}" ${Number(c.tg_id)!==selectedCashier?'hidden':''}><button type="button" class="secondary" data-allocation-cashier-back>Свернуть ↑</button><h4>${esc(c.name)}${c.height_cm?' · '+esc(c.height_cm):''}</h4>${line('Касса + откат',c.total)}${line('Оставить себе',c.own_salary)}${c.own_salary&&c.own_salary_split_note?`<small class="allocation-split-note">${esc(c.own_salary_split_note)}</small>`:''}<div class="allocation-cashier-grid">${c.payments.map(p=>gbuAllocationRecipientHtml(p)).join('')||'<p class="allocation-info">Выплаты другим не назначены.</p>'}</div>${line('Остаток к сдаче тебе',c.remaining)}<p class="allocation-info">${esc(gbuAllocationDeliveryLabel(plan,c.tg_id))}</p>${gbuAllocationResendHtml(plan,c)}${gbuAllocationCardCommentHtml(comments,c.tg_id,commentDrafts)}${gbuAllocationCommentSendHtml(plan,comments,c.tg_id)}${gbuAllocationPayoutStatus(plan,c.tg_id)}</section>`).join('')}
   <p data-allocation-status role="status" aria-live="polite"></p>`;
   qs('[data-allocation-back]',root).onclick=()=>openGbuPayroll(month,period);
   qs('[data-owner-cash-edit]',root).onclick=()=>{
@@ -20400,17 +20419,24 @@ async function openGbuCashAllocation(month,period){
    qs('[data-cash-auto]',panel).onclick=()=>save(null);
    qs('[data-cash-amount]',panel).focus();panel.scrollIntoView({block:'nearest'});
   };
-  root.querySelectorAll('[data-allocation-cashier-open]').forEach(b=>{b.disabled=busy;b.onclick=()=>{
+  function toggleCashier(uid,trigger){
    if(busy)return;
-   overviewScroll=[];for(let e=root.parentElement;e;e=e.parentElement)overviewScroll.push([e,e.scrollTop]);
-   selectedCashier=Number(b.dataset.allocationCashierOpen);draw();
-   for(let e=root.parentElement;e;e=e.parentElement)e.scrollTop=0;
-   qs('[data-allocation-cashier-panel="'+selectedCashier+'"] [data-allocation-cashier-back]',root)?.focus({preventScroll:true});
-  }});
+   const top=trigger.getBoundingClientRect().top;
+   selectedCashier=selectedCashier===uid?null:uid;
+   root.querySelectorAll('[data-allocation-cashier-panel]').forEach(panel=>{panel.hidden=Number(panel.dataset.allocationCashierPanel)!==selectedCashier});
+   root.querySelectorAll('[data-allocation-cashier-open]').forEach(button=>button.setAttribute('aria-expanded',String(Number(button.dataset.allocationCashierOpen)===selectedCashier)));
+   const scroller=qs('#modal');scroller.scrollTop+=trigger.getBoundingClientRect().top-top;
+  }
+  root.querySelectorAll('[data-allocation-cashier-open]').forEach(b=>{
+   const uid=Number(b.dataset.allocationCashierOpen),panel=root.querySelector('[data-allocation-cashier-panel="'+uid+'"]');
+   if(panel){panel.id='allocationCashierPanel'+uid;b.after(panel);b.setAttribute('aria-controls',panel.id)}
+   b.setAttribute('aria-expanded',String(uid===selectedCashier));b.disabled=busy;
+   b.onclick=()=>toggleCashier(uid,b);
+  });
   root.querySelectorAll('[data-allocation-cashier-back]').forEach(b=>{b.disabled=busy;b.onclick=()=>{
-   if(busy)return;const uid=selectedCashier;selectedCashier=null;draw();
-   overviewScroll.forEach(([e,y])=>e.scrollTop=y);
-   qs('[data-allocation-cashier-open="'+uid+'"]',root)?.focus({preventScroll:true});
+   const uid=Number(b.closest('[data-allocation-cashier-panel]').dataset.allocationCashierPanel);
+   const trigger=root.querySelector('[data-allocation-cashier-open="'+uid+'"]');
+   toggleCashier(uid,trigger);trigger.focus({preventScroll:true});
   }});
   const button=qs('[data-allocation-send]',root),deliveries=plan.deliveries||[];
   const allSent=plan.locked&&plan.confirmation_buttons_sent&&deliveries.length>0&&deliveries.every(d=>d.status==='sent');
@@ -23079,7 +23105,8 @@ def dispatch_recover_photo_slot_activations(db):
     today = datetime.now(MOSCOW).date()
     candidates = db.scalars(select(CabinetCommand).where(
         CabinetCommand.status == 'error',
-        CabinetCommand.result.contains('Не удалось загрузить карточки заказов')
+        or_(CabinetCommand.result.contains('Не удалось загрузить карточки заказов'),
+            CabinetCommand.result.contains('Не удалось сохранить карточку в кабинете'))
     ).order_by(CabinetCommand.created_at).with_for_update(skip_locked=True).limit(100))
     for job in candidates:
         payload = json.loads(job.payload or '{}')
@@ -23087,7 +23114,8 @@ def dispatch_recover_photo_slot_activations(db):
         activation = payload.get('dispatch_activation')
         if (not activation or payload.get('photo_slots_recovery_attempted')
                 or result.get('delivery_unknown')
-                or not str(result.get('error', '')).startswith('Не удалось загрузить карточки заказов')):
+                or not str(result.get('error', '')).startswith(('Не удалось загрузить карточки заказов',
+                    'Не удалось сохранить карточку в кабинете'))):
             continue
         order = db.get(Order, activation.get('order_id'))
         if not order or not today <= order.work_date <= today + timedelta(days=7) or order.status in {'cancelled', 'draft'}:
@@ -23575,3 +23603,257 @@ function bindGbuPayrollDateButtons(body,month,period){
 
 
 INLINE_INDEX_HTML = _gbu_payroll_month_year_buttons_html(INLINE_INDEX_HTML)
+
+
+# Open the exact order's brigade photos above the retained employee report.
+def _gbu_payroll_report_photos_html(html):
+    old='<span>${esc(Number(order.date.slice(8,10)))} · ${esc(order.surname)}</span>'
+    new='<button type="button" class="gbu-payroll-order-photo" data-payroll-order-photo="${esc(order.card_id)}" data-order-date="${esc(order.date)}" aria-label="Фото бригады: ${esc(order.surname)}">${esc(Number(order.date.slice(8,10)))} · ${esc(order.surname)}</button>'
+    if html.count(old)!=1:
+        raise RuntimeError('Employee payroll order photo anchor missing')
+    html=html.replace(old,new,1)
+    anchor="  qs('[data-payroll-back]',report).onclick=()=>report.close();"
+    if html.count(anchor)!=1:
+        raise RuntimeError('Employee payroll report photo binding missing')
+    html=html.replace(anchor,anchor+r"""
+  qsa('[data-payroll-order-photo]',report).forEach(button=>button.onclick=()=>{
+   const order=employee.orders.find(item=>String(item.card_id)===button.dataset.payrollOrderPhoto&&item.date===button.dataset.orderDate);
+   if(order)openGbuPayrollReportPhotos(order,button,report);
+  });""",1)
+    return html.replace('</body>',r"""<style>
+.gbu-payroll-report-order .gbu-payroll-order-photo{appearance:none;display:block;min-width:0;min-height:32px;margin:-4px 0;padding:4px 0;border:0;border-radius:4px;background:transparent;color:inherit;font:inherit;text-align:left;text-decoration:underline;text-underline-offset:3px;cursor:pointer;overflow-wrap:anywhere;touch-action:manipulation}
+.gbu-payroll-order-photo:focus-visible{outline:2px solid var(--gold2);outline-offset:2px}
+.gbu-payroll-order-photo:disabled{opacity:.6}
+</style><script>
+async function openGbuPayrollReportPhotos(order,trigger,report){
+ if(trigger.disabled||report._photosBusy)return;
+ if(Number(order.card_id)<=0){toast('Для этого восстановленного заказа фото не сохранены',5000);return}
+ report._photosBusy=true;trigger.disabled=true;
+ const live=()=>report.isConnected&&report.open;
+ try{
+  const response=await api('/api/owner/brigade-control?work_date='+encodeURIComponent(order.date),{cache:'no-store'});
+  if(!live())return;
+  const card=(response.items||[]).find(item=>Number(item.id)===Number(order.card_id));
+  if(!card)throw new Error('Фото этого заказа не найдены. Проверьте фотоотчёт за выбранную дату.');
+  // Explicit singleton navigation prevents a stale Control list from replacing
+  // this employee's report, and leaves its scroll and payroll data untouched.
+  openControlReportViewer(card,1,trigger,{items:[card],trigger});
+ }catch(error){if(live())toast(error.message,5000)}
+ finally{report._photosBusy=false;if(trigger.isConnected)trigger.disabled=false}
+}
+</script></body>""",1)
+
+
+INLINE_INDEX_HTML = _gbu_payroll_report_photos_html(INLINE_INDEX_HTML)
+
+
+# Payroll photo drilldown is read-only and keeps both underlying lists intact.
+def _gbu_payroll_photo_crew_html(html):
+    old='if(order)openGbuPayrollReportPhotos(order,button,report);'
+    new="if(order){const saved=(data.orders||[]).find(item=>Number(item.card_id)===Number(order.card_id)&&item.date===order.date);openGbuPayrollReportPhotos({...order,crew:saved?.crew||[],category:saved?.category||order.category},button,report);}"
+    if html.count(old)!=1:raise RuntimeError('Payroll photo snapshot binding missing')
+    html=html.replace(old,new,1)
+    old=' bindGbuCrewDisclosure(dialog,card);\n dispatchAttachControl(dialog,card);\n bindControlSurnameEditor(dialog,card);'
+    new=' if(!navigation?.payrollReport){\n'+old+'\n }'
+    if html.count(old)!=1:raise RuntimeError('Payroll read-only viewer anchor missing')
+    html=html.replace(old,new,1)
+    old='  openControlReportViewer(card,1,trigger,{items:[card],trigger});'
+    new=old.replace('items:[card],trigger','items:[card],trigger,payrollReport:true')+r"""
+  const viewer=document.querySelector('.bc-photo-viewer[open]');
+  if(viewer)configurePayrollPhotoCrew(viewer,order,report);
+"""
+    if html.count(old)!=1:raise RuntimeError('Payroll photo details anchor missing')
+    html=html.replace(old,new,1)
+    return html.replace('</body>',r"""<style>
+dialog.bc-photo-viewer.payroll-report-photo{inset:12px 0;height:min(740px,calc(100dvh - 24px));max-height:calc(100dvh - 24px)}
+.payroll-report-photo .bc-expanded-card{grid-template-rows:auto minmax(110px,1fr) minmax(120px,auto)}
+.payroll-report-photo .bc-viewer-info{max-height:34dvh;overflow-y:auto;overscroll-behavior:contain}
+.payroll-report-photo .bc-order-navigation{display:none}
+.payroll-photo-crew-title{display:block;margin:8px 0 4px}
+.payroll-photo-crew-list{margin:4px 0;padding-left:24px;font-size:14px;line-height:1.45}
+.payroll-photo-crew-list li{padding:2px 0;overflow-wrap:anywhere}
+.payroll-photo-category{font-weight:700;color:var(--gold2)}
+.payroll-photo-back{min-height:36px;padding:5px 9px;font-size:13px}
+</style><script>
+function payrollPhotoCrewHtml(order){
+ const crew=Array.isArray(order.crew)?order.crew:[];
+ const category=({standard:'Стандарт',elite:'Элит',vip:'VIP'})[order.category]||'Категория не указана';
+ return `<small>${esc(order.date)}</small><h2>ум: ${esc(order.surname||'—')}</h2><p class="payroll-photo-category">${esc(category)}${crew.length?' · '+crew.length+' чел.':''}</p><b class="payroll-photo-crew-title">На заказе были:</b>${crew.length?`<ol class="payroll-photo-crew-list">${crew.map(person=>`<li>${esc(person.name||'Сотрудник')}${person.role==='brigadier'?' — бригадир':''}</li>`).join('')}</ol>`:'<p class="muted">Сохранённый состав не найден</p>'}`;
+}
+function configurePayrollPhotoCrew(viewer,order,report){
+ viewer.classList.add('payroll-report-photo');
+ const info=viewer.querySelector('.bc-viewer-info');
+ if(info)info.innerHTML=payrollPhotoCrewHtml(order);
+ const header=viewer.querySelector('.bc-expanded-card>header');
+ const back=document.createElement('button');back.type='button';back.className='secondary payroll-photo-back';back.textContent='← Назад';
+ const returnToReport=event=>{event?.preventDefault();event?.stopPropagation();if(viewer.open)viewer.close()};
+ back.onclick=returnToReport;header?.prepend(back);
+ // Consume the backdrop gesture here; it must never reach the report or
+ // the global modal backdrop and close more than this single photo layer.
+ let outsideStart=false;
+ const outside=event=>{const box=viewer.getBoundingClientRect();return event.clientX<box.left||event.clientX>box.right||event.clientY<box.top||event.clientY>box.bottom};
+ viewer.addEventListener('pointerdown',event=>{outsideStart=event.target===viewer&&outside(event);if(outsideStart)event.stopPropagation()},{capture:true});
+ viewer.addEventListener('click',event=>{
+  if(event.target===viewer){event.stopImmediatePropagation();if(outsideStart&&outside(event))returnToReport(event);outsideStart=false;return}
+  event.stopPropagation();
+ });
+ viewer.addEventListener('close',()=>{if(report.isConnected&&report.open)report._photosBusy=false},{once:true});
+}
+</script></body>""",1)
+
+
+INLINE_INDEX_HTML = _gbu_payroll_photo_crew_html(INLINE_INDEX_HTML)
+
+
+# Remove obsolete contacts directly from owner-only agent suggestions.
+def _private_agent_suggestion_delete_html(html):
+    old="""     const card=document.createElement('button');
+     card.type='button';card.className='secondary';
+     const title=document.createElement('strong');
+     title.textContent=item.organization;
+     const details=document.createElement('span');
+     details.textContent=[item.agent_name,item.phone].filter(Boolean).join(' · ');
+     card.append(title,details);
+     card.onmousedown=event=>event.preventDefault();
+     card.onclick=()=>{selectContact(item);organizationInput.blur()};
+     suggestions.append(card);"""
+    new="""     suggestions.append(privateAgentSuggestionRow(item,()=>{selectContact(item);organizationInput.blur()},async()=>{
+      const removed=await removePrivateAgentSuggestion(item);
+      if(!removed)return;
+      generation++;
+      contacts=(contacts||[]).filter(contact=>contact.key!==item.key);
+      contactsRequest=Promise.resolve(contacts);
+      commentDrafts.delete(item.key);
+      if(live()){renderContacts();await suggestContacts();toast('Контакт удалён из подсказок')}
+     }));"""
+    if html.count(old)!=1:raise RuntimeError('Private agent suggestion delete anchor missing')
+    html=html.replace(old,new,1)
+    return html.replace('</body>',r"""<style>
+#dispatchEditor .dispatch-private-agent-suggestions>.private-agent-suggestion-row{display:grid;grid-template-columns:minmax(0,1fr) 40px;gap:5px;align-items:stretch;min-width:0}
+#dispatchEditor .private-agent-suggestion-row>button{margin:0;min-height:40px}
+#dispatchEditor .private-agent-suggestion-row>.private-agent-suggestion-pick{display:grid;gap:2px;padding:5px 8px;min-width:0;text-align:left;overflow-wrap:anywhere;font-size:13px}
+#dispatchEditor .private-agent-suggestion-pick span{font-size:12px}
+#dispatchEditor .private-agent-suggestion-row>.private-agent-suggestion-delete{width:40px;min-width:40px;padding:6px;color:var(--muted);display:grid;place-items:center;touch-action:manipulation}
+#dispatchEditor .private-agent-suggestion-delete svg{width:20px;height:20px}
+</style><script>
+async function removePrivateAgentSuggestion(item){
+ if(!confirm('Удалить контакт «'+(item.organization||item.agent_name)+'» из справочника и подсказок? Старые заказы сохранятся.'))return false;
+ try{await api('/api/dispatch-board/private-agents/'+encodeURIComponent(item.key),{method:'DELETE'});return true}
+ catch(error){toast(error.message,5000);return false}
+}
+function privateAgentSuggestionRow(item,select,remove){
+ const row=document.createElement('article');row.className='private-agent-suggestion-row';
+ const pick=document.createElement('button');pick.type='button';pick.className='secondary private-agent-suggestion-pick';
+ const title=document.createElement('strong');title.textContent=item.organization;
+ const details=document.createElement('span');details.textContent=[item.agent_name,item.phone].filter(Boolean).join(' · ');
+ pick.append(title,details);pick.onmousedown=event=>event.preventDefault();pick.onclick=select;
+ const trash=document.createElement('button');trash.type='button';trash.className='secondary private-agent-suggestion-delete';
+ trash.setAttribute('aria-label','Удалить контакт '+(item.organization||item.agent_name));trash.title='Удалить контакт';
+ trash.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg>';
+ trash.onmousedown=event=>event.preventDefault();
+ trash.onclick=async event=>{event.preventDefault();event.stopPropagation();if(trash.disabled)return;trash.disabled=true;pick.disabled=true;try{await remove()}finally{trash.disabled=false;pick.disabled=false}};
+ row.append(pick,trash);return row;
+}
+</script></body>""",1)
+
+
+INLINE_INDEX_HTML = _private_agent_suggestion_delete_html(INLINE_INDEX_HTML)
+
+
+class DispatchManualNumberInput(BaseModel):
+    phone: str = Field(min_length=5, max_length=40)
+    photo_time: str = Field(pattern=r'^(?:[01]\d|2[0-3]):[0-5]\d$')
+
+
+@app.post('/api/dispatch-board/orders/{order_id}/manual-number')
+def dispatch_manual_number(order_id: int, data: DispatchManualNumberInput,
+                          db: Session=Depends(get_db), user: TelegramUser=Depends(require_app_user)):
+    dispatch_guard(db,user)
+    order=db.get(Order,order_id)
+    if not order or order.status in {'cancelled','draft'}:raise HTTPException(404,'Заказ недоступен')
+    if order.work_date<datetime.now(MOSCOW).date():raise HTTPException(409,'За прошедшую дату номер не публикуется')
+    dispatch_day_lock(db,order.work_date)
+    card=dispatch_match_card(db,order)
+    if card:return {'status':'done','already_posted':True,'card_id':card.id}
+    item=dispatch_order_data(db,order,0)
+    leader=item.get('brigadier') or {}
+    uid=leader.get('tg_id')
+    if not uid or not item.get('composition_complete'):raise HTTPException(409,'Сначала назначьте полный состав и бригадира')
+    if not dispatch_original_order_delivered(db,order.id,order.work_date.isoformat(),uid):
+        raise HTTPException(409,'Сначала отправьте сам заказ назначенному бригадиру')
+    phone=brigadier_phone8(data.phone)
+    if not re.fullmatch(r'8\d{10}',phone):raise HTTPException(422,'Укажите телефон бригадира: 11 цифр, начиная с 8 или +7')
+    key=dispatch_hash({'activation_order':item['id'],'brigadier':uid})
+    prior=db.get(CabinetCommand,key)
+    if prior and json.loads(prior.result or '{}').get('delivery_unknown'):
+        raise HTTPException(409,'Результат предыдущей отправки неизвестен. Проверьте группу, чтобы не создать дубль')
+    if prior and prior.status in {'queued','running'}:return {'id':prior.id,'status':prior.status}
+    if prior and prior.status=='done':raise HTTPException(409,'Номер уже отправлялся. Проверьте карточку в группе и её связь с заказом')
+    job=dispatch_queue_activation(db,item)
+    intent=json.loads(job.payload)
+    intent['manual_number_actor']=user.id
+    intent['manual_number_phone']=phone
+    intent['values']['photo_time']=data.photo_time
+    job.payload=json.dumps(intent,ensure_ascii=False);job.fingerprint=dispatch_hash(intent)
+    db.commit()
+    return {'id':job.id,'status':job.status}
+
+
+@app.get('/api/dispatch-board/manual-number-actions/{request_id}')
+def dispatch_manual_number_status(request_id: str, db: Session=Depends(get_db),
+                                  user: TelegramUser=Depends(require_app_user)):
+    dispatch_guard(db,user)
+    job=db.get(CabinetCommand,request_id)
+    if not job or not json.loads(job.payload or '{}').get('dispatch_activation'):
+        raise HTTPException(404,'Действие не найдено')
+    return JSONResponse({'id':job.id,'status':job.status,**json.loads(job.result or '{}')},headers={'Cache-Control':'no-store'})
+
+
+def _dispatch_manual_number_html(html):
+    old="${n.posted?'✓':'⏳'}</span></header>"
+    new="${n.posted?'✓':'⏳'}</span>${!n.posted&&n.brigadier?`<button type=\"button\" class=\"dispatch-manual-number\" data-manual-number=\"${n.order_id}\" aria-label=\"Выставить номер вручную\">➕</button>`:''}</header>"
+    if html.count(old)!=1:raise RuntimeError('Missing number manual button anchor')
+    html=html.replace(old,new,1)
+    old=" qs('[data-plan-original]',root).onclick=()=>dispatchOriginalNumbers(day);"
+    new=old+"\n qsa('[data-manual-number]',root).forEach(button=>button.onclick=()=>{const order=data.items.find(item=>Number(item.id)===Number(button.dataset.manualNumber));if(order)openDispatchManualNumber(order,day)});"
+    if html.count(old)!=1:raise RuntimeError('Manual number button binding missing')
+    html=html.replace(old,new,1)
+    return html.replace('</body>',r"""<style>
+#dispatchNumbers .dispatch-number-card header{display:flex;align-items:center;gap:4px}
+#dispatchNumbers .dispatch-number-card header strong{flex:1;min-width:0}
+#dispatchNumbers .dispatch-manual-number{flex:none;width:32px;min-width:32px;height:32px;min-height:32px;padding:2px;margin:0;font-size:18px;touch-action:manipulation}
+.dispatch-manual-number-dialog{box-sizing:border-box;width:calc(100% - 32px);max-width:420px;max-height:85dvh;overflow:auto;border:1px solid var(--gold2);border-radius:18px;background:var(--panel);color:var(--text);padding:14px}
+.dispatch-manual-number-dialog::backdrop{background:#0006}
+.dispatch-manual-number-dialog header{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.dispatch-manual-number-dialog h3{margin:0;font-size:18px}
+.dispatch-manual-number-dialog form{display:grid;gap:10px;margin-top:10px}
+.dispatch-manual-number-dialog input{box-sizing:border-box;width:100%;font-size:16px;min-height:40px}
+</style><script>
+function openDispatchManualNumber(order,day){
+ document.querySelector('.dispatch-manual-number-dialog')?.close();
+ const dialog=document.createElement('dialog');dialog.className='dispatch-manual-number-dialog';
+ dialog.innerHTML=`<header><h3>Выставить номер вручную</h3><button type="button" data-manual-close aria-label="Назад">×</button></header><p>${esc(dispatchShortDay(day))} · ${order.source==='gbu'?'ГБУ':'Частный'}</p><b>ум: ${esc(order.deceased_name||'—')}</b><p>${esc(order.brigadier?dispatchPerson(order.brigadier):'—')}</p><form><label>Телефон бригадира<input name="phone" type="tel" required value="${esc(order.brigadier?.phone||'')}" placeholder="8 999 123-45-67"></label><label>Время фото<input name="photo_time" type="time" required value="${esc(order.arrival_time||order.issue_time||'')}"></label><button type="submit" class="primary">Выставить номер в группу</button><p role="status" data-manual-status></p></form>`;
+ const form=dialog.querySelector('form'),status=dialog.querySelector('[data-manual-status]'),submit=form.querySelector('[type=submit]');let busy=false,jobId=null;
+ dialog.querySelector('[data-manual-close]').onclick=()=>dialog.close();dialog.addEventListener('close',()=>dialog.remove(),{once:true});
+ form.onsubmit=async event=>{
+  event.preventDefault();if(busy)return;busy=true;submit.disabled=true;status.textContent='Проверяем и выставляем номер…';
+  try{
+   let result=jobId?await api('/api/dispatch-board/manual-number-actions/'+jobId,{cache:'no-store'}):await api('/api/dispatch-board/orders/'+order.id+'/manual-number',{method:'POST',body:JSON.stringify({phone:form.elements.phone.value,photo_time:form.elements.photo_time.value})});
+   jobId=result.id||jobId;
+   for(let i=0;result.id&&['queued','running'].includes(result.status)&&i<30&&dialog.open;i++){
+    await new Promise(resolve=>setTimeout(resolve,1000));if(!dialog.open)return;
+    result=await api('/api/dispatch-board/manual-number-actions/'+result.id,{cache:'no-store'});
+   }
+   if(!dialog.open)return;
+   if(result.status==='error'){jobId=null;throw Error(result.error||'Не удалось выставить номер')}
+   if(result.status!=='done'){submit.textContent='Проверить результат';status.textContent='Публикация продолжается. Нажмите для проверки результата.';return}
+   dialog.close();await openNumberCards(day);toast(result.already_posted?'Номер уже был выставлен':'Номер выставлен, карточка связана с заказом');
+  }catch(error){if(dialog.open)status.textContent=error.message}
+  finally{busy=false;submit.disabled=false}
+ };
+ document.body.append(dialog);dialog.showModal();
+}
+</script></body>""",1)
+
+
+INLINE_INDEX_HTML = _dispatch_manual_number_html(INLINE_INDEX_HTML)
