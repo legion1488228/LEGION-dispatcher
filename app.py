@@ -8623,7 +8623,7 @@ def cabinet_cash_save(data: CabinetCashInput, db: Session = Depends(get_db)):
     if card.source != 'private':
         raise HTTPException(422, 'Касса на этом этапе заполняется только для частного заказа')
     cabinet_check_assigned_values(db, card, {'category': data.category, 'team_size': data.team_size}, required=True)
-    allowed_sizes=(2,3,4) if data.category=='carryout' else (3,4,5,6)
+    allowed_sizes=(2,3,4) if data.category=='carryout' else (2,3,4,5,6)
     if data.team_size not in allowed_sizes or data.reserve > data.team_size:
         raise HTTPException(422, 'Проверьте состав бригады и количество резерва')
     meta = cabinet_extra_state(db, card)
@@ -9554,7 +9554,7 @@ def control_order_spec(source, gbu_detail, meta, cash):
         # Old cash/photo forms supplied defaults; they are not a dispatcher's choice.
         category = assigned.get('category')
         size = assigned.get('team_size')
-        allowed = {'standard': (3, 4, 5, 6), 'vip': (4, 6), 'elite': (4, 6), 'carryout': (2, 3, 4)}
+        allowed = {'standard': (2, 3, 4, 5, 6), 'vip': (2, 3, 4, 5, 6), 'elite': (2, 3, 4, 5, 6), 'carryout': (2, 3, 4)}
     if isinstance(category, str) and type(size) is int and size in allowed.get(category, ()):
         return {'category': category, 'team_size': size}
     return None
@@ -9662,7 +9662,7 @@ def save_order_spec_values(card_id, change, db, user, trusted_native=False):
     if not order_spec_dispatcher(db, user.id) and not order_spec_own_editable(db, card):
         raise HTTPException(409, 'Заказ уже закрыт. Для изменения категории или количества людей обратитесь к диспетчеру')
     allowed = {'standard': (4, 6), 'elite': (4, 6)} if card.source == 'gbu' else {
-        'standard': (3, 4, 5, 6), 'vip': (4, 6), 'elite': (4, 6), 'carryout': (2, 3, 4)}
+        'standard': (2, 3, 4, 5, 6), 'vip': (2, 3, 4, 5, 6), 'elite': (2, 3, 4, 5, 6), 'carryout': (2, 3, 4)}
     if change.team_size not in allowed.get(change.category, ()):
         raise HTTPException(422, 'Такой состав недоступен для выбранной категории')
     if change.version != version:
@@ -14686,7 +14686,7 @@ def dispatch_agent_lookup(name: str, db: Session = Depends(get_db), user: Telegr
 def dispatch_validate_category(source, category, size):
     if source == 'gbu' and category not in {'standard', 'elite'}:
         raise HTTPException(422, 'В ГБУ только Стандарт и Элит')
-    allowed = {2, 3, 4} if category == 'carryout' else ({4, 6} if source == 'gbu' or category != 'standard' else {3, 4, 5, 6})
+    allowed = {2, 3, 4} if category == 'carryout' else ({4, 6} if source == 'gbu' else {2, 3, 4, 5, 6})
     if size not in allowed:
         raise HTTPException(422, 'Недопустимое количество человек для категории')
 
@@ -23988,3 +23988,44 @@ function payrollPhotoWorkDay(day){
 
 
 INLINE_INDEX_HTML = _payroll_photo_crew_identity_html(INLINE_INDEX_HTML)
+
+
+# Keep common crew sizes one tap away; other private sizes are typed explicitly.
+def _dispatch_manual_team_size_html(html):
+    start=html.index(' const sizes=()=>{',html.index('async function openDispatchEditor('))
+    end=html.index('\n',start)
+    old=html[start:end]
+    if 'form.elements.team_size.innerHTML' not in old:raise RuntimeError('Dispatch team size control missing')
+    new=r""" const sizeSelect=form.elements.team_size;
+ const manualSizeLabel=document.createElement('label');manualSizeLabel.hidden=true;
+ manualSizeLabel.textContent='Количество вручную';
+ const manualSize=document.createElement('input');manualSize.type='number';manualSize.inputMode='numeric';manualSize.min='2';manualSize.max='6';manualSize.step='1';manualSize.placeholder='Например: 2 или 5';
+ manualSizeLabel.append(manualSize);sizeSelect.closest('label').after(manualSizeLabel);
+ let customSizeOption=null;
+ const applyManualSize=()=>{const value=Number(manualSize.value),valid=Number.isInteger(value)&&value>=2&&value<=Number(manualSize.max);if(customSizeOption){customSizeOption.value=valid?String(value):'';customSizeOption.textContent=valid?'Вручную: '+value:'Ввести вручную';customSizeOption.selected=true}};
+ const sizes=()=>{
+  const category=form.elements.category.value,carryout=category==='carryout',allowed=carryout?[2,3,4]:[4,6];
+  const old=Number(sizeSelect.value)||order?.team_size;
+  sizeSelect.innerHTML='<option value="">Выберите количество</option>'+allowed.map(n=>`<option value="${n}" ${n===old?'selected':''}>${n}</option>`).join('');
+  customSizeOption=null;manualSizeLabel.hidden=true;manualSize.required=false;manualSize.disabled=true;
+  if(source==='private'){
+   customSizeOption=document.createElement('option');customSizeOption.value='manual';customSizeOption.textContent='Ввести вручную';sizeSelect.append(customSizeOption);
+   if(Number.isInteger(old)&&old>=2&&old<=(carryout?4:6)&&!allowed.includes(old)){
+    manualSize.max=carryout?'4':'6';manualSize.value=String(old);manualSizeLabel.hidden=false;manualSize.required=true;manualSize.disabled=false;applyManualSize();
+   }
+  }
+ };
+ sizeSelect.onchange=()=>{
+  const custom=customSizeOption&&customSizeOption.selected;
+  manualSizeLabel.hidden=!custom;manualSize.required=!!custom;manualSize.disabled=!custom;
+  if(custom){manualSize.max=form.elements.category.value==='carryout'?'4':'6';applyManualSize();manualSize.focus({preventScroll:true})}
+ };
+ manualSize.oninput=applyManualSize;
+ sizes();form.elements.category.onchange=sizes;"""
+    html=html[:start]+new+html[end:]
+    html=html.replace('{standard:[3,4,5,6],vip:[4,6],elite:[4,6],carryout:[2,3,4]}',
+        '{standard:[2,3,4,5,6],vip:[2,3,4,5,6],elite:[2,3,4,5,6],carryout:[2,3,4]}')
+    return html
+
+
+INLINE_INDEX_HTML = _dispatch_manual_team_size_html(INLINE_INDEX_HTML)
