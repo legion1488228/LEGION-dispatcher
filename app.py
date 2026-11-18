@@ -24029,3 +24029,20 @@ def _dispatch_manual_team_size_html(html):
 
 
 INLINE_INDEX_HTML = _dispatch_manual_team_size_html(INLINE_INDEX_HTML)
+
+
+# Paid recipients move below outstanding ones without changing the payout plan.
+def _allocation_paid_recipients_bottom_html(html):
+    old="plan.owner_payments.map((p,index)=>gbuAllocationOwnerRecipientHtml(p,index+1,ownerMembers?.items?.find(m=>Number(m.employee_id)===Number(p.employee_id)))).join('')"
+    new="gbuAllocationOwnerDisplayRows(plan.owner_payments).map(({person,number})=>gbuAllocationOwnerRecipientHtml(person,number,ownerMembers?.items?.find(m=>Number(m.employee_id)===Number(person.employee_id)))).join('')"
+    if html.count(old)!=1:raise RuntimeError('Owner payout display order anchor missing')
+    html=html.replace(old,new,1)
+    return html.replace('</body>',r"""<script>
+function gbuAllocationOwnerDisplayRows(payments){
+ const rows=payments.map((person,index)=>({person,number:index+1}));
+ return [...rows.filter(row=>row.person.paid!==true),...rows.filter(row=>row.person.paid===true)];
+}
+</script></body>""",1)
+
+
+INLINE_INDEX_HTML = _allocation_paid_recipients_bottom_html(INLINE_INDEX_HTML)
