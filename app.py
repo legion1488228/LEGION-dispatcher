@@ -7709,7 +7709,7 @@ async function ownerCabinetAction(key,cardId=null){
       }
       if(!posted){
         cabinetRememberPending(uid,requestId,key,cardId);attempted=true;
-        await api('/api/owner/brigadier-cabinet/actions',{method:'POST',body});posted=true;
+        if(key==='photo')await cabinetUploadPhotoParts(body,notice);else await api('/api/owner/brigadier-cabinet/actions',{method:'POST',body});posted=true;
       }
       for(let i=0;i<60;i++){
         const result=await api('/api/owner/brigadier-cabinet/actions/'+requestId,{cache:'no-store'});
@@ -24046,3 +24046,118 @@ function gbuAllocationOwnerDisplayRows(payments){
 
 
 INLINE_INDEX_HTML = _allocation_paid_recipients_bottom_html(INLINE_INDEX_HTML)
+
+
+# Resume interrupted photo uploads without resending the entire photo pair.
+# The existing command validation, identity and bot queue remain authoritative.
+class CabinetPhotoUploadPart(Base):
+    __tablename__ = 'cabinet_photo_upload_parts'
+    tg_id = Column(BigInteger, primary_key=True)
+    request_id = Column(String(64), primary_key=True)
+    part = Column(Integer, primary_key=True)
+    total = Column(Integer, nullable=False)
+    content = Column(String, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
+class CabinetPhotoPartInput(BaseModel):
+    request_id: str = Field(min_length=32, max_length=64, pattern=r'^[a-zA-Z0-9-]+$')
+    part: StrictInt = Field(ge=0, lt=120)
+    total: StrictInt = Field(ge=1, le=120)
+    content: str = Field(min_length=1, max_length=49152)
+
+
+def cabinet_photo_upload_access(db, user):
+    if not _can_use_owner_cabinet(db, user.id):
+        raise HTTPException(403, 'Кабинет недоступен')
+
+
+@app.get('/api/owner/brigadier-cabinet/photo-upload/{request_id}')
+def cabinet_photo_upload_status(request_id: str, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    cabinet_photo_upload_access(db, user)
+    rows = db.scalars(select(CabinetPhotoUploadPart).where(
+        CabinetPhotoUploadPart.tg_id == user.id,
+        CabinetPhotoUploadPart.request_id == request_id)).all()
+    return JSONResponse({'received': sorted(row.part for row in rows)},
+                        headers={'Cache-Control': 'no-store'})
+
+
+@app.post('/api/owner/brigadier-cabinet/photo-upload')
+def cabinet_photo_upload_part(data: CabinetPhotoPartInput, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    cabinet_photo_upload_access(db, user)
+    if data.part >= data.total:
+        raise HTTPException(422, 'Некорректная часть фото')
+    identity = (user.id, data.request_id, data.part)
+    row = db.get(CabinetPhotoUploadPart, identity)
+    if row:
+        if row.total != data.total or row.content != data.content:
+            raise HTTPException(409, 'Данные фото изменились. Откройте форму заново')
+        return {'received': data.part}
+    # Abandoned uploads expire; no photo data is written to application logs.
+    db.query(CabinetPhotoUploadPart).filter(
+        CabinetPhotoUploadPart.created_at < datetime.utcnow() - timedelta(days=1)
+    ).delete(synchronize_session=False)
+    db.add(CabinetPhotoUploadPart(tg_id=user.id, request_id=data.request_id,
+        part=data.part, total=data.total, content=data.content))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        row = db.get(CabinetPhotoUploadPart, identity)
+        if not row or row.total != data.total or row.content != data.content:
+            raise HTTPException(409, 'Данные фото изменились. Откройте форму заново')
+    return {'received': data.part}
+
+
+@app.post('/api/owner/brigadier-cabinet/photo-upload/{request_id}/commit')
+def cabinet_photo_upload_commit(request_id: str, db: Session = Depends(get_db), user: TelegramUser = Depends(require_app_user)):
+    cabinet_photo_upload_access(db, user)
+    rows = db.scalars(select(CabinetPhotoUploadPart).where(
+        CabinetPhotoUploadPart.tg_id == user.id,
+        CabinetPhotoUploadPart.request_id == request_id
+    ).order_by(CabinetPhotoUploadPart.part)).all()
+    if not rows:
+        raise HTTPException(409, 'Фото ещё не загружено')
+    total = rows[0].total
+    if len(rows) != total or any(row.part != i or row.total != total for i, row in enumerate(rows)):
+        raise HTTPException(409, 'Фото загружено не полностью. Нажмите «Проверить отправку»')
+    content = ''.join(row.content for row in rows)
+    if len(content.encode('utf-8')) > 5600000:
+        raise HTTPException(413, 'Фото слишком большое. Выберите уменьшенную копию')
+    try:
+        data = CabinetCommandInput.model_validate_json(content)
+    except ValueError:
+        raise HTTPException(422, 'Не удалось собрать фото. Откройте форму заново')
+    if data.request_id != request_id or data.action != 'photo':
+        raise HTTPException(422, 'Некорректный запрос фото')
+    return cabinet_command_create(data, db, user)
+
+
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('</body>', r"""<script>
+async function cabinetUploadPhotoParts(body,notice){
+ const request=JSON.parse(body),id=request.request_id;
+ const base='/api/owner/brigadier-cabinet/photo-upload';
+ // Escape non-ASCII code units so a chunk never contains a lone UTF-16 surrogate.
+ const transport=body.replace(/[\u007f-\uffff]/g,c=>'\\u'+c.charCodeAt(0).toString(16).padStart(4,'0'));
+ const chunkSize=49152,total=Math.ceil(transport.length/chunkSize);
+ if(total>120)throw Error('Фото слишком большое. Выберите уменьшенную копию');
+ const retry=async(path,options)=>{
+  for(let attempt=0;;attempt++){
+   try{return await api(path,options)}catch(error){
+    if(attempt>=2||(!error.isConnectionError&&!error.temporary))throw error;
+    await new Promise(resolve=>setTimeout(resolve,700*(attempt+1)));
+   }
+  }
+ };
+ const saved=await retry(base+'/'+id,{cache:'no-store'});
+ const received=new Set(saved.received||[]);
+ for(let part=0;part<total;part++){
+  if(received.has(part))continue;
+  notice('⏳ Загружаем фото: '+Math.floor(part*100/total)+'%. Не закрывайте окно.');
+  await retry(base,{method:'POST',body:JSON.stringify({request_id:id,part,total,content:transport.slice(part*chunkSize,(part+1)*chunkSize)})});
+ }
+ notice('⏳ Фото загружено. Подтверждаем отправку…');
+ // Repeating commit uses the same command fingerprint and cannot queue a second photo.
+ return retry(base+'/'+id+'/commit',{method:'POST'});
+}
+</script></body>""",1)
