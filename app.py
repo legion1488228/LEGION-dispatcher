@@ -8272,7 +8272,7 @@ def cabinet_command_create(data: CabinetCommandInput, db: Session = Depends(get_
             values = payload['values']
             if 'frame_team_size' in values:
                 size = values['frame_team_size']
-                if type(size) is not int or size not in (2, 3, 4, 5, 6):
+                if type(size) is not int or size not in (2, 3, 4, 5, 6, 7, 8, 9, 10):
                     raise HTTPException(422, 'Укажите количество сотрудников для фото')
                 if card.source == 'gbu':
                     assigned = cabinet_photo_team_sizes(db, [card]).get(card.id)
@@ -8401,7 +8401,7 @@ def cabinet_command_finish(data: CabinetCommandResult, db: Session = Depends(get
                     saved.tg_id = row.tg_id
                     if intent.get('action') == 'photo':
                         frame_size = intent.get('values', {}).get('frame_team_size')
-                        if type(frame_size) is int and frame_size in (2, 3, 4, 5, 6):
+                        if type(frame_size) is int and frame_size in (2, 3, 4, 5, 6, 7, 8, 9, 10):
                             meta['frame_team_size'] = frame_size
                     saved.payload = json.dumps(dict(meta, uniform_category=intent['values']['uniform_category']))
         if data.status == 'done' and intent.get('action') == 'cash_summary':
@@ -8486,7 +8486,7 @@ def cabinet_state_sync(data: list[dict], db: Session = Depends(get_db)):
                 values[key] = previous[key]
         if previous.get('uniform_category') in {'standard', 'vip', 'elite', 'carryout'}:
             values['uniform_category'] = previous['uniform_category']
-        if type(previous.get('frame_team_size')) is int and previous['frame_team_size'] in (2, 3, 4, 5, 6):
+        if type(previous.get('frame_team_size')) is int and previous['frame_team_size'] in (2, 3, 4, 5, 6, 7, 8, 9, 10):
             values['frame_team_size'] = previous['frame_team_size']
         if previous.get('tea_received') and not values['tea_received']:
             values.update(prepared=previous.get('prepared'), tea_received=True,
@@ -8537,10 +8537,10 @@ class CabinetCashInput(BaseModel):
     tg_id: StrictInt
     report_key: str = Field(pattern=r'^card:-?\d+:\d+$')
     category: Literal['standard','vip','elite','carryout']
-    team_size: StrictInt = Field(ge=2, le=6)
+    team_size: StrictInt = Field(ge=2, le=10)
     commission: StrictInt = Field(ge=0, le=10000000)
     kickback: StrictInt = Field(ge=0, le=10000000)
-    reserve: StrictInt = Field(ge=0, le=6)
+    reserve: StrictInt = Field(ge=0, le=10)
     version: StrictInt = Field(ge=0)
 
 
@@ -8623,7 +8623,7 @@ def cabinet_cash_save(data: CabinetCashInput, db: Session = Depends(get_db)):
     if card.source != 'private':
         raise HTTPException(422, 'Касса на этом этапе заполняется только для частного заказа')
     cabinet_check_assigned_values(db, card, {'category': data.category, 'team_size': data.team_size}, required=True)
-    allowed_sizes=(2,3,4) if data.category=='carryout' else (2,3,4,5,6)
+    allowed_sizes=(2,3,4) if data.category=='carryout' else (2,3,4,5,6,7,8,9,10)
     if data.team_size not in allowed_sizes or data.reserve > data.team_size:
         raise HTTPException(422, 'Проверьте состав бригады и количество резерва')
     meta = cabinet_extra_state(db, card)
@@ -9554,7 +9554,7 @@ def control_order_spec(source, gbu_detail, meta, cash):
         # Old cash/photo forms supplied defaults; they are not a dispatcher's choice.
         category = assigned.get('category')
         size = assigned.get('team_size')
-        allowed = {'standard': (2, 3, 4, 5, 6), 'vip': (2, 3, 4, 5, 6), 'elite': (2, 3, 4, 5, 6), 'carryout': (2, 3, 4)}
+        allowed = {'standard': (2, 3, 4, 5, 6, 7, 8, 9, 10), 'vip': (2, 3, 4, 5, 6, 7, 8, 9, 10), 'elite': (2, 3, 4, 5, 6, 7, 8, 9, 10), 'carryout': (2, 3, 4)}
     if isinstance(category, str) and type(size) is int and size in allowed.get(category, ()):
         return {'category': category, 'team_size': size}
     return None
@@ -9585,7 +9585,7 @@ def cabinet_check_assigned_values(db, card, values, required=False):
 
 class DispatchOrderSpecInput(BaseModel):
     category: Literal['standard', 'vip', 'elite', 'carryout']
-    team_size: StrictInt = Field(ge=2, le=6)
+    team_size: StrictInt = Field(ge=2, le=10)
     version: StrictInt = Field(ge=0)
 
 
@@ -9662,7 +9662,7 @@ def save_order_spec_values(card_id, change, db, user, trusted_native=False):
     if not order_spec_dispatcher(db, user.id) and not order_spec_own_editable(db, card):
         raise HTTPException(409, 'Заказ уже закрыт. Для изменения категории или количества людей обратитесь к диспетчеру')
     allowed = {'standard': (4, 6), 'elite': (4, 6)} if card.source == 'gbu' else {
-        'standard': (2, 3, 4, 5, 6), 'vip': (2, 3, 4, 5, 6), 'elite': (2, 3, 4, 5, 6), 'carryout': (2, 3, 4)}
+        'standard': (2, 3, 4, 5, 6, 7, 8, 9, 10), 'vip': (2, 3, 4, 5, 6, 7, 8, 9, 10), 'elite': (2, 3, 4, 5, 6, 7, 8, 9, 10), 'carryout': (2, 3, 4)}
     if change.team_size not in allowed.get(change.category, ()):
         raise HTTPException(422, 'Такой состав недоступен для выбранной категории')
     if change.version != version:
@@ -9698,7 +9698,7 @@ class BotOrderSpecRequest(BaseModel):
 
 class BotOrderSpecSave(BotOrderSpecRequest):
     category: Literal['standard', 'vip', 'elite', 'carryout']
-    team_size: StrictInt = Field(ge=2, le=6)
+    team_size: StrictInt = Field(ge=2, le=10)
     version: StrictInt = Field(ge=0)
 
 
@@ -14055,7 +14055,7 @@ class DispatchPlanInput(BaseModel):
     agent_phone_auto: StrictBool = False
     agent_contact_preference: StrictStr | None = Field(default=None, max_length=500)
     category: Literal['standard', 'vip', 'elite', 'carryout'] | None = None
-    team_size: StrictInt | None = Field(default=None, ge=2, le=6)
+    team_size: StrictInt | None = Field(default=None, ge=2, le=10)
     deceased_name: StrictStr = Field(default='', max_length=100)
     organization: StrictStr = Field(default='', max_length=200)
     issue_time: time | None = None
@@ -14073,9 +14073,9 @@ class DispatchPlanInput(BaseModel):
 class DispatchCrewInput(BaseModel):
     revision: StrictStr
     brigadier_id: StrictInt
-    member_ids: list[StrictInt] = Field(max_length=5)
-    second_order_employee_ids: list[StrictInt] = Field(default_factory=list, max_length=6)
-    external_member_count: StrictInt = Field(default=0, ge=0, le=5)
+    member_ids: list[StrictInt] = Field(max_length=9)
+    second_order_employee_ids: list[StrictInt] = Field(default_factory=list, max_length=10)
+    external_member_count: StrictInt = Field(default=0, ge=0, le=9)
     allow_partial: StrictBool = False
 
 
@@ -14686,7 +14686,7 @@ def dispatch_agent_lookup(name: str, db: Session = Depends(get_db), user: Telegr
 def dispatch_validate_category(source, category, size):
     if source == 'gbu' and category not in {'standard', 'elite'}:
         raise HTTPException(422, 'В ГБУ только Стандарт и Элит')
-    allowed = {2, 3, 4} if category == 'carryout' else ({4, 6} if source == 'gbu' else {2, 3, 4, 5, 6})
+    allowed = {2, 3, 4} if category == 'carryout' else ({4, 6} if source == 'gbu' else {2, 3, 4, 5, 6, 7, 8, 9, 10})
     if size not in allowed:
         raise HTTPException(422, 'Недопустимое количество человек для категории')
 
@@ -23244,7 +23244,7 @@ class OwnerBrigadierCashPatch(BaseModel):
     version: StrictInt = Field(ge=1)
     commission: StrictInt = Field(ge=0, le=10000000)
     kickback: StrictInt = Field(ge=0, le=10000000)
-    reserve: StrictInt = Field(ge=0, le=6)
+    reserve: StrictInt = Field(ge=0, le=10)
 
 
 @app.get('/api/owner/brigadier-cash-edit')
@@ -23999,7 +23999,7 @@ def _dispatch_manual_team_size_html(html):
     new=r""" const sizeSelect=form.elements.team_size;
  const manualSizeLabel=document.createElement('label');manualSizeLabel.hidden=true;
  manualSizeLabel.textContent='Количество вручную';
- const manualSize=document.createElement('input');manualSize.type='number';manualSize.inputMode='numeric';manualSize.min='2';manualSize.max='6';manualSize.step='1';manualSize.placeholder='Например: 2 или 5';
+ const manualSize=document.createElement('input');manualSize.type='number';manualSize.inputMode='numeric';manualSize.min='2';manualSize.max='10';manualSize.step='1';manualSize.placeholder='Например: 2 или 5';
  manualSizeLabel.append(manualSize);sizeSelect.closest('label').after(manualSizeLabel);
  let customSizeOption=null;
  const applyManualSize=()=>{const value=Number(manualSize.value),valid=Number.isInteger(value)&&value>=2&&value<=Number(manualSize.max);if(customSizeOption){customSizeOption.value=valid?String(value):'';customSizeOption.textContent=valid?'Вручную: '+value:'Ввести вручную';customSizeOption.selected=true}};
@@ -24010,21 +24010,21 @@ def _dispatch_manual_team_size_html(html):
   customSizeOption=null;manualSizeLabel.hidden=true;manualSize.required=false;manualSize.disabled=true;
   if(source==='private'){
    customSizeOption=document.createElement('option');customSizeOption.value='manual';customSizeOption.textContent='Ввести вручную';sizeSelect.append(customSizeOption);
-   if(Number.isInteger(old)&&old>=2&&old<=(carryout?4:6)&&!allowed.includes(old)){
-    manualSize.max=carryout?'4':'6';manualSize.value=String(old);manualSizeLabel.hidden=false;manualSize.required=true;manualSize.disabled=false;applyManualSize();
+   if(Number.isInteger(old)&&old>=2&&old<=(carryout?4:10)&&!allowed.includes(old)){
+    manualSize.max=carryout?'4':'10';manualSize.value=String(old);manualSizeLabel.hidden=false;manualSize.required=true;manualSize.disabled=false;applyManualSize();
    }
   }
  };
  sizeSelect.onchange=()=>{
   const custom=customSizeOption&&customSizeOption.selected;
   manualSizeLabel.hidden=!custom;manualSize.required=!!custom;manualSize.disabled=!custom;
-  if(custom){manualSize.max=form.elements.category.value==='carryout'?'4':'6';applyManualSize();manualSize.focus({preventScroll:true})}
+  if(custom){manualSize.max=form.elements.category.value==='carryout'?'4':'10';applyManualSize();manualSize.focus({preventScroll:true})}
  };
  manualSize.oninput=applyManualSize;
  sizes();form.elements.category.onchange=sizes;"""
     html=html[:start]+new+html[end:]
     html=html.replace('{standard:[3,4,5,6],vip:[4,6],elite:[4,6],carryout:[2,3,4]}',
-        '{standard:[2,3,4,5,6],vip:[2,3,4,5,6],elite:[2,3,4,5,6],carryout:[2,3,4]}')
+        '{standard:[2,3,4,5,6,7,8,9,10],vip:[2,3,4,5,6,7,8,9,10],elite:[2,3,4,5,6,7,8,9,10],carryout:[2,3,4]}')
     return html
 
 
@@ -24161,3 +24161,7 @@ async function cabinetUploadPhotoParts(body,notice){
  return retry(base+'/'+id+'/commit',{method:'POST'});
 }
 </script></body>""",1)
+
+# Private crews may contain up to ten people; GBU presets remain four/six.
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('[3,4,5,6].map(n=>', '[2,3,4,5,6,7,8,9,10].map(n=>').replace('[3,4,5,6].includes(teamSize())','[2,3,4,5,6,7,8,9,10].includes(teamSize())')
+INLINE_INDEX_HTML = INLINE_INDEX_HTML.replace('required min="0" max="6" step="1" inputmode="numeric"','required min="0" max="10" step="1" inputmode="numeric"')
