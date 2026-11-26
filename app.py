@@ -14209,9 +14209,15 @@ def dispatch_pair_demand(db, rows, requested):
         if not partner or order.id > partner.id: continue
         if any(o.status == 'draft' or o.category not in ('standard','vip','elite') or o.team_size <= 0
                for o in (order, partner)): continue
-        # Reuse the smaller crew; a 4+6 pair needs six distinct people.
+        # A pairing links orders, not necessarily identical crews. Once either
+        # crew is assigned, subtract only people actually present in both lists.
+        # Anonymous external members cannot safely be identified as the same person.
+        first_ids = {a.employee_id for a in dispatch_assignments(db, order)}
+        second_ids = {a.employee_id for a in dispatch_assignments(db, partner)}
         reused = min((order, partner), key=lambda o:(o.team_size, -o.id))
-        effective[reused.source] = max(0, effective[reused.source] - reused.team_size)
+        shared = (len(first_ids & second_ids) if first_ids or second_ids
+                  else reused.team_size)
+        effective[reused.source] = max(0, effective[reused.source] - min(shared, reused.team_size))
     return effective
 
 
